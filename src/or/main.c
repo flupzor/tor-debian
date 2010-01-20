@@ -563,7 +563,7 @@ conn_close_if_marked(int i)
       log_info(LD_NET,
                "Conn (addr %s, fd %d, type %s, state %d) marked, but wants "
                "to flush %d bytes. (Marked at %s:%d)",
-               escaped_safe_str(conn->address),
+               escaped_safe_str_client(conn->address),
                conn->s, conn_type_to_string(conn->type), conn->state,
                (int)conn->outbuf_flushlen,
                 conn->marked_for_close_file, conn->marked_for_close);
@@ -616,8 +616,8 @@ conn_close_if_marked(int i)
              "something is wrong with theirs. "
              "(fd %d, type %s, state %d, marked at %s:%d).",
              (int)buf_datalen(conn->outbuf),
-             escaped_safe_str(conn->address), conn->s,
-             conn_type_to_string(conn->type), conn->state,
+             escaped_safe_str_client(conn->address),
+             conn->s, conn_type_to_string(conn->type), conn->state,
              conn->marked_for_close_file,
              conn->marked_for_close);
     }
@@ -646,7 +646,7 @@ directory_all_unreachable(time_t now)
     log_notice(LD_NET,
                "Is your network connection down? "
                "Failing connection to '%s:%d'.",
-               safe_str(edge_conn->socks_request->address),
+               safe_str_client(edge_conn->socks_request->address),
                edge_conn->socks_request->port);
     connection_mark_unattached_ap(edge_conn,
                                   END_STREAM_REASON_NET_UNREACHABLE);
@@ -824,7 +824,6 @@ run_scheduled_events(time_t now)
   static time_t time_to_try_getting_descriptors = 0;
   static time_t time_to_reset_descriptor_failures = 0;
   static time_t time_to_add_entropy = 0;
-  static time_t time_to_write_hs_statistics = 0;
   static time_t time_to_write_bridge_status_file = 0;
   static time_t time_to_downrate_stability = 0;
   static time_t time_to_save_stability = 0;
@@ -832,6 +831,8 @@ run_scheduled_events(time_t now)
   static time_t time_to_recheck_bandwidth = 0;
   static time_t time_to_check_for_expired_networkstatus = 0;
   static time_t time_to_write_stats_files = 0;
+  static time_t time_to_write_bridge_stats = 0;
+  static int should_init_bridge_stats = 1;
   static time_t time_to_retry_dns_init = 0;
   or_options_t *options = get_options();
   int i;
@@ -966,7 +967,8 @@ run_scheduled_events(time_t now)
     if (options->CellStatistics || options->DirReqStatistics ||
         options->EntryStatistics || options->ExitPortStatistics) {
       if (!time_to_write_stats_files) {
-        /* Initialize stats. */
+        /* Initialize stats. We're doing this here and not in options_act,
+         * so that we know exactly when the 24 hours interval ends. */
         if (options->CellStatistics)
           rep_hist_buffer_stats_init(now);
         if (options->DirReqStatistics)
@@ -996,6 +998,28 @@ run_scheduled_events(time_t now)
       /* Never write stats to disk */
       time_to_write_stats_files = -1;
     }
+  }
+
+  /* 1h. Check whether we should write bridge statistics to disk.
+   */
+  if (should_record_bridge_info(options)) {
+    if (time_to_write_bridge_stats < now) {
+      if (should_init_bridge_stats) {
+        /* (Re-)initialize bridge statistics. */
+        geoip_bridge_stats_init(now);
+        time_to_write_bridge_stats = now + WRITE_STATS_INTERVAL;
+        should_init_bridge_stats = 0;
+      } else {
+        /* Possibly write bridge statistics to disk and ask when to write
+         * them next time. */
+        time_to_write_bridge_stats = geoip_bridge_stats_write(
+                                           time_to_write_bridge_stats);
+      }
+    }
+  } else if (!should_init_bridge_stats) {
+    /* Bridge mode was turned off. Ensure that stats are re-initialized
+     * next time bridge mode is turned on. */
+    should_init_bridge_stats = 1;
   }
 
   /* Remove old information from rephist and the rend cache. */
@@ -1165,12 +1189,6 @@ run_scheduled_events(time_t now)
     }
   }
 
-  /** 10. write hidden service usage statistic to disk */
-  if (options->HSAuthorityRecordStats && time_to_write_hs_statistics < now) {
-    hs_usage_write_statistics_to_file(now);
-#define WRITE_HSUSAGE_INTERVAL (30*60)
-    time_to_write_hs_statistics = now+WRITE_HSUSAGE_INTERVAL;
-  }
   /** 10b. write bridge networkstatus file to disk */
   if (options->BridgeAuthoritativeDir &&
       time_to_write_bridge_status_file < now) {
@@ -1277,14 +1295,6 @@ second_elapsed_callback(int fd, short event, void *args)
   run_scheduled_events(now);
 
   current_second = now; /* remember which second it is, for next time */
-
-#if 0
-  if (current_second % 300 == 0) {
-    rep_history_clean(current_second - options->RephistTrackTime);
-    dumpmemusage(get_min_log_level()<LOG_INFO ?
-                 get_min_log_level() : LOG_INFO);
-  }
-#endif
 
   if (event_add(timeout_event, &one_second))
     log_err(LD_NET,
@@ -1678,7 +1688,8 @@ dumpstats(int severity)
     if (!connection_is_listener(conn)) {
       log(severity,LD_GENERAL,
           "Conn %d is to %s:%d.", i,
-          safe_str(conn->address), conn->port);
+          safe_str_client(conn->address),
+          conn->port);
       log(severity,LD_GENERAL,
           "Conn %d: %d bytes waiting on inbuf (len %d, last read %d secs ago)",
           i,
@@ -1978,7 +1989,6 @@ tor_free_all(int postfork)
   rend_cache_free_all();
   rend_service_authorization_free_all();
   rep_hist_free_all();
-  hs_usage_free_all();
   dns_free_all();
   clear_pending_onions();
   circuit_free_all();
@@ -1997,12 +2007,10 @@ tor_free_all(int postfork)
     tor_tls_free_all();
   }
   /* stuff in main.c */
-  if (connection_array)
-    smartlist_free(connection_array);
-  if (closeable_connection_lst)
-    smartlist_free(closeable_connection_lst);
-  if (active_linked_connection_lst)
-    smartlist_free(active_linked_connection_lst);
+
+  smartlist_free(connection_array);
+  smartlist_free(closeable_connection_lst);
+  smartlist_free(active_linked_connection_lst);
   tor_free(timeout_event);
   if (!postfork) {
     release_lockfile();

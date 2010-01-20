@@ -266,6 +266,8 @@ static void
 vote_routerstatus_free(vote_routerstatus_t *rs)
 {
   vote_microdesc_hash_t *h, *next;
+  if (!rs)
+    return;
   tor_free(rs->version);
   tor_free(rs->status.exitsummary);
   for (h = rs->microdesc; h; h = next) {
@@ -280,6 +282,8 @@ vote_routerstatus_free(vote_routerstatus_t *rs)
 void
 routerstatus_free(routerstatus_t *rs)
 {
+  if (!rs)
+    return;
   tor_free(rs->exitsummary);
   tor_free(rs);
 }
@@ -288,6 +292,8 @@ routerstatus_free(routerstatus_t *rs)
 void
 networkstatus_v2_free(networkstatus_v2_t *ns)
 {
+  if (!ns)
+    return;
   tor_free(ns->source_address);
   tor_free(ns->contact);
   if (ns->signing_key)
@@ -355,8 +361,7 @@ networkstatus_vote_free(networkstatus_t *ns)
     } SMARTLIST_FOREACH_END(voter);
     smartlist_free(ns->voters);
   }
-  if (ns->cert)
-    authority_cert_free(ns->cert);
+  authority_cert_free(ns->cert);
 
   if (ns->routerstatus_list) {
     if (ns->type == NS_TYPE_VOTE || ns->type == NS_TYPE_OPINION) {
@@ -369,8 +374,8 @@ networkstatus_vote_free(networkstatus_t *ns)
 
     smartlist_free(ns->routerstatus_list);
   }
-  if (ns->desc_digest_map)
-    digestmap_free(ns->desc_digest_map, NULL);
+
+  digestmap_free(ns->desc_digest_map, NULL);
 
   memset(ns, 11, sizeof(*ns));
   tor_free(ns);
@@ -1511,7 +1516,7 @@ networkstatus_set_current_consensus(const char *consensus,
     goto done;
   }
 
-  if (c->flavor != flav) {
+  if ((int)c->flavor != flav) {
     /* This wasn't the flavor we thought we were getting. */
     if (require_flavor) {
       log_warn(LD_DIR, "Got consensus with unexpected flavor %s (wanted %s)",
@@ -1586,8 +1591,7 @@ networkstatus_set_current_consensus(const char *consensus,
       if (!current_valid_after ||
           c->valid_after > current_valid_after) {
         waiting = &consensus_waiting_for_certs[flav];
-        if (waiting->consensus)
-          networkstatus_vote_free(waiting->consensus);
+        networkstatus_vote_free(waiting->consensus);
         tor_free(waiting->body);
         waiting->consensus = c;
         c = NULL; /* Prevent free. */
@@ -1675,6 +1679,7 @@ networkstatus_set_current_consensus(const char *consensus,
     update_consensus_networkstatus_fetch_time(now);
     dirvote_recalculate_timing(get_options(), now);
     routerstatus_list_update_named_server_map();
+    cell_ewma_set_scale_factor(get_options(), current_consensus);
   }
 
   if (!from_cache) {
@@ -1699,8 +1704,7 @@ networkstatus_set_current_consensus(const char *consensus,
 
   result = 0;
  done:
-  if (c)
-    networkstatus_vote_free(c);
+  networkstatus_vote_free(c);
   tor_free(consensus_fname);
   tor_free(unverified_fname);
   return result;
@@ -1832,11 +1836,9 @@ routerstatus_list_update_named_server_map(void)
   if (!current_consensus)
     return;
 
-  if (named_server_map)
-    strmap_free(named_server_map, _tor_free);
+  strmap_free(named_server_map, _tor_free);
   named_server_map = strmap_new();
-  if (unnamed_server_map)
-    strmap_free(unnamed_server_map, NULL);
+  strmap_free(unnamed_server_map, NULL);
   unnamed_server_map = strmap_new();
   SMARTLIST_FOREACH(current_consensus->routerstatus_list, routerstatus_t *, rs,
     {
@@ -2083,7 +2085,7 @@ networkstatus_get_flavor_name(consensus_flavor_t flav)
 }
 
 /** Return the consensus_flavor_t value for the flavor called <b>flavname</b>,
- * or -1 if the flavor is not recongized. */
+ * or -1 if the flavor is not recognized. */
 int
 networkstatus_parse_flavor_name(const char *flavname)
 {
@@ -2153,14 +2155,12 @@ networkstatus_free_all(void)
     smartlist_free(networkstatus_v2_list);
     networkstatus_v2_list = NULL;
   }
-  if (v2_download_status_map) {
-    digestmap_free(v2_download_status_map, _tor_free);
-    v2_download_status_map = NULL;
-  }
-  if (current_consensus) {
-    networkstatus_vote_free(current_consensus);
-    current_consensus = NULL;
-  }
+
+  digestmap_free(v2_download_status_map, _tor_free);
+  v2_download_status_map = NULL;
+  networkstatus_vote_free(current_consensus);
+  current_consensus = NULL;
+
   for (i=0; i < N_CONSENSUS_FLAVORS; ++i) {
     consensus_waiting_for_certs_t *waiting = &consensus_waiting_for_certs[i];
     if (waiting->consensus) {
@@ -2169,11 +2169,8 @@ networkstatus_free_all(void)
     }
     tor_free(waiting->body);
   }
-  if (named_server_map) {
-    strmap_free(named_server_map, _tor_free);
-  }
-  if (unnamed_server_map) {
-    strmap_free(unnamed_server_map, NULL);
-  }
+
+  strmap_free(named_server_map, _tor_free);
+  strmap_free(unnamed_server_map, NULL);
 }
 

@@ -928,7 +928,7 @@ typedef struct connection_t {
                             * again once the bandwidth throttler allows it? */
   unsigned int write_blocked_on_bw:1; /**< Boolean: should we start writing
                              * again once the bandwidth throttler allows
-                             * reads? */
+                             * writes? */
   unsigned int hold_open_until_flushed:1; /**< Despite this connection's being
                                       * marked for close, do we flush it
                                       * before closing it? */
@@ -1062,12 +1062,13 @@ typedef struct or_connection_t {
   time_t timestamp_last_added_nonpadding; /** When did we last add a
                                            * non-padding cell to the outbuf? */
 
-  /* bandwidth* and read_bucket only used by ORs in OPEN state: */
+  /* bandwidth* and *_bucket only used by ORs in OPEN state: */
   int bandwidthrate; /**< Bytes/s added to the bucket. (OPEN ORs only.) */
   int bandwidthburst; /**< Max bucket size for this conn. (OPEN ORs only.) */
   int read_bucket; /**< When this hits 0, stop receiving. Every second we
                     * add 'bandwidthrate' to this, capping it at
                     * bandwidthburst. (OPEN ORs only) */
+  int write_bucket; /**< When this hits 0, stop writing. Like read_bucket. */
   int n_circuits; /**< How many circuits use this connection as p_conn or
                    * n_conn ? */
 
@@ -1075,6 +1076,17 @@ typedef struct or_connection_t {
    * free up on this connection's outbuf.  Every time we pull cells from a
    * circuit, we advance this pointer to the next circuit in the ring. */
   struct circuit_t *active_circuits;
+  /** Priority queue of cell_ewma_t for circuits with queued cells waiting for
+   * room to free up on this connection's outbuf.  Kept in heap order
+   * according to EWMA.
+   *
+   * This is redundant with active_circuits; if we ever decide only to use the
+   * cell_ewma algorithm for choosing circuits, we can remove active_circuits.
+   */
+  smartlist_t *active_circuit_pqueue;
+  /** The tick on which the cell_ewma_ts in active_circuit_pqueue last had
+   * their ewma values rescaled. */
+  unsigned active_circuit_pqueue_last_recalibrated;
   struct or_connection_t *next_with_same_id; /**< Next connection with same
                                               * identity digest as this one. */
 } or_connection_t;
@@ -1992,6 +2004,29 @@ typedef struct {
   time_t expiry_time;
 } cpath_build_state_t;
 
+/**
+ * The cell_ewma_t structure keeps track of how many cells a circuit has
+ * transferred recently.  It keeps an EWMA (exponentially weighted moving
+ * average) of the number of cells flushed from the circuit queue onto a
+ * connection in connection_or_flush_from_first_active_circuit().
+ */
+typedef struct {
+  /** The last 'tick' at which we recalibrated cell_count.
+   *
+   * A cell sent at exactly the start of this tick has weight 1.0. Cells sent
+   * since the start of this tick have weight greater than 1.0; ones sent
+   * earlier have less weight. */
+  unsigned last_adjusted_tick;
+  /** The EWMA of the cell count. */
+  double cell_count;
+  /** True iff this is the cell count for a circuit's previous
+   * connection. */
+  unsigned int is_for_p_conn : 1;
+  /** The position of the circuit within the OR connection's priority
+   * queue. */
+  int heap_index;
+} cell_ewma_t;
+
 #define ORIGIN_CIRCUIT_MAGIC 0x35315243u
 #define OR_CIRCUIT_MAGIC 0x98ABC04Fu
 
@@ -2081,6 +2116,11 @@ typedef struct circuit_t {
 
   /** Unique ID for measuring tunneled network status requests. */
   uint64_t dirreq_id;
+
+  /** The EWMA count for the number of cells flushed from the
+   * n_conn_cells queue.  Used to determine which circuit to flush from next.
+   */
+  cell_ewma_t n_cell_ewma;
 } circuit_t;
 
 /** Largest number of relay_early cells that we can send on a given
@@ -2212,6 +2252,10 @@ typedef struct or_circuit_t {
    * exit-ward queues of this circuit; reset every time when writing
    * buffer stats to disk. */
   uint64_t total_cell_waiting_time;
+
+  /** The EWMA count for the number of cells flushed from the
+   * p_conn_cells queue. */
+  cell_ewma_t p_cell_ewma;
 } or_circuit_t;
 
 /** Convert a circuit subtype to a circuit_t.*/
@@ -2283,22 +2327,22 @@ typedef struct {
   routerset_t *EntryNodes;/**< Structure containing nicknames, digests,
                            * country codes and IP address patterns of ORs to
                            * consider as entry points. */
-  int StrictExitNodes; /**< Boolean: When none of our ExitNodes are up, do we
-                        * stop building circuits? */
-  int StrictEntryNodes; /**< Boolean: When none of our EntryNodes are up, do we
-                         * stop building circuits? */
-  int DisableAllSwap; /**< Boolean: Attempt to call mlockall() on our
-                               * process for all current and future memory. */
-
+  int StrictNodes; /**< Boolean: When none of our EntryNodes or ExitNodes
+                    * are up, or we need to access a node in ExcludeNodes,
+                    * do we just fail instead? */
   routerset_t *ExcludeNodes;/**< Structure containing nicknames, digests,
                              * country codes and IP address patterns of ORs
-                             * not to use in circuits. */
+                             * not to use in circuits. But see StrictNodes
+                             * above. */
   routerset_t *ExcludeExitNodes;/**< Structure containing nicknames, digests,
                                  * country codes and IP address patterns of
                                  * ORs not to consider as exits. */
 
   /** Union of ExcludeNodes and ExcludeExitNodes */
   struct routerset_t *_ExcludeExitNodesUnion;
+
+  int DisableAllSwap; /**< Boolean: Attempt to call mlockall() on our
+                       * process for all current and future memory. */
 
   /** List of "entry", "middle", "exit", "introduction", "rendezvous". */
   smartlist_t *AllowInvalidNodes;
@@ -2354,8 +2398,6 @@ typedef struct {
                            * for version 3 directories? */
   int HSAuthoritativeDir; /**< Boolean: does this an authoritative directory
                            * handle hidden service requests? */
-  int HSAuthorityRecordStats; /**< Boolean: does this HS authoritative
-                               * directory record statistics? */
   int NamingAuthoritativeDir; /**< Boolean: is this an authoritative directory
                                * that's willing to bind names? */
   int VersioningAuthoritativeDir; /**< Boolean: is this an authoritative
@@ -2445,10 +2487,15 @@ typedef struct {
                         * connections alive? */
   int SocksTimeout; /**< How long do we let a socks connection wait
                      * unattached before we fail it? */
-  int CircuitBuildTimeout; /**< Cull non-open circuits that were born
-                            * at least this many seconds ago. */
+  int CircuitBuildTimeout; /**< If non-zero, cull non-open circuits that
+                            * were born at least this many seconds ago. If
+                            * zero, use the internal adaptive algorithm. */
   int CircuitIdleTimeout; /**< Cull open clean circuits that were born
                            * at least this many seconds ago. */
+  int CircuitStreamTimeout; /**< If non-zero, detach streams from circuits
+                             * and try a new circuit if the stream has been
+                             * waiting for this many seconds. If zero, use
+                             * our default internal timeout schedule. */
   int MaxOnionsPending; /**< How many circuit CREATE requests do we allow
                          * to wait simultaneously before we start dropping
                          * them? */
@@ -2466,6 +2513,8 @@ typedef struct {
                                  * willing to use for all relayed conns? */
   uint64_t RelayBandwidthBurst; /**< How much bandwidth, at maximum, will we
                                  * use in a second for all relayed conns? */
+  uint64_t PerConnBWRate; /**< Long-term bw on a single TLS conn, if set. */
+  uint64_t PerConnBWBurst; /**< Allowed burst on a single TLS conn, if set. */
   int NumCpus; /**< How many CPUs should we try to use? */
   int RunTesting; /**< If true, create testing circuits to measure how well the
                    * other ORs are running. */
@@ -2556,8 +2605,13 @@ typedef struct {
                                  * or not (1)? */
   int ShutdownWaitLength; /**< When we get a SIGINT and we're a server, how
                            * long do we wait before exiting? */
-  int SafeLogging; /**< Boolean: are we allowed to log sensitive strings
-                    * such as addresses (0), or do we scrub them first (1)? */
+  char *SafeLogging; /**< Contains "relay", "1", "0" (meaning no scrubbing). */
+
+  /* Derived from SafeLogging */
+  enum {
+    SAFELOG_SCRUB_ALL, SAFELOG_SCRUB_RELAY, SAFELOG_SCRUB_NONE
+  } _SafeLogging;
+
   int SafeSocks; /**< Boolean: should we outright refuse application
                   * connections that use socks4 or socks5-with-local-dns? */
 #define LOG_PROTOCOL_WARN (get_options()->ProtocolWarnings ? \
@@ -2715,25 +2769,27 @@ typedef struct {
    * the bridge authority guess which countries have blocked access to us. */
   int BridgeRecordUsageByCountry;
 
-#if 0
-  /** If true, and Tor is built with DIRREQ_STATS support, and we're a
-   * directory, record how many directory requests we get from each country. */
-  int DirRecordUsageByCountry;
-  /** Round all GeoIP results to the next multiple of this value, to avoid
-   * leaking information. */
-  int DirRecordUsageGranularity;
-  /** Time interval: purge geoip stats after this long. */
-  int DirRecordUsageRetainIPs;
-  /** Time interval: Flush geoip data to disk this often. */
-  int DirRecordUsageSaveInterval;
-#endif
-
   /** Optionally, a file with GeoIP data. */
   char *GeoIPFile;
 
   /** If true, SIGHUP should reload the torrc.  Sometimes controllers want
    * to make this false. */
   int ReloadTorrcOnSIGHUP;
+
+  /* The main parameter for picking circuits within a connection.
+   *
+   * If this value is positive, when picking a cell to relay on a connection,
+   * we always relay from the circuit whose weighted cell count is lowest.
+   * Cells are weighted exponentially such that if one cell is sent
+   * 'CircuitPriorityHalflife' seconds before another, it counts for half as
+   * much.
+   *
+   * If this value is zero, we're disabling the cell-EWMA algorithm.
+   *
+   * If this value is negative, we're using the default approach
+   * according to either Tor or a parameter set in the consensus.
+   */
+  double CircuitPriorityHalflife;
 
 } or_options_t;
 
@@ -2923,7 +2979,7 @@ void entry_guards_compute_status(void);
 int entry_guard_register_connect_status(const char *digest, int succeeded,
                                         int mark_relay_status, time_t now);
 void entry_nodes_should_be_added(void);
-int entry_list_can_grow(or_options_t *options);
+int entry_list_is_constrained(or_options_t *options);
 routerinfo_t *choose_random_entry(cpath_build_state_t *state);
 int entry_guards_parse_state(or_state_t *state, int set, char **msg);
 void entry_guards_update_state(or_state_t *state);
@@ -2997,7 +3053,7 @@ typedef uint32_t build_time_t;
  * at which point we switch back to computing the timeout from
  * our saved history.
  */
-#define NETWORK_NONLIVE_TIMEOUT_COUNT (lround(RECENT_CIRCUITS*0.15))
+#define NETWORK_NONLIVE_TIMEOUT_COUNT (RECENT_CIRCUITS*3/20)
 
 /**
  * This tells us when to toss out the last streak of N timeouts.
@@ -3005,7 +3061,7 @@ typedef uint32_t build_time_t;
  * If instead we start getting cells, we switch back to computing the timeout
  * from our saved history.
  */
-#define NETWORK_NONLIVE_DISCARD_COUNT (lround(NETWORK_NONLIVE_TIMEOUT_COUNT*2))
+#define NETWORK_NONLIVE_DISCARD_COUNT (NETWORK_NONLIVE_TIMEOUT_COUNT*2)
 
 /**
  * Maximum count of timeouts that finish the first hop in the past
@@ -3014,7 +3070,12 @@ typedef uint32_t build_time_t;
  * This tells us to abandon timeout history and set
  * the timeout back to BUILD_TIMEOUT_INITIAL_VALUE.
  */
-#define MAX_RECENT_TIMEOUT_COUNT (lround(RECENT_CIRCUITS*0.8))
+#define MAX_RECENT_TIMEOUT_COUNT (RECENT_CIRCUITS*4/5)
+
+#if MAX_RECENT_TIMEOUT_COUNT < 1 || NETWORK_NONLIVE_DISCARD_COUNT < 1 || \
+  NETWORK_NONLIVE_TIMEOUT_COUNT < 1
+#error "RECENT_CIRCUITS is set too low."
+#endif
 
 /** Information about the state of our local network connection */
 typedef struct {
@@ -3202,7 +3263,9 @@ const char *get_dirportfrontpage(void);
 or_options_t *get_options(void);
 int set_options(or_options_t *new_val, char **msg);
 void config_free_all(void);
+const char *safe_str_client(const char *address);
 const char *safe_str(const char *address);
+const char *escaped_safe_str_client(const char *address);
 const char *escaped_safe_str(const char *address);
 const char *get_version(void);
 
@@ -3214,6 +3277,7 @@ int resolve_my_address(int warn_severity, or_options_t *options,
                        uint32_t *addr, char **hostname_out);
 int is_local_addr(const tor_addr_t *addr) ATTR_PURE;
 void options_init(or_options_t *options);
+char *options_dump(or_options_t *options, int minimal);
 int options_init_from_torrc(int argc, char **argv);
 setopt_err_t options_init_from_string(const char *cf,
                             int command, const char *command_arg, char **msg);
@@ -3378,7 +3442,8 @@ int connection_exit_begin_conn(cell_t *cell, circuit_t *circ);
 int connection_exit_begin_resolve(cell_t *cell, or_circuit_t *circ);
 void connection_exit_connect(edge_connection_t *conn);
 int connection_edge_is_rendezvous_stream(edge_connection_t *conn);
-int connection_ap_can_use_exit(edge_connection_t *conn, routerinfo_t *exit);
+int connection_ap_can_use_exit(edge_connection_t *conn, routerinfo_t *exit,
+                               int excluded_means_no);
 void connection_ap_expire_beginning(void);
 void connection_ap_attach_pending(void);
 void connection_ap_fail_onehop(const char *failed_digest,
@@ -3612,8 +3677,7 @@ typedef enum {
 void control_event_bootstrap(bootstrap_status_t status, int progress);
 void control_event_bootstrap_problem(const char *warn, int reason);
 
-void control_event_clients_seen(const char *timestarted,
-                                const char *countries);
+void control_event_clients_seen(const char *controller_str);
 
 #ifdef CONTROL_PRIVATE
 /* Used only by control.c and test.c */
@@ -4071,6 +4135,10 @@ void geoip_dirreq_stats_init(time_t now);
 void geoip_dirreq_stats_write(time_t now);
 void geoip_entry_stats_init(time_t now);
 void geoip_entry_stats_write(time_t now);
+void geoip_bridge_stats_init(time_t now);
+time_t geoip_bridge_stats_write(time_t now);
+char *geoip_get_bridge_stats_extrainfo(time_t);
+char *geoip_get_bridge_stats_controller(time_t);
 
 /********************************* hibernate.c **********************/
 
@@ -4434,6 +4502,9 @@ int append_address_to_payload(char *payload_out, const tor_addr_t *addr);
 const char *decode_address_from_payload(tor_addr_t *addr_out,
                                         const char *payload,
                                         int payload_len);
+unsigned cell_ewma_get_tick(void);
+void cell_ewma_set_scale_factor(or_options_t *options,
+                                networkstatus_t *consensus);
 
 /********************************* rephist.c ***************************/
 
@@ -4731,7 +4802,6 @@ int router_dump_router_to_string(char *s, size_t maxlen, routerinfo_t *router,
                                  crypto_pk_env_t *ident_key);
 int extrainfo_dump_to_string(char *s, size_t maxlen, extrainfo_t *extrainfo,
                              crypto_pk_env_t *ident_key);
-char *extrainfo_get_client_geoip_summary(time_t);
 int is_legal_nickname(const char *s);
 int is_legal_nickname_or_hexdigest(const char *s);
 int is_legal_hexdigest(const char *s);
@@ -4870,13 +4940,10 @@ typedef enum {
   CRN_NEED_GUARD = 1<<2,
   CRN_ALLOW_INVALID = 1<<3,
   /* XXXX not used, apparently. */
-  CRN_STRICT_PREFERRED = 1<<4,
-  /* XXXX not used, apparently. */
   CRN_WEIGHT_AS_EXIT = 1<<5
 } router_crn_flags_t;
 
-routerinfo_t *router_choose_random_node(const char *preferred,
-                                        smartlist_t *excludedsmartlist,
+routerinfo_t *router_choose_random_node(smartlist_t *excludedsmartlist,
                                         struct routerset_t *excludedset,
                                         router_crn_flags_t flags);
 
@@ -5116,6 +5183,8 @@ int rend_parse_introduction_points(rend_service_descriptor_t *parsed,
                                    const char *intro_points_encoded,
                                    size_t intro_points_encoded_size);
 int rend_parse_client_keys(strmap_t *parsed_clients, const char *str);
+
+void tor_gettimeofday_cache_clear(void);
 
 #endif
 

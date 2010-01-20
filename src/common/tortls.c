@@ -589,6 +589,18 @@ tor_tls_context_new(crypto_pk_env_t *identity, unsigned int key_lifetime)
   SSL_CTX_set_options(result->ctx,
                       SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION);
 #endif
+#ifdef SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION
+  /* Yes, we know what we are doing here.  No, we do not treat a renegotiation
+   * as authenticating any earlier-received data.
+   *
+   * (OpenSSL 0.9.8l introdeced SSL3_FLAGS_ALLOW_UNSAGE_LEGACY_RENEGOTIATION
+   * here.  OpenSSL 0.9.8m thoughtfully turned it into an option and (it
+   * seems) broke anything that used SSL3_FLAGS_* for the purpose.  So we need
+   * to do both.)
+   */
+  SSL_CTX_set_options(result->ctx,
+                      SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION);
+#endif
   /* Don't actually allow compression; it uses ram and time, but the data
    * we transmit is all encrypted anyway. */
   if (result->ctx->comp_methods)
@@ -974,7 +986,9 @@ void
 tor_tls_free(tor_tls_t *tls)
 {
   tor_tls_t *removed;
-  tor_assert(tls && tls->ssl);
+  if (!tls)
+    return;
+  tor_assert(tls->ssl);
   removed = HT_REMOVE(tlsmap, &tlsmap_root, tls);
   if (!removed) {
     log_warn(LD_BUG, "Freeing a TLS that was not in the ssl->tls map.");
@@ -1300,10 +1314,8 @@ log_cert_lifetime(X509 *cert, const char *problem)
   tls_log_errors(NULL, LOG_WARN, LD_NET, "getting certificate lifetime");
   if (bio)
     BIO_free(bio);
-  if (s1)
-    tor_free(s1);
-  if (s2)
-    tor_free(s2);
+  tor_free(s1);
+  tor_free(s2);
 }
 
 /** Helper function: try to extract a link certificate and an identity

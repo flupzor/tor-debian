@@ -4,7 +4,7 @@ dnl Copyright (c) 2007-2008, The Tor Project, Inc.
 dnl See LICENSE for licensing information
 
 AC_INIT
-AM_INIT_AUTOMAKE(tor, 0.2.2.6-alpha)
+AM_INIT_AUTOMAKE(tor, 0.2.2.7-alpha)
 AM_CONFIG_HEADER(orconfig.h)
 
 AC_CANONICAL_HOST
@@ -629,9 +629,14 @@ if test x$tcmalloc = xyes ; then
 fi
 
 # By default, we're going to assume we don't have mlockall()
-# bionic and other platforms have various broken mlockall subsystems
-# some of systems don't have a working mlockall, some aren't linkable
+# bionic and other platforms have various broken mlockall subsystems.
+# Some systems don't have a working mlockall, some aren't linkable,
+# and some have it but don't declare it.
 AC_CHECK_FUNCS(mlockall)
+AC_CHECK_DECLS([mlockall], , , [
+#ifdef HAVE_SYS_MMAN_H
+#include <sys/mman.h>
+#endif])
 
 # Allow user to specify an alternate syslog facility
 AC_ARG_WITH(syslog-facility,

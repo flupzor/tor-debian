@@ -81,7 +81,7 @@ should_log_function_name(log_domain_mask_t domain, int severity)
       /* All debugging messages occur in interesting places. */
       return 1;
     case LOG_NOTICE:
-  case LOG_WARN:
+    case LOG_WARN:
     case LOG_ERR:
       /* We care about places where bugs occur. */
       return (domain == LD_BUG);
@@ -328,7 +328,7 @@ logv(int severity, log_domain_mask_t domain, const char *funcname,
 
 /** Output a message to the log. */
 void
-_log(int severity, log_domain_mask_t domain, const char *format, ...)
+tor_log(int severity, log_domain_mask_t domain, const char *format, ...)
 {
   va_list ap;
   if (severity > _log_global_min_severity)
@@ -426,6 +426,8 @@ _log_err(log_domain_mask_t domain, const char *format, ...)
 static void
 log_free(logfile_t *victim)
 {
+  if (!victim)
+    return;
   tor_free(victim->severities);
   tor_free(victim->filename);
   tor_free(victim);

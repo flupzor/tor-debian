@@ -97,6 +97,20 @@ _relayed traffic_ to the
 given number of bytes in each direction. (Default: 0)
 .LP
 .TP
+\fBPerConnBWRate \fR\fIN\fR \fBbytes\fR|\fBKB\fR|\fBMB\fR|\fBGB\fR|\fBTB\fP
+If set, do separate rate limiting for each connection from a non-relay.
+You should never need to change this value, since a network-wide value
+is published in the consensus and your relay will use that value.
+(Default: 0)
+.LP
+.TP
+\fBPerConnBWBurst \fR\fIN\fR \fBbytes\fR|\fBKB\fR|\fBMB\fR|\fBGB\fR|\fBTB\fP
+If set, do separate rate limiting for each connection from a non-relay.
+You should never need to change this value, since a network-wide value
+is published in the consensus and your relay will use that value.
+(Default: 0)
+.LP
+.TP
 \fBConnLimit \fR\fINUM\fP
 The minimum number of file descriptors that must be available to
 the Tor process before it will start. Tor will ask the OS for as
@@ -377,11 +391,16 @@ no effect on Windows; instead you should use the --service command-line
 option. (Default: 0)
 .LP
 .TP
-\fBSafeLogging \fR\fB0\fR|\fB1\fP
-If 1, Tor replaces potentially sensitive strings in the logs
-(e.g. addresses) with the string [scrubbed]. This way logs can still be
+\fBSafeLogging \fR\fB0\fR|\fB1\fR|\fBrelay\fP
+Tor can scrub potentially sensitive strings from log messages (e.g. addresses)
+by replacing them with the string [scrubbed]. This way logs can still be
 useful, but they don't leave behind personally identifying information
-about what sites a user might have visited. (Default: 1)
+about what sites a user might have visited.
+
+If this option is set to 0, Tor will not perform any scrubbing, if it is set
+to 1, all potentially sensitive strings are replaced. If it is set to
+relay, all log messages generated when acting as a relay are sanitized, but all
+messages generated when acting as a client are not. (Default: 1)
 .LP
 .TP
 \fBUser \fR\fIUID\fP
@@ -419,6 +438,19 @@ ORPort. (Default: 1)
 \fBPreferTunneledDirConns \fR\fB0\fR|\fB1\fP
 If non-zero, we will avoid directory servers that don't support tunneled
 directory connections, when possible. (Default: 1)
+.LP
+.TP
+\fBCircuitPriorityHalflife \fR\fBNUM\fB1\fP
+If this value is set, we override the default algorithm for choosing which
+circuit's cell to deliver or relay next.  When the value is 0, we
+round-robin between the active circuits on a connection, delivering one cell
+from each in turn.  When the value is positive, we prefer delivering cells
+from whichever connection has the lowest weighted cell count, where cells are
+weighted exponentially according to the supplied CircuitPriorityHalflife
+value (in seconds).  If this option is not set at all, we use the behavior
+recommended in the current consensus networkstatus.
+This is an advanced option; you generally shouldn't have mess with it.
+(Default: not set.)
 
 .SH CLIENT OPTIONS
 .PP
@@ -466,6 +498,13 @@ circuit list.
 (Default: 1 hour.)
 .LP
 .TP
+\fBCircuitStreamTimeout \fR\fINUM\fP
+If non-zero, this option overrides our internal timeout schedule for
+how many seconds until we detach a stream from a circuit and try a new
+circuit. If your network is particularly slow, you might want to set
+this to a number like 60. (Default: 0)
+.LP
+.TP
 \fBClientOnly \fR\fB0\fR|\fB1\fR\fP
 If set to 1, Tor will under no circumstances run as a server or serve
 directory requests. The default
@@ -490,26 +529,25 @@ list.
 .TP
 \fBEntryNodes \fR\fInode\fR,\fInode\fR,\fI...\fP
 A list of identity fingerprints, nicknames, country codes and address patterns
-of nodes to use for the first hop in the circuit.
-These are treated only as preferences unless StrictEntryNodes (see
+of nodes to use for the first hop in normal circuits.
+These are treated only as preferences unless StrictNodes (see
 below) is also set.
 .LP
 .TP
 \fBExitNodes \fR\fInode\fR,\fInode\fR,\fI...\fP
 A list of identity fingerprints, nicknames, country codes and address patterns
-of nodes to use for the last hop in the circuit.
-These are treated only as preferences unless StrictExitNodes (see
+of nodes to use for the last hop in normal exit circuits.
+These are treated only as preferences unless StrictNodes (see
 below) is also set.
 .LP
 .TP
-\fBStrictEntryNodes \fR\fB0\fR|\fB1\fR\fP
-If 1, Tor will never use any nodes besides those listed in "EntryNodes" for
-the first hop of a circuit.
-.LP
-.TP
-\fBStrictExitNodes \fR\fB0\fR|\fB1\fR\fP
-If 1, Tor will never use any nodes besides those listed in "ExitNodes" for
-the last hop of a circuit.
+\fBStrictNodes \fR\fB0\fR|\fB1\fR\fP
+If 1 and EntryNodes config option is set, Tor will never use any
+nodes besides those listed in EntryNodes for the first hop of a normal
+circuit. If 1 and ExitNodes config option is set, Tor will never use any
+nodes besides those listed in ExitNodes for the last hop of a normal exit
+circuit. Note that Tor might still use these nodes for non-exit circuits
+such as one-hop directory fetches or hidden service support circuits.
 .LP
 .TP
 \fBFascistFirewall \fR\fB0\fR|\fB1\fR\fP
@@ -1183,12 +1221,6 @@ section below.
 \fBHSAuthoritativeDir \fR\fB0\fR|\fB1\fR\fP
 When this option is set in addition to \fBAuthoritativeDirectory\fP, Tor also
 accepts and serves hidden service descriptors. (Default: 0)
-.LP
-.TP
-\fBHSAuthorityRecordStats \fR\fB0\fR|\fB1\fR\fP
-When this option is set in addition to \fBHSAuthoritativeDir\fP, Tor
-periodically (every 15 minutes) writes statistics about hidden service
-usage to a file \fBhsusage\fP  in its data directory. (Default: 0)
 .LP
 .TP
 \fBHidServDirectoryV2 \fR\fB0\fR|\fB1\fR\fP

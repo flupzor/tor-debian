@@ -43,7 +43,7 @@
  * stderr. */
 #define tor_assert(expr) STMT_BEGIN                                     \
     if (PREDICT_UNLIKELY(!(expr))) {                                    \
-      log(LOG_ERR, LD_BUG, "%s:%d: %s: Assertion %s failed; aborting.", \
+      log_err(LD_BUG, "%s:%d: %s: Assertion %s failed; aborting.",      \
           _SHORT_FILE_, __LINE__, __func__, #expr);                     \
       fprintf(stderr,"%s:%d %s: Assertion %s failed; aborting.\n",      \
               _SHORT_FILE_, __LINE__, __func__, #expr);                 \
@@ -152,6 +152,8 @@ void tor_log_mallinfo(int severity);
 #define bool_neq(a,b) (!(a)!=!(b))
 
 /* Math functions */
+double tor_mathlog(double d) ATTR_CONST;
+long tor_lround(double d) ATTR_CONST;
 int tor_log2(uint64_t u64) ATTR_CONST;
 uint64_t round_to_power_of_2(uint64_t u64);
 unsigned round_to_next_multiple_of(unsigned number, unsigned divisor);
@@ -193,6 +195,8 @@ const char *eat_whitespace_no_nl(const char *s) ATTR_PURE;
 const char *eat_whitespace_eos_no_nl(const char *s, const char *eos) ATTR_PURE;
 const char *find_whitespace(const char *s) ATTR_PURE;
 const char *find_whitespace_eos(const char *s, const char *eos) ATTR_PURE;
+const char *find_str_at_start_of_line(const char *haystack, const char *needle)
+  ATTR_PURE;
 int tor_mem_is_zero(const char *mem, size_t len) ATTR_PURE;
 int tor_digest_is_zero(const char *digest) ATTR_PURE;
 int tor_digest256_is_zero(const char *digest) ATTR_PURE;

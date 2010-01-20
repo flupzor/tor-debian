@@ -165,9 +165,7 @@ tor_gzip_compress(char **out, size_t *out_len,
     deflateEnd(stream);
     tor_free(stream);
   }
-  if (*out) {
-    tor_free(*out);
-  }
+  tor_free(*out);
   return -1;
 }
 
@@ -423,7 +421,8 @@ tor_zlib_process(tor_zlib_state_t *state,
 void
 tor_zlib_free(tor_zlib_state_t *state)
 {
-  tor_assert(state);
+  if (!state)
+    return;
 
   if (state->compress)
     deflateEnd(&state->stream);

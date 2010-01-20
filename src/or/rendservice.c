@@ -87,7 +87,8 @@ num_rend_services(void)
 static void
 rend_authorized_client_free(rend_authorized_client_t *client)
 {
-  if (!client) return;
+  if (!client)
+    return;
   if (client->client_key)
     crypto_free_pk_env(client->client_key);
   tor_free(client->client_name);
@@ -106,7 +107,9 @@ rend_authorized_client_strmap_item_free(void *authorized_client)
 static void
 rend_service_free(rend_service_t *service)
 {
-  if (!service) return;
+  if (!service)
+    return;
+
   tor_free(service->directory);
   SMARTLIST_FOREACH(service->ports, void*, p, tor_free(p));
   smartlist_free(service->ports);
@@ -117,15 +120,14 @@ rend_service_free(rend_service_t *service)
       rend_intro_point_free(intro););
     smartlist_free(service->intro_nodes);
   }
-  if (service->desc)
-    rend_service_descriptor_free(service->desc);
+
+  rend_service_descriptor_free(service->desc);
   if (service->clients) {
     SMARTLIST_FOREACH(service->clients, rend_authorized_client_t *, c,
       rend_authorized_client_free(c););
     smartlist_free(service->clients);
   }
-  if (service->accepted_intros)
-    digestmap_free(service->accepted_intros, _tor_free);
+  digestmap_free(service->accepted_intros, _tor_free);
   tor_free(service);
 }
 
@@ -134,9 +136,9 @@ rend_service_free(rend_service_t *service)
 void
 rend_service_free_all(void)
 {
-  if (!rend_service_list) {
+  if (!rend_service_list)
     return;
-  }
+
   SMARTLIST_FOREACH(rend_service_list, rend_service_t*, ptr,
                     rend_service_free(ptr));
   smartlist_free(rend_service_list);
@@ -458,7 +460,7 @@ rend_config_services(or_options_t *options, int validate_only)
         if (keep_it)
           continue;
         log_info(LD_REND, "Closing intro point %s for service %s.",
-                 safe_str(oc->build_state->chosen_exit->nickname),
+                 safe_str_client(oc->build_state->chosen_exit->nickname),
                  oc->rend_data->onion_address);
         circuit_mark_for_close(circ, END_CIRC_REASON_FINISHED);
         /* XXXX Is there another reason we should use here? */
@@ -482,10 +484,10 @@ rend_service_update_descriptor(rend_service_t *service)
   rend_service_descriptor_t *d;
   origin_circuit_t *circ;
   int i;
-  if (service->desc) {
-    rend_service_descriptor_free(service->desc);
-    service->desc = NULL;
-  }
+
+  rend_service_descriptor_free(service->desc);
+  service->desc = NULL;
+
   d = service->desc = tor_malloc_zero(sizeof(rend_service_descriptor_t));
   d->pk = crypto_pk_dup_key(service->private_key);
   d->timestamp = time(NULL);
@@ -1015,7 +1017,7 @@ rend_service_introduce(origin_circuit_t *circuit, const char *request,
     router = router_get_by_nickname(rp_nickname, 0);
     if (!router) {
       log_info(LD_REND, "Couldn't find router %s named in introduce2 cell.",
-               escaped_safe_str(rp_nickname));
+               escaped_safe_str_client(rp_nickname));
       /* XXXX Add a no-such-router reason? */
       reason = END_CIRC_REASON_TORPROTOCOL;
       goto err;
@@ -1117,14 +1119,16 @@ rend_service_introduce(origin_circuit_t *circuit, const char *request,
   if (!launched) { /* give up */
     log_warn(LD_REND, "Giving up launching first hop of circuit to rendezvous "
              "point %s for service %s.",
-             escaped_safe_str(extend_info->nickname), serviceid);
+             escaped_safe_str_client(extend_info->nickname),
+             serviceid);
     reason = END_CIRC_REASON_CONNECTFAILED;
     goto err;
   }
   log_info(LD_REND,
            "Accepted intro; launching circuit to %s "
            "(cookie %s) for service %s.",
-           escaped_safe_str(extend_info->nickname), hexcookie, serviceid);
+           escaped_safe_str_client(extend_info->nickname),
+           hexcookie, serviceid);
   tor_assert(launched->build_state);
   /* Fill in the circuit's state. */
   launched->rend_data = tor_malloc_zero(sizeof(rend_data_t));
@@ -1219,7 +1223,7 @@ rend_service_launch_establish_intro(rend_service_t *service,
 
   log_info(LD_REND,
            "Launching circuit to introduction point %s for service %s",
-           escaped_safe_str(intro->extend_info->nickname),
+           escaped_safe_str_client(intro->extend_info->nickname),
            service->service_id);
 
   rep_hist_note_used_internal(time(NULL), 1, 0);
@@ -1232,7 +1236,7 @@ rend_service_launch_establish_intro(rend_service_t *service,
   if (!launched) {
     log_info(LD_REND,
              "Can't launch circuit to establish introduction at %s.",
-             escaped_safe_str(intro->extend_info->nickname));
+             escaped_safe_str_client(intro->extend_info->nickname));
     return -1;
   }
 
@@ -1580,8 +1584,8 @@ directory_post_to_hs_dir(rend_service_descriptor_t *renddesc,
                         "service '%s' with descriptor ID '%s' with validity "
                         "of %d seconds to hidden service directory '%s' on "
                         "%s:%d.",
-               safe_str(service_id),
-               safe_str(desc_id_base32),
+               safe_str_client(service_id),
+               safe_str_client(desc_id_base32),
                seconds_valid,
                hs_dir->nickname,
                hs_dir_ip,
@@ -1821,7 +1825,7 @@ rend_services_introduce(void)
       router_crn_flags_t flags = CRN_NEED_UPTIME;
       if (get_options()->_AllowInvalid & ALLOW_INVALID_INTRODUCTION)
         flags |= CRN_ALLOW_INVALID;
-      router = router_choose_random_node(NULL, intro_routers,
+      router = router_choose_random_node(intro_routers,
                                          options->ExcludeNodes, flags);
       if (!router) {
         log_warn(LD_REND,
@@ -1953,7 +1957,7 @@ rend_service_dump_stats(int severity)
         service->directory);
     for (j=0; j < smartlist_len(service->intro_nodes); ++j) {
       intro = smartlist_get(service->intro_nodes, j);
-      safe_name = safe_str(intro->extend_info->nickname);
+      safe_name = safe_str_client(intro->extend_info->nickname);
 
       circ = find_intro_circuit(intro, service->pk_digest);
       if (!circ) {

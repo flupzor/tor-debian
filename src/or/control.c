@@ -114,8 +114,6 @@ static int handle_control_setevents(control_connection_t *conn, uint32_t len,
 static int handle_control_authenticate(control_connection_t *conn,
                                        uint32_t len,
                                        const char *body);
-static int handle_control_saveconf(control_connection_t *conn, uint32_t len,
-                                   const char *body);
 static int handle_control_signal(control_connection_t *conn, uint32_t len,
                                  const char *body);
 static int handle_control_mapaddress(control_connection_t *conn, uint32_t len,
@@ -281,7 +279,7 @@ connection_write_str_to_buf(const char *s, control_connection_t *conn)
 /** Given a <b>len</b>-character string in <b>data</b>, made of lines
  * terminated by CRLF, allocate a new string in *<b>out</b>, and copy the
  * contents of <b>data</b> into *<b>out</b>, adding a period before any period
- * that that appears at the start of a line, and adding a period-CRLF line at
+ * that appears at the start of a line, and adding a period-CRLF line at
  * the end. Replace all LF characters sequences with CRLF.  Return the number
  * of bytes in *<b>out</b>.
  */
@@ -1248,7 +1246,7 @@ handle_control_mapaddress(control_connection_t *conn, uint32_t len,
           smartlist_add(reply, ans);
           log_warn(LD_CONTROL,
                    "Unable to allocate address for '%s' in MapAddress msg",
-                   safe_str(line));
+                   safe_str_client(line));
         } else {
           tor_snprintf(ans, anslen, "250-%s=%s", address, to);
           smartlist_add(reply, ans);
@@ -1265,7 +1263,8 @@ handle_control_mapaddress(control_connection_t *conn, uint32_t len,
                    "not of expected form 'foo=bar'.", line);
       smartlist_add(reply, ans);
       log_info(LD_CONTROL, "Skipping MapAddress '%s': wrong "
-                           "number of items.", safe_str(line));
+                           "number of items.",
+                           safe_str_client(line));
     }
     SMARTLIST_FOREACH(elts, char *, cp, tor_free(cp));
     smartlist_clear(elts);
@@ -1301,6 +1300,8 @@ getinfo_helper_misc(control_connection_t *conn, const char *question,
     *answer = tor_strdup(get_version());
   } else if (!strcmp(question, "config-file")) {
     *answer = tor_strdup(get_torrc_fname());
+  } else if (!strcmp(question, "config-text")) {
+    *answer = options_dump(get_options(), 1);
   } else if (!strcmp(question, "info/names")) {
     *answer = list_getinfo_options();
   } else if (!strcmp(question, "events/names")) {
@@ -1754,21 +1755,10 @@ getinfo_helper_events(control_connection_t *control_conn,
                  "information", question);
       }
     } else if (!strcmp(question, "status/clients-seen")) {
-      char geoip_start[ISO_TIME_LEN+1];
-      size_t answer_len;
-      char *geoip_summary = extrainfo_get_client_geoip_summary(time(NULL));
-
-      if (!geoip_summary)
+      char *bridge_stats = geoip_get_bridge_stats_controller(time(NULL));
+      if (!bridge_stats)
         return -1;
-
-      answer_len = strlen("TimeStarted=\"\" CountrySummary=") +
-                   ISO_TIME_LEN + strlen(geoip_summary) + 1;
-      *answer = tor_malloc(answer_len);
-      format_iso_time(geoip_start, geoip_get_history_start());
-      tor_snprintf(*answer, answer_len,
-                   "TimeStarted=\"%s\" CountrySummary=%s",
-                   geoip_start, geoip_summary);
-      tor_free(geoip_summary);
+      *answer = bridge_stats;
     } else {
       return 0;
     }
@@ -1802,6 +1792,8 @@ typedef struct getinfo_item_t {
 static const getinfo_item_t getinfo_items[] = {
   ITEM("version", misc, "The current version of Tor."),
   ITEM("config-file", misc, "Current location of the \"torrc\" file."),
+  ITEM("config-text", misc,
+       "Return the string that would be written by a saveconf command."),
   ITEM("accounting/bytes", accounting,
        "Number of bytes read/written so far in the accounting interval."),
   ITEM("accounting/bytes-left", accounting,
@@ -2143,8 +2135,7 @@ handle_control_extendcircuit(control_connection_t *conn, uint32_t len,
  done:
   SMARTLIST_FOREACH(router_nicknames, char *, n, tor_free(n));
   smartlist_free(router_nicknames);
-  if (routers)
-    smartlist_free(routers);
+  smartlist_free(routers);
   return 0;
 }
 
@@ -3844,10 +3835,9 @@ control_event_bootstrap_problem(const char *warn, int reason)
  * from recently. Send a copy to the controller in case it wants to
  * display it for the user. */
 void
-control_event_clients_seen(const char *timestarted, const char *countries)
+control_event_clients_seen(const char *controller_str)
 {
   send_control_event(EVENT_CLIENTS_SEEN, 0,
-    "650 CLIENTS_SEEN TimeStarted=\"%s\" CountrySummary=%s\r\n",
-    timestarted, countries);
+    "650 CLIENTS_SEEN %s\r\n", controller_str);
 }
 

@@ -21,7 +21,8 @@ static void connection_init(time_t now, connection_t *conn, int type,
 static int connection_init_accepted_conn(connection_t *conn,
                                          uint8_t listener_type);
 static int connection_handle_listener_read(connection_t *conn, int new_type);
-static int connection_read_bucket_should_increase(or_connection_t *conn);
+static int connection_bucket_should_increase(int bucket,
+                                             or_connection_t *conn);
 static int connection_finished_flushing(connection_t *conn);
 static int connection_flushed_some(connection_t *conn);
 static int connection_finished_connecting(connection_t *conn);
@@ -180,6 +181,9 @@ or_connection_new(int socket_family)
   or_conn->timestamp_last_added_nonpadding = time(NULL);
   or_conn->next_circ_id = crypto_rand_int(1<<15);
 
+  or_conn->active_circuit_pqueue = smartlist_create();
+  or_conn->active_circuit_pqueue_last_recalibrated = cell_ewma_get_tick();
+
   return or_conn;
 }
 
@@ -205,6 +209,7 @@ control_connection_new(int socket_family)
     tor_malloc_zero(sizeof(control_connection_t));
   connection_init(time(NULL),
                   TO_CONN(control_conn), CONN_TYPE_CONTROL, socket_family);
+  log_notice(LD_CONTROL, "New control connection opened.");
   return control_conn;
 }
 
@@ -311,6 +316,9 @@ _connection_free(connection_t *conn)
 {
   void *mem;
   size_t memlen;
+  if (!conn)
+    return;
+
   switch (conn->type) {
     case CONN_TYPE_OR:
       tor_assert(conn->magic == OR_CONNECTION_MAGIC);
@@ -368,14 +376,11 @@ _connection_free(connection_t *conn)
 
   if (connection_speaks_cells(conn)) {
     or_connection_t *or_conn = TO_OR_CONN(conn);
-    if (or_conn->tls) {
-      tor_tls_free(or_conn->tls);
-      or_conn->tls = NULL;
-    }
-    if (or_conn->handshake_state) {
-      or_handshake_state_free(or_conn->handshake_state);
-      or_conn->handshake_state = NULL;
-    }
+    tor_tls_free(or_conn->tls);
+    or_conn->tls = NULL;
+    or_handshake_state_free(or_conn->handshake_state);
+    or_conn->handshake_state = NULL;
+    smartlist_free(or_conn->active_circuit_pqueue);
     tor_free(or_conn->nickname);
   }
   if (CONN_IS_EDGE(conn)) {
@@ -385,8 +390,8 @@ _connection_free(connection_t *conn)
       memset(edge_conn->socks_request, 0xcc, sizeof(socks_request_t));
       tor_free(edge_conn->socks_request);
     }
-    if (edge_conn->rend_data)
-      rend_data_free(edge_conn->rend_data);
+
+    rend_data_free(edge_conn->rend_data);
   }
   if (conn->type == CONN_TYPE_CONTROL) {
     control_connection_t *control_conn = TO_CONTROL_CONN(conn);
@@ -399,16 +404,15 @@ _connection_free(connection_t *conn)
   if (conn->type == CONN_TYPE_DIR) {
     dir_connection_t *dir_conn = TO_DIR_CONN(conn);
     tor_free(dir_conn->requested_resource);
-    if (dir_conn->zlib_state)
-      tor_zlib_free(dir_conn->zlib_state);
+
+    tor_zlib_free(dir_conn->zlib_state);
     if (dir_conn->fingerprint_stack) {
       SMARTLIST_FOREACH(dir_conn->fingerprint_stack, char *, cp, tor_free(cp));
       smartlist_free(dir_conn->fingerprint_stack);
     }
-    if (dir_conn->cached_dir)
-      cached_dir_decref(dir_conn->cached_dir);
-    if (dir_conn->rend_data)
-      rend_data_free(dir_conn->rend_data);
+
+    cached_dir_decref(dir_conn->cached_dir);
+    rend_data_free(dir_conn->rend_data);
   }
 
   if (conn->s >= 0) {
@@ -423,7 +427,7 @@ _connection_free(connection_t *conn)
     connection_or_remove_from_identity_map(TO_OR_CONN(conn));
   }
 
-  memset(conn, 0xAA, memlen); /* poison memory */
+  memset(mem, 0xCC, memlen); /* poison memory */
   tor_free(mem);
 }
 
@@ -432,7 +436,8 @@ _connection_free(connection_t *conn)
 void
 connection_free(connection_t *conn)
 {
-  tor_assert(conn);
+  if (!conn)
+    return;
   tor_assert(!connection_is_on_closeable_list(conn));
   tor_assert(!connection_in_array(conn));
   if (conn->linked_conn) {
@@ -1262,7 +1267,8 @@ connection_connect(connection_t *conn, const char *address,
   dest_addr_len = tor_addr_to_sockaddr(addr, port, dest_addr, sizeof(addrbuf));
   tor_assert(dest_addr_len > 0);
 
-  log_debug(LD_NET,"Connecting to %s:%u.",escaped_safe_str(address),port);
+  log_debug(LD_NET, "Connecting to %s:%u.",
+            escaped_safe_str_client(address), port);
 
   if (connect(s, dest_addr, dest_addr_len) < 0) {
     int e = tor_socket_errno(s);
@@ -1270,7 +1276,8 @@ connection_connect(connection_t *conn, const char *address,
       /* yuck. kill it. */
       *socket_error = e;
       log_info(LD_NET,
-               "connect() to %s:%u failed: %s",escaped_safe_str(address),
+               "connect() to %s:%u failed: %s",
+               escaped_safe_str_client(address),
                port, tor_socket_strerror(e));
       tor_close_socket(s);
       return -1;
@@ -1284,7 +1291,8 @@ connection_connect(connection_t *conn, const char *address,
 
   /* it succeeded. we're connected. */
   log_fn(inprogress?LOG_DEBUG:LOG_INFO, LD_NET,
-         "Connection to %s:%u %s (sock %d).",escaped_safe_str(address),
+         "Connection to %s:%u %s (sock %d).",
+         escaped_safe_str_client(address),
          port, inprogress?"in progress":"established", s);
   conn->s = s;
   if (connection_add(conn) < 0) /* no space, forget it */
@@ -1373,7 +1381,7 @@ connection_proxy_connect(connection_t *conn, int type)
       /* Send a SOCKS4 connect request with empty user id */
 
       if (tor_addr_family(&conn->addr) != AF_INET) {
-        log_warn(LD_NET, "SOCKS4 client is incompatible with with IPv6");
+        log_warn(LD_NET, "SOCKS4 client is incompatible with IPv6");
         return -1;
       }
 
@@ -1967,6 +1975,7 @@ connection_bucket_write_limit(connection_t *conn, time_t now)
   int base = connection_speaks_cells(conn) ?
                CELL_NETWORK_SIZE : RELAY_PAYLOAD_SIZE;
   int priority = conn->type != CONN_TYPE_DIR;
+  int conn_bucket = (int)conn->outbuf_flushlen;
   int global_bucket = global_write_bucket;
 
   if (!connection_is_rate_limited(conn)) {
@@ -1974,12 +1983,22 @@ connection_bucket_write_limit(connection_t *conn, time_t now)
     return conn->outbuf_flushlen;
   }
 
+  if (connection_speaks_cells(conn)) {
+    /* use the per-conn write limit if it's lower, but if it's less
+     * than zero just use zero */
+    or_connection_t *or_conn = TO_OR_CONN(conn);
+    if (conn->state == OR_CONN_STATE_OPEN)
+      if (or_conn->write_bucket < conn_bucket)
+        conn_bucket = or_conn->write_bucket >= 0 ?
+                        or_conn->write_bucket : 0;
+  }
+
   if (connection_counts_as_relayed_traffic(conn, now) &&
       global_relayed_write_bucket <= global_write_bucket)
     global_bucket = global_relayed_write_bucket;
 
-  return connection_bucket_round_robin(base, priority, global_bucket,
-                                       conn->outbuf_flushlen);
+  return connection_bucket_round_robin(base, priority,
+                                       global_bucket, conn_bucket);
 }
 
 /** Return 1 if the global write buckets are low enough that we
@@ -2033,8 +2052,8 @@ global_write_bucket_low(connection_t *conn, size_t attempt, int priority)
   return 0;
 }
 
-/** We just read num_read and wrote num_written onto conn.
- * Decrement buckets appropriately. */
+/** We just read <b>num_read</b> and wrote <b>num_written</b> bytes
+ * onto <b>conn</b>. Decrement buckets appropriately. */
 static void
 connection_buckets_decrement(connection_t *conn, time_t now,
                              size_t num_read, size_t num_written)
@@ -2069,8 +2088,10 @@ connection_buckets_decrement(connection_t *conn, time_t now,
   }
   global_read_bucket -= (int)num_read;
   global_write_bucket -= (int)num_written;
-  if (connection_speaks_cells(conn) && conn->state == OR_CONN_STATE_OPEN)
+  if (connection_speaks_cells(conn) && conn->state == OR_CONN_STATE_OPEN) {
     TO_OR_CONN(conn)->read_bucket -= (int)num_read;
+    TO_OR_CONN(conn)->write_bucket -= (int)num_written;
+  }
 }
 
 /** If we have exhausted our global buckets, or the buckets for conn,
@@ -2109,12 +2130,10 @@ connection_consider_empty_write_buckets(connection_t *conn)
   } else if (connection_counts_as_relayed_traffic(conn, approx_time()) &&
              global_relayed_write_bucket <= 0) {
     reason = "global relayed write bucket exhausted. Pausing.";
-#if 0
   } else if (connection_speaks_cells(conn) &&
              conn->state == OR_CONN_STATE_OPEN &&
              TO_OR_CONN(conn)->write_bucket <= 0) {
     reason = "connection write bucket exhausted. Pausing.";
-#endif
   } else
     return; /* all good, no need to stop it */
 
@@ -2210,14 +2229,19 @@ connection_bucket_refill(int seconds_elapsed, time_t now)
   {
     if (connection_speaks_cells(conn)) {
       or_connection_t *or_conn = TO_OR_CONN(conn);
-      if (connection_read_bucket_should_increase(or_conn)) {
+      if (connection_bucket_should_increase(or_conn->read_bucket, or_conn)) {
         connection_bucket_refill_helper(&or_conn->read_bucket,
                                         or_conn->bandwidthrate,
                                         or_conn->bandwidthburst,
                                         seconds_elapsed,
                                         "or_conn->read_bucket");
-        //log_fn(LOG_DEBUG,"Receiver bucket %d now %d.", i,
-        //       conn->read_bucket);
+      }
+      if (connection_bucket_should_increase(or_conn->write_bucket, or_conn)) {
+        connection_bucket_refill_helper(&or_conn->write_bucket,
+                                        or_conn->bandwidthrate,
+                                        or_conn->bandwidthburst,
+                                        seconds_elapsed,
+                                        "or_conn->write_bucket");
       }
     }
 
@@ -2238,8 +2262,10 @@ connection_bucket_refill(int seconds_elapsed, time_t now)
     if (conn->write_blocked_on_bw == 1
         && global_write_bucket > 0 /* and we're allowed to write */
         && (!connection_counts_as_relayed_traffic(conn, now) ||
-            global_relayed_write_bucket > 0)) {
-            /* even if we're relayed traffic */
+            global_relayed_write_bucket > 0) /* even if it's relayed traffic */
+        && (!connection_speaks_cells(conn) ||
+            conn->state != OR_CONN_STATE_OPEN ||
+            TO_OR_CONN(conn)->write_bucket > 0)) {
       LOG_FN_CONN(conn, (LOG_DEBUG,LD_NET,
                          "waking up conn (fd %d) for write", conn->s));
       conn->write_blocked_on_bw = 0;
@@ -2248,17 +2274,17 @@ connection_bucket_refill(int seconds_elapsed, time_t now)
   });
 }
 
-/** Is the receiver bucket for connection <b>conn</b> low enough that we
+/** Is the <b>bucket</b> for connection <b>conn</b> low enough that we
  * should add another pile of tokens to it?
  */
 static int
-connection_read_bucket_should_increase(or_connection_t *conn)
+connection_bucket_should_increase(int bucket, or_connection_t *conn)
 {
   tor_assert(conn);
 
   if (conn->_base.state != OR_CONN_STATE_OPEN)
     return 0; /* only open connections play the rate limiting game */
-  if (conn->read_bucket >= conn->bandwidthburst)
+  if (bucket >= conn->bandwidthburst)
     return 0;
 
   return 1;
@@ -2276,8 +2302,8 @@ connection_read_bucket_should_increase(or_connection_t *conn)
  * Mark the connection and return -1 if you want to close it, else
  * return 0.
  */
-int
-connection_handle_read(connection_t *conn)
+static int
+connection_handle_read_impl(connection_t *conn)
 {
   int max_to_read=-1, try_to_read;
   size_t before, n_read = 0;
@@ -2370,6 +2396,16 @@ loop_again:
     return -1;
   }
   return 0;
+}
+
+int
+connection_handle_read(connection_t *conn)
+{
+  int res;
+
+  tor_gettimeofday_cache_clear();
+  res = connection_handle_read_impl(conn);
+  return res;
 }
 
 /** Pull in new bytes from conn-\>s or conn-\>linked_conn onto conn-\>inbuf,
@@ -2573,8 +2609,8 @@ connection_outbuf_too_full(connection_t *conn)
  * Mark the connection and return -1 if you want to close it, else
  * return 0.
  */
-int
-connection_handle_write(connection_t *conn, int force)
+static int
+connection_handle_write_impl(connection_t *conn, int force)
 {
   int e;
   socklen_t len=(socklen_t)sizeof(e);
@@ -2739,6 +2775,15 @@ connection_handle_write(connection_t *conn, int force)
     connection_consider_empty_read_buckets(conn);
 
   return 0;
+}
+
+int
+connection_handle_write(connection_t *conn, int force)
+{
+    int res;
+    tor_gettimeofday_cache_clear();
+    res = connection_handle_write_impl(conn, force);
+    return res;
 }
 
 /** OpenSSL TLS record size is 16383; this is close. The goal here is to

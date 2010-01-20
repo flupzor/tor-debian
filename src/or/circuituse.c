@@ -115,7 +115,7 @@ circuit_is_acceptable(circuit_t *circ, edge_connection_t *conn,
         return 0;
       }
     }
-    if (exitrouter && !connection_ap_can_use_exit(conn, exitrouter)) {
+    if (exitrouter && !connection_ap_can_use_exit(conn, exitrouter, 0)) {
       /* can't exit from this router */
       return 0;
     }
@@ -424,7 +424,7 @@ circuit_stream_is_being_handled(edge_connection_t *conn,
       if (exitrouter && (!need_uptime || build_state->need_uptime)) {
         int ok;
         if (conn) {
-          ok = connection_ap_can_use_exit(conn, exitrouter);
+          ok = connection_ap_can_use_exit(conn, exitrouter, 0);
         } else {
           addr_policy_result_t r = compare_addr_to_addr_policy(
               0, port, exitrouter->exit_policy);
@@ -928,8 +928,8 @@ circuit_launch_by_router(uint8_t purpose,
   if (exit)
     info = extend_info_from_router(exit);
   circ = circuit_launch_by_extend_info(purpose, info, flags);
-  if (info)
-    extend_info_free(info);
+
+  extend_info_free(info);
   return circ;
 }
 
@@ -1103,7 +1103,7 @@ circuit_get_open_circ_or_launch(edge_connection_t *conn,
                                                 need_uptime)) {
         log_notice(LD_APP,
                    "No Tor server allows exit to %s:%d. Rejecting.",
-                   safe_str(conn->socks_request->address),
+                   safe_str_client(conn->socks_request->address),
                    conn->socks_request->port);
         return -1;
       }
@@ -1111,7 +1111,7 @@ circuit_get_open_circ_or_launch(edge_connection_t *conn,
       /* XXXX022 Duplicates checks in connection_ap_handshake_attach_circuit */
       routerinfo_t *router = router_get_by_nickname(conn->chosen_exit_name, 1);
       int opt = conn->chosen_exit_optional;
-      if (router && !connection_ap_can_use_exit(conn, router)) {
+      if (router && !connection_ap_can_use_exit(conn, router, 0)) {
         log_fn(opt ? LOG_INFO : LOG_WARN, LD_APP,
                "Requested exit point '%s' would refuse request. %s.",
                conn->chosen_exit_name, opt ? "Trying others" : "Closing");
@@ -1144,14 +1144,14 @@ circuit_get_open_circ_or_launch(edge_connection_t *conn,
       if (!extend_info) {
         log_info(LD_REND,
                  "No intro points for '%s': re-fetching service descriptor.",
-                 safe_str(conn->rend_data->onion_address));
+                 safe_str_client(conn->rend_data->onion_address));
         rend_client_refetch_v2_renddesc(conn->rend_data);
         conn->_base.state = AP_CONN_STATE_RENDDESC_WAIT;
         return 0;
       }
       log_info(LD_REND,"Chose '%s' as intro point for '%s'.",
                extend_info->nickname,
-               safe_str(conn->rend_data->onion_address));
+               safe_str_client(conn->rend_data->onion_address));
     }
 
     /* If we have specified a particular exit node for our
@@ -1180,7 +1180,7 @@ circuit_get_open_circ_or_launch(edge_connection_t *conn,
             }
             if (tor_addr_from_str(&addr, conn->socks_request->address) < 0) {
               log_info(LD_DIR, "Broken address %s on tunnel conn. Closing.",
-                       escaped_safe_str(conn->socks_request->address));
+                       escaped_safe_str_client(conn->socks_request->address));
               return -1;
             }
             extend_info = extend_info_alloc(conn->chosen_exit_name+1,
@@ -1222,8 +1222,7 @@ circuit_get_open_circ_or_launch(edge_connection_t *conn,
                                            flags);
     }
 
-    if (extend_info)
-      extend_info_free(extend_info);
+    extend_info_free(extend_info);
 
     if (desired_circuit_purpose != CIRCUIT_PURPOSE_C_GENERAL) {
       /* help predict this next time */
@@ -1405,7 +1404,7 @@ connection_ap_handshake_attach_circuit(edge_connection_t *conn)
       LOG_INFO : LOG_NOTICE;
     log_fn(severity, LD_APP,
            "Tried for %d seconds to get a connection to %s:%d. Giving up.",
-           conn_age, safe_str(conn->socks_request->address),
+           conn_age, safe_str_client(conn->socks_request->address),
            conn->socks_request->port);
     return -1;
   }
@@ -1432,7 +1431,7 @@ connection_ap_handshake_attach_circuit(edge_connection_t *conn)
         }
         return -1;
       }
-      if (router && !connection_ap_can_use_exit(conn, router)) {
+      if (router && !connection_ap_can_use_exit(conn, router, 0)) {
         log_fn(opt ? LOG_INFO : LOG_WARN, LD_APP,
                "Requested exit point '%s' would refuse request. %s.",
                conn->chosen_exit_name, opt ? "Trying others" : "Closing");
