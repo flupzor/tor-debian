@@ -80,10 +80,8 @@ connection_or_clear_identity_map(void)
     }
   });
 
-  if (orconn_identity_map) {
-    digestmap_free(orconn_identity_map, NULL);
-    orconn_identity_map = NULL;
-  }
+  digestmap_free(orconn_identity_map, NULL);
+  orconn_identity_map = NULL;
 }
 
 /** Change conn->identity_digest to digest, and add conn into
@@ -322,6 +320,19 @@ connection_or_finished_connecting(or_connection_t *or_conn)
   return 0;
 }
 
+/** Return 1 if identity digest <b>id_digest</b> is known to be a
+ * currently or recently running relay. Otherwise return 0. */
+static int
+connection_or_digest_is_known_relay(const char *id_digest)
+{
+  if (router_get_consensus_status_by_id(id_digest))
+    return 1; /* It's in the consensus: "yes" */
+  if (router_get_by_digest(id_digest))
+    return 1; /* Not in the consensus, but we have a descriptor for
+               * it. Probably it was in a recent consensus. "Yes". */
+  return 0;
+}
+
 /** If we don't necessarily know the router we're connecting to, but we
  * have an addr/port/id_digest, then fill in as much as we can. Start
  * by checking to see if this describes a router we know. */
@@ -332,10 +343,30 @@ connection_or_init_conn_from_address(or_connection_t *conn,
                                      int started_here)
 {
   or_options_t *options = get_options();
+  int rate, burst; /* per-connection rate limiting params */
   routerinfo_t *r = router_get_by_digest(id_digest);
-  conn->bandwidthrate = (int)options->BandwidthRate;
-  conn->read_bucket = conn->bandwidthburst = (int)options->BandwidthBurst;
   connection_or_set_identity_digest(conn, id_digest);
+
+  if (connection_or_digest_is_known_relay(id_digest)) {
+    /* It's in the consensus, or we have a descriptor for it meaning it
+     * was probably in a recent consensus. It's a recognized relay:
+     * give it full bandwidth. */
+    rate = (int)options->BandwidthRate;
+    burst = (int)options->BandwidthBurst;
+  } else {
+    /* Not a recognized relay. Squeeze it down based on the suggested
+     * bandwidth parameters in the consensus, but allow local config
+     * options to override. */
+    rate = options->PerConnBWRate ? (int)options->PerConnBWRate :
+        (int)networkstatus_get_param(NULL, "bwconnrate",
+                                     (int)options->BandwidthRate);
+    burst = options->PerConnBWBurst ? (int)options->PerConnBWBurst :
+        (int)networkstatus_get_param(NULL, "bwconnburst",
+                                     (int)options->BandwidthBurst);
+  }
+
+  conn->bandwidthrate = rate;
+  conn->read_bucket = conn->write_bucket = conn->bandwidthburst = burst;
 
   conn->_base.port = port;
   tor_addr_copy(&conn->_base.addr, addr);
@@ -774,7 +805,8 @@ connection_tls_start_handshake(or_connection_t *conn, int receiving)
 {
   conn->_base.state = OR_CONN_STATE_TLS_HANDSHAKING;
   conn->tls = tor_tls_new(conn->_base.s, receiving);
-  tor_tls_set_logged_address(conn->tls, escaped_safe_str(conn->_base.address));
+  tor_tls_set_logged_address(conn->tls, // XXX client and relay?
+      escaped_safe_str(conn->_base.address));
   if (!conn->tls) {
     log_warn(LD_BUG,"tor_tls_new failed. Closing.");
     return -1;
@@ -887,7 +919,7 @@ connection_or_nonopen_was_started_here(or_connection_t *conn)
  * return -1 if he is lying, broken, or otherwise something is wrong.
  *
  * If we initiated this connection (<b>started_here</b> is true), make sure
- * the other side sent sent a correctly formed certificate. If I initiated the
+ * the other side sent a correctly formed certificate. If I initiated the
  * connection, make sure it's the right guy.
  *
  * Otherwise (if we _didn't_ initiate this connection), it's okay for
@@ -914,7 +946,8 @@ connection_or_check_valid_tls_handshake(or_connection_t *conn,
   or_options_t *options = get_options();
   int severity = server_mode(options) ? LOG_PROTOCOL_WARN : LOG_WARN;
   const char *safe_address =
-    started_here ? conn->_base.address : safe_str(conn->_base.address);
+    started_here ? conn->_base.address :
+                   safe_str_client(conn->_base.address);
   const char *conn_type = started_here ? "outgoing" : "incoming";
   int has_cert = 0, has_identity=0;
 
@@ -1030,7 +1063,7 @@ connection_tls_finish_handshake(or_connection_t *conn)
   int started_here = connection_or_nonopen_was_started_here(conn);
 
   log_debug(LD_HANDSHAKE,"tls handshake with %s done. verifying.",
-            safe_str(conn->_base.address));
+            safe_str_client(conn->_base.address));
 
   directory_set_dirty();
 
@@ -1075,7 +1108,8 @@ connection_init_or_handshake_state(or_connection_t *conn, int started_here)
 void
 or_handshake_state_free(or_handshake_state_t *state)
 {
-  tor_assert(state);
+  if (!state)
+    return;
   memset(state, 0xBE, sizeof(or_handshake_state_t));
   tor_free(state);
 }
@@ -1117,10 +1151,10 @@ connection_or_set_state_open(or_connection_t *conn)
       }
     }
   }
-  if (conn->handshake_state) {
-    or_handshake_state_free(conn->handshake_state);
-    conn->handshake_state = NULL;
-  }
+
+  or_handshake_state_free(conn->handshake_state);
+  conn->handshake_state = NULL;
+
   connection_start_reading(TO_CONN(conn));
   circuit_n_conn_done(conn, 1); /* send the pending creates, if any. */
 

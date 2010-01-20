@@ -757,8 +757,7 @@ router_rebuild_store(int flags, desc_store_t *store)
   store->journal_len = 0;
   store->bytes_dropped = 0;
  done:
-  if (signed_descriptors)
-    smartlist_free(signed_descriptors);
+  smartlist_free(signed_descriptors);
   tor_free(fname);
   tor_free(fname_tmp);
   if (chunk_list) {
@@ -1699,12 +1698,12 @@ smartlist_choose_by_bandwidth(smartlist_t *sl, bandwidth_weight_rule_t rule,
      * For detailed derivation of this formula, see
      *   http://archives.seul.org/or/dev/Jul-2007/msg00056.html
      */
-    if (rule == WEIGHT_FOR_EXIT)
+    if (rule == WEIGHT_FOR_EXIT || !total_exit_bw)
       exit_weight = 1.0;
     else
       exit_weight = 1.0 - all_bw/(3.0*exit_bw);
 
-    if (rule == WEIGHT_FOR_GUARD)
+    if (rule == WEIGHT_FOR_GUARD || !total_guard_bw)
       guard_weight = 1.0;
     else
       guard_weight = 1.0 - all_bw/(3.0*guard_bw);
@@ -1753,6 +1752,8 @@ smartlist_choose_by_bandwidth(smartlist_t *sl, bandwidth_weight_rule_t rule,
 
   /* Almost done: choose a random value from the bandwidth weights. */
   rand_bw = crypto_rand_uint64(total_bw);
+  rand_bw++; /* crypto_rand_uint64() counts from 0, and we need to count
+              * from 1 below. See bug 1203 for details. */
 
   /* Last, count through sl until we get to the element we picked */
   tmp = 0;
@@ -1809,13 +1810,10 @@ routerstatus_sl_choose_by_bandwidth(smartlist_t *sl)
   return smartlist_choose_by_bandwidth(sl, NO_WEIGHTING, 1);
 }
 
-/** Return a random running router from the routerlist.  If any node
- * named in <b>preferred</b> is available, pick one of those.  Never
+/** Return a random running router from the routerlist. Never
  * pick a node whose routerinfo is in
  * <b>excludedsmartlist</b>, or whose routerinfo matches <b>excludedset</b>,
- * even if they are the only nodes
- * available.  If <b>CRN_STRICT_PREFERRED</b> is set in flags, never pick
- * any node besides those in <b>preferred</b>.
+ * even if they are the only nodes available.
  * If <b>CRN_NEED_UPTIME</b> is set in flags and any router has more than
  * a minimum uptime, return one of those.
  * If <b>CRN_NEED_CAPACITY</b> is set in flags, weight your choice by the
@@ -1828,8 +1826,7 @@ routerstatus_sl_choose_by_bandwidth(smartlist_t *sl)
  * node (that is, possibly discounting exit nodes).
  */
 routerinfo_t *
-router_choose_random_node(const char *preferred,
-                          smartlist_t *excludedsmartlist,
+router_choose_random_node(smartlist_t *excludedsmartlist,
                           routerset_t *excludedset,
                           router_crn_flags_t flags)
 {
@@ -1837,18 +1834,16 @@ router_choose_random_node(const char *preferred,
   const int need_capacity = (flags & CRN_NEED_CAPACITY) != 0;
   const int need_guard = (flags & CRN_NEED_GUARD) != 0;
   const int allow_invalid = (flags & CRN_ALLOW_INVALID) != 0;
-  const int strict = (flags & CRN_STRICT_PREFERRED) != 0;
   const int weight_for_exit = (flags & CRN_WEIGHT_AS_EXIT) != 0;
 
-  smartlist_t *sl, *excludednodes;
+  smartlist_t *sl=smartlist_create(),
+              *excludednodes=smartlist_create();
   routerinfo_t *choice = NULL, *r;
   bandwidth_weight_rule_t rule;
 
   tor_assert(!(weight_for_exit && need_guard));
   rule = weight_for_exit ? WEIGHT_FOR_EXIT :
     (need_guard ? WEIGHT_FOR_GUARD : NO_WEIGHTING);
-
-  excludednodes = smartlist_create();
 
   /* Exclude relays that allow single hop exit circuits, if the user
    * wants to (such relays might be risky) */
@@ -1865,60 +1860,37 @@ router_choose_random_node(const char *preferred,
     routerlist_add_family(excludednodes, r);
   }
 
-  /* Try the preferred nodes first. Ignore need_uptime and need_capacity
-   * and need_guard, since the user explicitly asked for these nodes. */
-  if (preferred) {
-    sl = smartlist_create();
-    add_nickname_list_to_smartlist(sl,preferred,1);
-    smartlist_subtract(sl,excludednodes);
-    if (excludedsmartlist)
-      smartlist_subtract(sl,excludedsmartlist);
-    if (excludedset)
-      routerset_subtract_routers(sl,excludedset);
+  router_add_running_routers_to_smartlist(sl, allow_invalid,
+                                          need_uptime, need_capacity,
+                                          need_guard);
+  smartlist_subtract(sl,excludednodes);
+  if (excludedsmartlist)
+    smartlist_subtract(sl,excludedsmartlist);
+  if (excludedset)
+    routerset_subtract_routers(sl,excludedset);
+
+  if (need_capacity || need_guard)
+    choice = routerlist_sl_choose_by_bandwidth(sl, rule);
+  else
     choice = smartlist_choose(sl);
-    smartlist_free(sl);
-  }
-  if (!choice && !strict) {
-    /* Then give up on our preferred choices: any node
-     * will do that has the required attributes. */
-    sl = smartlist_create();
-    router_add_running_routers_to_smartlist(sl, allow_invalid,
-                                            need_uptime, need_capacity,
-                                            need_guard);
-    smartlist_subtract(sl,excludednodes);
-    if (excludedsmartlist)
-      smartlist_subtract(sl,excludedsmartlist);
-    if (excludedset)
-      routerset_subtract_routers(sl,excludedset);
 
-    if (need_capacity || need_guard)
-      choice = routerlist_sl_choose_by_bandwidth(sl, rule);
-    else
-      choice = smartlist_choose(sl);
-
-    smartlist_free(sl);
-    if (!choice && (need_uptime || need_capacity || need_guard)) {
-      /* try once more -- recurse but with fewer restrictions. */
-      log_info(LD_CIRC,
-               "We couldn't find any live%s%s%s routers; falling back "
-               "to list of all routers.",
-               need_capacity?", fast":"",
-               need_uptime?", stable":"",
-               need_guard?", guard":"");
-      flags &= ~ (CRN_NEED_UPTIME|CRN_NEED_CAPACITY|CRN_NEED_GUARD);
-      choice = router_choose_random_node(
-                       NULL, excludedsmartlist, excludedset, flags);
-    }
+  smartlist_free(sl);
+  if (!choice && (need_uptime || need_capacity || need_guard)) {
+    /* try once more -- recurse but with fewer restrictions. */
+    log_info(LD_CIRC,
+             "We couldn't find any live%s%s%s routers; falling back "
+             "to list of all routers.",
+             need_capacity?", fast":"",
+             need_uptime?", stable":"",
+             need_guard?", guard":"");
+    flags &= ~ (CRN_NEED_UPTIME|CRN_NEED_CAPACITY|CRN_NEED_GUARD);
+    choice = router_choose_random_node(
+                     excludedsmartlist, excludedset, flags);
   }
   smartlist_free(excludednodes);
   if (!choice) {
-    if (strict) {
-      log_warn(LD_CIRC, "All preferred nodes were down when trying to choose "
-               "node, and the Strict[...]Nodes option is set. Failing.");
-    } else {
-      log_warn(LD_CIRC,
-               "No available nodes when trying to choose node. Failing.");
-    }
+    log_warn(LD_CIRC,
+             "No available nodes when trying to choose node. Failing.");
   }
   return choice;
 }
@@ -2378,6 +2350,9 @@ extrainfo_free(extrainfo_t *extrainfo)
 static void
 signed_descriptor_free(signed_descriptor_t *sd)
 {
+  if (!sd)
+    return;
+
   tor_free(sd->signed_descriptor_body);
 
   /* XXXX remove this once more bugs go away. */
@@ -2409,7 +2384,8 @@ _extrainfo_free(void *e)
 void
 routerlist_free(routerlist_t *rl)
 {
-  tor_assert(rl);
+  if (!rl)
+    return;
   rimap_free(rl->identity_map, NULL);
   sdmap_free(rl->desc_digest_map, NULL);
   sdmap_free(rl->desc_by_eid_map, NULL);
@@ -2448,46 +2424,6 @@ dump_routerlist_mem_usage(int severity)
       "In %d old descriptors: "U64_FORMAT" bytes.",
       smartlist_len(routerlist->routers), U64_PRINTF_ARG(livedescs),
       smartlist_len(routerlist->old_routers), U64_PRINTF_ARG(olddescs));
-
-#if 0
-  {
-    const smartlist_t *networkstatus_v2_list = networkstatus_get_v2_list();
-    networkstatus_t *consensus = networkstatus_get_latest_consensus();
-    log(severity, LD_DIR, "Now let's look through old_descriptors!");
-    SMARTLIST_FOREACH(routerlist->old_routers, signed_descriptor_t *, sd, {
-        int in_v2 = 0;
-        int in_v3 = 0;
-        char published[ISO_TIME_LEN+1];
-        char last_valid_until[ISO_TIME_LEN+1];
-        char last_served_at[ISO_TIME_LEN+1];
-        char id[HEX_DIGEST_LEN+1];
-        routerstatus_t *rs;
-        format_iso_time(published, sd->published_on);
-        format_iso_time(last_valid_until, sd->last_listed_as_valid_until);
-        format_iso_time(last_served_at, sd->last_served_at);
-        base16_encode(id, sizeof(id), sd->identity_digest, DIGEST_LEN);
-        SMARTLIST_FOREACH(networkstatus_v2_list, networkstatus_v2_t *, ns,
-          {
-            rs = networkstatus_v2_find_entry(ns, sd->identity_digest);
-            if (rs && !memcmp(rs->descriptor_digest,
-                              sd->signed_descriptor_digest, DIGEST_LEN)) {
-              in_v2 = 1; break;
-            }
-          });
-        if (consensus) {
-          rs = networkstatus_vote_find_entry(consensus, sd->identity_digest);
-          if (rs && !memcmp(rs->descriptor_digest,
-                            sd->signed_descriptor_digest, DIGEST_LEN))
-            in_v3 = 1;
-        }
-        log(severity, LD_DIR,
-            "Old descriptor for %s (published %s) %sin v2 ns, %sin v3 "
-            "consensus.  Last valid until %s; last served at %s.",
-            id, published, in_v2 ? "" : "not ", in_v3 ? "" : "not ",
-            last_valid_until, last_served_at);
-    });
-  }
-#endif
 }
 
 /** Debugging helper: If <b>idx</b> is nonnegative, assert that <b>ri</b> is
@@ -2857,8 +2793,7 @@ routerlist_reparse_old(routerlist_t *rl, signed_descriptor_t *sd)
 void
 routerlist_free_all(void)
 {
-  if (routerlist)
-    routerlist_free(routerlist);
+  routerlist_free(routerlist);
   routerlist = NULL;
   if (warned_nicknames) {
     SMARTLIST_FOREACH(warned_nicknames, char *, cp, tor_free(cp));
@@ -3747,12 +3682,8 @@ add_trusted_dir_server(const char *nickname, const char *address,
 
   if (ent->or_port)
     ent->fake_status.version_supports_begindir = 1;
-/* XX021 - wait until authorities are upgraded */
-#if 0
+
   ent->fake_status.version_supports_conditional_consensus = 1;
-#else
-  ent->fake_status.version_supports_conditional_consensus = 0;
-#endif
 
   smartlist_add(trusted_dir_servers, ent);
   router_dir_info_changed();
@@ -3767,10 +3698,8 @@ authority_cert_free(authority_cert_t *cert)
     return;
 
   tor_free(cert->cache_info.signed_descriptor_body);
-  if (cert->signing_key)
-    crypto_free_pk_env(cert->signing_key);
-  if (cert->identity_key)
-    crypto_free_pk_env(cert->identity_key);
+  crypto_free_pk_env(cert->signing_key);
+  crypto_free_pk_env(cert->identity_key);
 
   tor_free(cert);
 }
@@ -3779,6 +3708,9 @@ authority_cert_free(authority_cert_t *cert)
 static void
 trusted_dir_server_free(trusted_dir_server_t *ds)
 {
+  if (!ds)
+    return;
+
   tor_free(ds->nickname);
   tor_free(ds->description);
   tor_free(ds->address);
@@ -3934,7 +3866,7 @@ client_would_use_router(routerstatus_t *rs, time_t now, or_options_t *options)
  * this number per server. */
 #define MIN_DL_PER_REQUEST 4
 /** To prevent a single screwy cache from confusing us by selective reply,
- * try to split our requests into at least this this many requests. */
+ * try to split our requests into at least this many requests. */
 #define MIN_REQUESTS 3
 /** If we want fewer than this many descriptors, wait until we
  * want more, or until MAX_CLIENT_INTERVAL_WITHOUT_REQUEST has
@@ -4151,7 +4083,7 @@ update_router_descriptor_cache_downloads_v2(time_t now)
       pds_flags |= PDS_NO_EXISTING_SERVERDESC_FETCH; /* XXXX ignored*/
 
     if (!ds) {
-      log_warn(LD_BUG, "Networkstatus with no corresponding authority!");
+      log_info(LD_DIR, "Networkstatus with no corresponding authority!");
       continue;
     }
     if (! smartlist_len(dl))
@@ -4822,8 +4754,8 @@ esc_router_info(routerinfo_t *router)
   static char *info=NULL;
   char *esc_contact, *esc_platform;
   size_t len;
-  if (info)
-    tor_free(info);
+  tor_free(info);
+
   if (!router)
     return NULL; /* we're exiting; just free the memory we use */
 
@@ -4958,9 +4890,8 @@ void
 routerset_refresh_countries(routerset_t *target)
 {
   int cc;
-  if (target->countries) {
-    bitarray_free(target->countries);
-  }
+  bitarray_free(target->countries);
+
   if (!geoip_is_loaded()) {
     target->countries = NULL;
     target->n_countries = 0;
@@ -5204,9 +5135,13 @@ routerset_get_all_routers(smartlist_t *out, const routerset_t *routerset,
   }
 }
 
-/** Add to <b>target</b> every routerinfo_t from <b>source</b> that is in
- * <b>include</b>, but not excluded in a more specific fashion by
- * <b>exclude</b>.  If <b>running_only</b>, only include running routers.
+/** Add to <b>target</b> every routerinfo_t from <b>source</b> except:
+ *
+ * 1) Don't add it if <b>include</b> is non-empty and the relay isn't in
+ * <b>include</b>; and
+ * 2) Don't add it if <b>exclude</b> is non-empty and the relay is
+ * excluded in a more specific fashion by <b>exclude</b>.
+ * 3) If <b>running_only</b>, don't add non-running routers.
  */
 void
 routersets_get_disjunction(smartlist_t *target,
@@ -5276,35 +5211,15 @@ routerset_equal(const routerset_t *old, const routerset_t *new)
   });
 
   return 1;
-
-#if 0
-  /* XXXX: This won't work if the names/digests are identical but in a
-     different order. Checking for exact equality would be heavy going,
-     is it worth it? -RH*/
-  /* This code is totally bogus; sizeof doesn't work even remotely like this
-   * code seems to think.  Let's revert to a string-based comparison for
-   * now. -NM*/
-  if (sizeof(old->names) != sizeof(new->names))
-    return 0;
-
-  if (memcmp(old->names,new->names,sizeof(new->names)))
-    return 0;
-  if (sizeof(old->digests) != sizeof(new->digests))
-    return 0;
-  if (memcmp(old->digests,new->digests,sizeof(new->digests)))
-    return 0;
-  if (sizeof(old->countries) != sizeof(new->countries))
-    return 0;
-  if (memcmp(old->countries,new->countries,sizeof(new->countries)))
-    return 0;
-  return 1;
-#endif
 }
 
 /** Free all storage held in <b>routerset</b>. */
 void
 routerset_free(routerset_t *routerset)
 {
+  if (!routerset)
+    return;
+
   SMARTLIST_FOREACH(routerset->list, char *, cp, tor_free(cp));
   smartlist_free(routerset->list);
   SMARTLIST_FOREACH(routerset->policies, addr_policy_t *, p,
@@ -5315,8 +5230,7 @@ routerset_free(routerset_t *routerset)
 
   strmap_free(routerset->names, NULL);
   digestmap_free(routerset->digests, NULL);
-  if (routerset->countries)
-    bitarray_free(routerset->countries);
+  bitarray_free(routerset->countries);
   tor_free(routerset);
 }
 

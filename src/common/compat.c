@@ -1608,7 +1608,6 @@ get_uname(void)
 #ifdef MS_WINDOWS
         OSVERSIONINFOEX info;
         int i;
-        unsigned int leftover_mask;
         const char *plat = NULL;
         const char *extra = NULL;
         static struct {
@@ -1625,25 +1624,6 @@ get_uname(void)
           { 3, 51, "Windows NT 3.51" },
           { 0, 0, NULL }
         };
-#ifdef VER_SUITE_BACKOFFICE
-        static struct {
-          unsigned int mask; const char *str;
-        } win_mask_table[] = {
-          { VER_SUITE_BACKOFFICE,         " {backoffice}" },
-          { VER_SUITE_BLADE,              " {\"blade\" (2003, web edition)}" },
-          { VER_SUITE_DATACENTER,         " {datacenter}" },
-          { VER_SUITE_ENTERPRISE,         " {enterprise}" },
-          { VER_SUITE_EMBEDDEDNT,         " {embedded}" },
-          { VER_SUITE_PERSONAL,           " {personal}" },
-          { VER_SUITE_SINGLEUSERTS,
-            " {terminal services, single user}" },
-          { VER_SUITE_SMALLBUSINESS,      " {small business}" },
-          { VER_SUITE_SMALLBUSINESS_RESTRICTED,
-            " {small business, restricted}" },
-          { VER_SUITE_TERMINAL,           " {terminal services}" },
-          { 0, NULL },
-        };
-#endif
         memset(&info, 0, sizeof(info));
         info.dwOSVersionInfoSize = sizeof(info);
         if (! GetVersionEx((LPOSVERSIONINFO)&info)) {
@@ -1701,18 +1681,6 @@ get_uname(void)
           strlcat(uname_result, " [server]", sizeof(uname_result));
         } else if (info.wProductType == VER_NT_WORKSTATION) {
           strlcat(uname_result, " [workstation]", sizeof(uname_result));
-        }
-        leftover_mask = info.wSuiteMask;
-        for (i = 0; win_mask_table[i].mask; ++i) {
-          if (info.wSuiteMask & win_mask_table[i].mask) {
-            strlcat(uname_result, win_mask_table[i].str, sizeof(uname_result));
-            leftover_mask &= ~win_mask_table[i].mask;
-          }
-        }
-        if (leftover_mask) {
-          size_t len = strlen(uname_result);
-          tor_snprintf(uname_result+len, sizeof(uname_result)-len,
-                       " {0x%x}", info.wSuiteMask);
         }
 #endif
 #else
@@ -2044,6 +2012,8 @@ tor_mutex_new(void)
 void
 tor_mutex_free(tor_mutex_t *m)
 {
+  if (!m)
+    return;
   tor_mutex_uninit(m);
   tor_free(m);
 }
@@ -2071,7 +2041,8 @@ tor_cond_new(void)
 void
 tor_cond_free(tor_cond_t *cond)
 {
-  tor_assert(cond);
+  if (!cond)
+    return;
   if (pthread_cond_destroy(&cond->cond)) {
     log_warn(LD_GENERAL,"Error freeing condition: %s", strerror(errno));
     return;
@@ -2128,7 +2099,8 @@ tor_cond_new(void)
 void
 tor_cond_free(tor_cond_t *cond)
 {
-  tor_assert(cond);
+  if (!cond)
+    return;
   DeleteCriticalSection(&cond->mutex);
   /* XXXX notify? */
   smartlist_free(cond->events);
@@ -2204,7 +2176,7 @@ tor_threads_init(void)
 }
 #endif
 
-#ifdef HAVE_SYS_MMAN_H
+#if defined(HAVE_MLOCKALL) && HAVE_DECL_MLOCKALL && defined(RLIMIT_MEMLOCK)
 /** Attempt to raise the current and max rlimit to infinity for our process.
  * This only needs to be done once and can probably only be done when we have
  * not already dropped privileges.
@@ -2258,7 +2230,6 @@ int
 tor_mlockall(void)
 {
   static int memory_lock_attempted = 0;
-  int ret;
 
   if (memory_lock_attempted) {
     return 1;
@@ -2273,15 +2244,13 @@ tor_mlockall(void)
    * http://msdn.microsoft.com/en-us/library/aa366895(VS.85).aspx
    */
 
-#ifdef HAVE_MLOCKALL
-  ret = tor_set_max_memlock();
-  if (ret == 0) {
+#if defined(HAVE_MLOCKALL) && HAVE_DECL_MLOCKALL && defined(RLIMIT_MEMLOCK)
+  if (tor_set_max_memlock() == 0) {
     /* Perhaps we only want to log this if we're in a verbose mode? */
     log_notice(LD_GENERAL, "RLIMIT_MEMLOCK is now set to RLIM_INFINITY.");
   }
 
-  ret = mlockall(MCL_CURRENT|MCL_FUTURE);
-  if (ret == 0) {
+  if (mlockall(MCL_CURRENT|MCL_FUTURE) == 0) {
     log_notice(LD_GENERAL, "Insecure OS paging is effectively disabled.");
     return 0;
   } else {

@@ -61,8 +61,7 @@ static void
 set_onion_key(crypto_pk_env_t *k)
 {
   tor_mutex_acquire(key_lock);
-  if (onionkey)
-    crypto_free_pk_env(onionkey);
+  crypto_free_pk_env(onionkey);
   onionkey = k;
   onionkey_set_at = time(NULL);
   tor_mutex_release(key_lock);
@@ -111,8 +110,7 @@ get_onion_key_set_at(void)
 void
 set_identity_key(crypto_pk_env_t *k)
 {
-  if (identitykey)
-    crypto_free_pk_env(identitykey);
+  crypto_free_pk_env(identitykey);
   identitykey = k;
   crypto_pk_get_digest(identitykey, identitykey_digest);
 }
@@ -201,8 +199,7 @@ rotate_onion_key(void)
   }
   log_info(LD_GENERAL, "Rotating onion key");
   tor_mutex_acquire(key_lock);
-  if (lastonionkey)
-    crypto_free_pk_env(lastonionkey);
+  crypto_free_pk_env(lastonionkey);
   lastonionkey = onionkey;
   onionkey = prkey;
   now = time(NULL);
@@ -331,10 +328,9 @@ load_authority_keyset(int legacy, crypto_pk_env_t **key_out,
     goto done;
   }
 
-  if (*key_out)
-    crypto_free_pk_env(*key_out);
-  if (*cert_out)
-    authority_cert_free(*cert_out);
+  crypto_free_pk_env(*key_out);
+  authority_cert_free(*cert_out);
+
   *key_out = signing_key;
   *cert_out = parsed;
   r = 0;
@@ -344,10 +340,8 @@ load_authority_keyset(int legacy, crypto_pk_env_t **key_out,
  done:
   tor_free(fname);
   tor_free(cert);
-  if (signing_key)
-    crypto_free_pk_env(signing_key);
-  if (parsed)
-    authority_cert_free(parsed);
+  crypto_free_pk_env(signing_key);
+  authority_cert_free(parsed);
   return r;
 }
 
@@ -1425,11 +1419,9 @@ router_rebuild_descriptor(int force)
 
   tor_assert(! routerinfo_incompatible_with_extrainfo(ri, ei, NULL, NULL));
 
-  if (desc_routerinfo)
-    routerinfo_free(desc_routerinfo);
+  routerinfo_free(desc_routerinfo);
   desc_routerinfo = ri;
-  if (desc_extrainfo)
-    extrainfo_free(desc_extrainfo);
+  extrainfo_free(desc_extrainfo);
   desc_extrainfo = ei;
 
   desc_clean_since = time(NULL);
@@ -1668,7 +1660,7 @@ router_dump_router_to_string(char *s, size_t maxlen, routerinfo_t *router,
     return -1;
   }
 
-  /* PEM-encode the identity key key */
+  /* PEM-encode the identity key */
   if (crypto_pk_write_public_key_to_string(router->identity_pkey,
                                         &identity_pkey,&identity_pkeylen)<0) {
     log_warn(LD_BUG,"write identity_pkey to string failed!");
@@ -1890,6 +1882,7 @@ extrainfo_dump_to_string(char *s, size_t maxlen, extrainfo_t *extrainfo,
   int result;
   size_t len;
   static int write_stats_to_extrainfo = 1;
+  time_t now = time(NULL);
 
   base16_encode(identity, sizeof(identity),
                 extrainfo->cache_info.identity_digest, DIGEST_LEN);
@@ -1904,7 +1897,6 @@ extrainfo_dump_to_string(char *s, size_t maxlen, extrainfo_t *extrainfo,
 
   if (options->ExtraInfoStatistics && write_stats_to_extrainfo) {
     char *contents = NULL;
-    time_t now = time(NULL);
     log_info(LD_GENERAL, "Adding stats to extra-info descriptor.");
     if (options->DirReqStatistics &&
         load_stats_file("stats"PATH_SEPARATOR"dirreq-stats",
@@ -1961,18 +1953,16 @@ extrainfo_dump_to_string(char *s, size_t maxlen, extrainfo_t *extrainfo,
     return -1;
 
   if (should_record_bridge_info(options)) {
-    char *geoip_summary = extrainfo_get_client_geoip_summary(time(NULL));
-    if (geoip_summary) {
-      char geoip_start[ISO_TIME_LEN+1];
-      format_iso_time(geoip_start, geoip_get_history_start());
-      result = tor_snprintf(s+strlen(s), maxlen-strlen(s),
-                            "geoip-start-time %s\n"
-                            "geoip-client-origins %s\n",
-                            geoip_start, geoip_summary);
-      control_event_clients_seen(geoip_start, geoip_summary);
-      tor_free(geoip_summary);
-      if (result<0)
-        return -1;
+    char *bridge_stats = geoip_get_bridge_stats_extrainfo(now);
+    if (bridge_stats) {
+      size_t pos = strlen(s);
+      if (strlcpy(s + pos, bridge_stats, maxlen - strlen(s)) !=
+          strlen(bridge_stats)) {
+        log_warn(LD_DIR, "Could not write bridge-stats to extra-info "
+                 "descriptor.");
+        s[pos] = '\0';
+      }
+      tor_free(bridge_stats);
     }
   }
 
@@ -2019,30 +2009,6 @@ extrainfo_dump_to_string(char *s, size_t maxlen, extrainfo_t *extrainfo,
   }
 
   return (int)strlen(s)+1;
-}
-
-/** Wrapper function for geoip_get_client_history(). It first discards
- * any items in the client history that are too old -- it dumps anything
- * more than 48 hours old, but it only considers whether to dump at most
- * once per 48 hours, so we aren't too precise to an observer (see also
- * r14780).
- */
-char *
-extrainfo_get_client_geoip_summary(time_t now)
-{
-  static time_t last_purged_at = 0;
-  int geoip_purge_interval =
-      (get_options()->DirReqStatistics || get_options()->EntryStatistics) ?
-      DIR_ENTRY_RECORD_USAGE_RETAIN_IPS : 48*60*60;
-  if (now > last_purged_at+geoip_purge_interval) {
-    /* (Note that this also discards items in the client history with
-     * action GEOIP_CLIENT_NETWORKSTATUS{_V2}, which doesn't matter
-     * because bridge and directory stats are independent. Keep in mind
-     * for future extensions, though.) */
-    geoip_remove_old_clients(now-geoip_purge_interval);
-    last_purged_at = now;
-  }
-  return geoip_get_client_history_bridge(now, GEOIP_CLIENT_CONNECT);
 }
 
 /** Return true iff <b>s</b> is a legally valid server nickname. */
@@ -2169,26 +2135,16 @@ router_purpose_from_string(const char *s)
 void
 router_free_all(void)
 {
-  if (onionkey)
-    crypto_free_pk_env(onionkey);
-  if (lastonionkey)
-    crypto_free_pk_env(lastonionkey);
-  if (identitykey)
-    crypto_free_pk_env(identitykey);
-  if (key_lock)
-    tor_mutex_free(key_lock);
-  if (desc_routerinfo)
-    routerinfo_free(desc_routerinfo);
-  if (desc_extrainfo)
-    extrainfo_free(desc_extrainfo);
-  if (authority_signing_key)
-    crypto_free_pk_env(authority_signing_key);
-  if (authority_key_certificate)
-    authority_cert_free(authority_key_certificate);
-  if (legacy_signing_key)
-    crypto_free_pk_env(legacy_signing_key);
-  if (legacy_key_certificate)
-    authority_cert_free(legacy_key_certificate);
+  crypto_free_pk_env(onionkey);
+  crypto_free_pk_env(lastonionkey);
+  crypto_free_pk_env(identitykey);
+  tor_mutex_free(key_lock);
+  routerinfo_free(desc_routerinfo);
+  extrainfo_free(desc_extrainfo);
+  crypto_free_pk_env(authority_signing_key);
+  authority_cert_free(authority_key_certificate);
+  crypto_free_pk_env(legacy_signing_key);
+  authority_cert_free(legacy_key_certificate);
 
   if (warned_nonexistent_family) {
     SMARTLIST_FOREACH(warned_nonexistent_family, char *, cp, tor_free(cp));

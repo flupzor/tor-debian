@@ -128,6 +128,8 @@ typedef struct cached_resolve_t {
   uint32_t ttl; /**< What TTL did the nameserver tell us? */
   /** Connections that want to know when we get an answer for this resolve. */
   pending_connection_t *pending_connections;
+  /** Position of this element in the heap*/
+  int minheap_idx;
 } cached_resolve_t;
 
 static void purge_expired_resolves(time_t now);
@@ -301,6 +303,8 @@ dns_get_expiry_ttl(uint32_t ttl)
 static void
 _free_cached_resolve(cached_resolve_t *r)
 {
+  if (!r)
+    return;
   while (r->pending_connections) {
     pending_connection_t *victim = r->pending_connections;
     r->pending_connections = victim->next;
@@ -342,6 +346,7 @@ set_expiry(cached_resolve_t *resolve, time_t expires)
   resolve->expire = expires;
   smartlist_pqueue_add(cached_resolve_pqueue,
                        _compare_cached_resolves_by_expiry,
+                       STRUCT_OFFSET(cached_resolve_t, minheap_idx),
                        resolve);
 }
 
@@ -364,8 +369,7 @@ dns_free_all(void)
     _free_cached_resolve(item);
   }
   HT_CLEAR(cache_map, &cache_root);
-  if (cached_resolve_pqueue)
-    smartlist_free(cached_resolve_pqueue);
+  smartlist_free(cached_resolve_pqueue);
   cached_resolve_pqueue = NULL;
   tor_free(resolv_conf_fname);
 }
@@ -388,7 +392,8 @@ purge_expired_resolves(time_t now)
     if (resolve->expire > now)
       break;
     smartlist_pqueue_pop(cached_resolve_pqueue,
-                         _compare_cached_resolves_by_expiry);
+                         _compare_cached_resolves_by_expiry,
+                         STRUCT_OFFSET(cached_resolve_t, minheap_idx));
 
     if (resolve->state == CACHE_STATE_PENDING) {
       log_debug(LD_EXIT,
@@ -750,6 +755,7 @@ dns_resolve_impl(edge_connection_t *exitconn, int is_resolve,
   resolve = tor_malloc_zero(sizeof(cached_resolve_t));
   resolve->magic = CACHED_RESOLVE_MAGIC;
   resolve->state = CACHE_STATE_PENDING;
+  resolve->minheap_idx = -1;
   resolve->is_reverse = is_reverse;
   strlcpy(resolve->address, exitconn->_base.address, sizeof(resolve->address));
 
@@ -846,7 +852,8 @@ connection_dns_remove(edge_connection_t *conn)
     tor_free(pend);
     log_debug(LD_EXIT, "First connection (fd %d) no longer waiting "
               "for resolve of %s",
-              conn->_base.s, escaped_safe_str(conn->_base.address));
+              conn->_base.s,
+              escaped_safe_str(conn->_base.address));
     return;
   } else {
     for ( ; pend->next; pend = pend->next) {
@@ -1386,7 +1393,8 @@ launch_resolve(edge_connection_t *exitconn)
 
   r = 0;
   if (!req) {
-    log_warn(LD_EXIT, "eventdns rejected address %s.", escaped_safe_str(addr));
+    log_warn(LD_EXIT, "eventdns rejected address %s.",
+             escaped_safe_str(addr));
     r = -1;
     tor_free(addr); /* There is no evdns request in progress; stop
                      * addr from getting leaked. */
@@ -1642,10 +1650,9 @@ dns_seems_to_be_broken(void)
 void
 dns_reset_correctness_checks(void)
 {
-  if (dns_wildcard_response_count) {
-    strmap_free(dns_wildcard_response_count, _tor_free);
-    dns_wildcard_response_count = NULL;
-  }
+  strmap_free(dns_wildcard_response_count, _tor_free);
+  dns_wildcard_response_count = NULL;
+
   n_wildcard_requests = 0;
 
   if (dns_wildcard_list) {
@@ -1734,7 +1741,8 @@ _assert_cache_ok(void)
     return;
 
   smartlist_pqueue_assert_ok(cached_resolve_pqueue,
-                             _compare_cached_resolves_by_expiry);
+                             _compare_cached_resolves_by_expiry,
+                             STRUCT_OFFSET(cached_resolve_t, minheap_idx));
 
   SMARTLIST_FOREACH(cached_resolve_pqueue, cached_resolve_t *, res,
     {

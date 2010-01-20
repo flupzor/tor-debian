@@ -400,7 +400,8 @@ crypto_new_pk_env(void)
 void
 crypto_free_pk_env(crypto_pk_env_t *env)
 {
-  tor_assert(env);
+  if (!env)
+    return;
 
   if (--env->refs > 0)
     return;
@@ -426,10 +427,7 @@ crypto_create_init_cipher(const char *key, int encrypt_mode)
     return NULL;
   }
 
-  if (crypto_cipher_set_key(crypto, key)) {
-    crypto_log_errors(LOG_WARN, "setting symmetric key");
-    goto error;
-  }
+  crypto_cipher_set_key(crypto, key);
 
   if (encrypt_mode)
     r = crypto_cipher_encrypt_init_cipher(crypto);
@@ -463,7 +461,8 @@ crypto_new_cipher_env(void)
 void
 crypto_free_cipher_env(crypto_cipher_env_t *env)
 {
-  tor_assert(env);
+  if (!env)
+    return;
 
   tor_assert(env->cipher);
   aes_free_cipher(env->cipher);
@@ -611,7 +610,6 @@ crypto_pk_write_key_to_string_impl(crypto_pk_env_t *env, char **dest,
   (void)BIO_set_close(b, BIO_NOCLOSE); /* so BIO_free doesn't free buf */
   BIO_free(b);
 
-  tor_assert(buf->length >= 0);
   *dest = tor_malloc(buf->length+1);
   memcpy(*dest, buf->data, buf->length);
   (*dest)[buf->length] = 0; /* nul terminate it */
@@ -1252,16 +1250,14 @@ crypto_cipher_generate_key(crypto_cipher_env_t *env)
 
 /** Set the symmetric key for the cipher in <b>env</b> to the first
  * CIPHER_KEY_LEN bytes of <b>key</b>. Does not initialize the cipher.
- * Return 0 on success, -1 on failure.
  */
-int
+void
 crypto_cipher_set_key(crypto_cipher_env_t *env, const char *key)
 {
   tor_assert(env);
   tor_assert(key);
 
   memcpy(env->key, key, CIPHER_KEY_LEN);
-  return 0;
 }
 
 /** Generate an initialization vector for our AES-CTR cipher; store it
@@ -1528,6 +1524,8 @@ crypto_new_digest256_env(digest_algorithm_t algorithm)
 void
 crypto_free_digest_env(crypto_digest_env_t *digest)
 {
+  if (!digest)
+    return;
   memset(digest, 0, sizeof(crypto_digest_env_t));
   tor_free(digest);
 }
@@ -1899,7 +1897,8 @@ crypto_expand_key_material(const char *key_in, size_t key_in_len,
 void
 crypto_dh_free(crypto_dh_env_t *dh)
 {
-  tor_assert(dh);
+  if (!dh)
+    return;
   tor_assert(dh->dh);
   DH_free(dh->dh);
   tor_free(dh);

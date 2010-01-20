@@ -96,8 +96,9 @@ static void directory_initiate_command_rend(const char *address,
 
 /********* END VARIABLES ************/
 
-/** Return true iff the directory purpose 'purpose' must use an
- * anonymous connection to a directory. */
+/** Return true iff the directory purpose <b>dir_purpose</b> (and if it's
+ * fetching descriptors, it's fetching them for <b>router_purpose</b>)
+ * must use an anonymous connection to a directory. */
 static int
 purpose_needs_anonymity(uint8_t dir_purpose, uint8_t router_purpose)
 {
@@ -229,7 +230,7 @@ directories_have_accepted_server_descriptor(void)
 
 /** Start a connection to every suitable directory authority, using
  * connection purpose 'purpose' and uploading the payload 'payload'
- * (length 'payload_len').  The purpose should be one of
+ * (length 'payload_len').  dir_purpose should be one of
  * 'DIR_PURPOSE_UPLOAD_DIR' or 'DIR_PURPOSE_UPLOAD_RENDDESC'.
  *
  * <b>type</b> specifies what sort of dir authorities (V1, V2,
@@ -557,7 +558,7 @@ connection_dir_request_failed(dir_connection_t *conn)
   if (directory_conn_is_self_reachability_test(conn)) {
     return; /* this was a test fetch. don't retry. */
   }
-  if (entry_list_can_grow(get_options()))
+  if (entry_list_is_constrained(get_options()))
     router_set_status(conn->identity_digest, 0); /* don't try him again */
   if (conn->_base.purpose == DIR_PURPOSE_FETCH_V2_NETWORKSTATUS) {
     log_info(LD_DIR, "Giving up on directory server at '%s'; retrying",
@@ -664,7 +665,7 @@ connection_dir_download_cert_failed(dir_connection_t *conn, int status)
  * 1) If or_port is 0, or it's a direct conn and or_port is firewalled
  *    or we're a dir mirror, no.
  * 2) If we prefer to avoid begindir conns, and we're not fetching or
- * publishing a bridge relay descriptor, no.
+ *    publishing a bridge relay descriptor, no.
  * 3) Else yes.
  */
 static int
@@ -919,7 +920,7 @@ directory_get_consensus_url(int supports_conditional_consensus)
 }
 
 /** Queue an appropriate HTTP command on conn-\>outbuf.  The other args
- * are as in directory_initiate_command.
+ * are as in directory_initiate_command().
  */
 static void
 directory_send_command(dir_connection_t *conn,
@@ -1147,7 +1148,7 @@ parse_http_url(const char *headers, char **url)
     if (s-tmp >= 3 && !strcmpstart(tmp,"://")) {
       tmp = strchr(tmp+3, '/');
       if (tmp && tmp < s) {
-        log_debug(LD_DIR,"Skipping over 'http[s]://hostname' string");
+        log_debug(LD_DIR,"Skipping over 'http[s]://hostname/' string");
         start = tmp;
       }
     }
@@ -1463,21 +1464,22 @@ connection_dir_client_reached_eof(dir_connection_t *conn)
   }
   (void) skewed; /* skewed isn't used yet. */
 
-  if (status_code == 503 && body_len < 16) {
-    routerstatus_t *rs;
-    trusted_dir_server_t *ds;
-    log_info(LD_DIR,"Received http status code %d (%s) from server "
-             "'%s:%d'. I'll try again soon.",
-             status_code, escaped(reason), conn->_base.address,
-             conn->_base.port);
-    if ((rs = router_get_consensus_status_by_id(conn->identity_digest)))
-      rs->last_dir_503_at = now;
-    if ((ds = router_get_trusteddirserver_by_digest(conn->identity_digest)))
-      ds->fake_status.last_dir_503_at = now;
+  if (status_code == 503) {
+    if (body_len < 16) {
+      routerstatus_t *rs;
+      trusted_dir_server_t *ds;
+      log_info(LD_DIR,"Received http status code %d (%s) from server "
+               "'%s:%d'. I'll try again soon.",
+               status_code, escaped(reason), conn->_base.address,
+               conn->_base.port);
+      if ((rs = router_get_consensus_status_by_id(conn->identity_digest)))
+        rs->last_dir_503_at = now;
+      if ((ds = router_get_trusteddirserver_by_digest(conn->identity_digest)))
+        ds->fake_status.last_dir_503_at = now;
 
-    tor_free(body); tor_free(headers); tor_free(reason);
-    return -1;
-  } else if (status_code == 503) {
+      tor_free(body); tor_free(headers); tor_free(reason);
+      return -1;
+    }
     /* XXXX022 Remove this once every server with bug 539 is obsolete. */
     log_info(LD_DIR, "Server at '%s:%d' sent us a 503 response, but included "
              "a body anyway.  We'll pretend it gave us a 200.",
@@ -1549,7 +1551,7 @@ connection_dir_client_reached_eof(dir_connection_t *conn)
     v2_networkstatus_source_t source;
     char *cp;
     log_info(LD_DIR,"Received networkstatus objects (size %d) from server "
-             "'%s:%d'",(int) body_len, conn->_base.address, conn->_base.port);
+             "'%s:%d'", (int)body_len, conn->_base.address, conn->_base.port);
     if (status_code != 200) {
       log_warn(LD_DIR,
            "Received http status code %d (%s) from server "
@@ -1623,7 +1625,7 @@ connection_dir_client_reached_eof(dir_connection_t *conn)
       return -1;
     }
     log_info(LD_DIR,"Received consensus directory (size %d) from server "
-             "'%s:%d'",(int) body_len, conn->_base.address, conn->_base.port);
+             "'%s:%d'", (int)body_len, conn->_base.address, conn->_base.port);
     if ((r=networkstatus_set_current_consensus(body, "ns", 0))<0) {
       log_fn(r<-1?LOG_WARN:LOG_INFO, LD_DIR,
              "Unable to load consensus directory downloaded from "
@@ -1651,7 +1653,7 @@ connection_dir_client_reached_eof(dir_connection_t *conn)
       return -1;
     }
     log_info(LD_DIR,"Received authority certificates (size %d) from server "
-             "'%s:%d'",(int) body_len, conn->_base.address, conn->_base.port);
+             "'%s:%d'", (int)body_len, conn->_base.address, conn->_base.port);
     if (trusted_dirs_load_certs_from_string(body, 0, 1)<0) {
       log_warn(LD_DIR, "Unable to parse fetched certificates");
       /* if we fetched more than one and only some failed, the successful
@@ -1666,7 +1668,7 @@ connection_dir_client_reached_eof(dir_connection_t *conn)
     const char *msg;
     int st;
     log_info(LD_DIR,"Got votes (size %d) from server %s:%d",
-             (int) body_len, conn->_base.address, conn->_base.port);
+             (int)body_len, conn->_base.address, conn->_base.port);
     if (status_code != 200) {
       log_warn(LD_DIR,
              "Received http status code %d (%s) from server "
@@ -1686,7 +1688,7 @@ connection_dir_client_reached_eof(dir_connection_t *conn)
   if (conn->_base.purpose == DIR_PURPOSE_FETCH_DETACHED_SIGNATURES) {
     const char *msg = NULL;
     log_info(LD_DIR,"Got detached signatures (size %d) from server %s:%d",
-             (int) body_len, conn->_base.address, conn->_base.port);
+             (int)body_len, conn->_base.address, conn->_base.port);
     if (status_code != 200) {
       log_warn(LD_DIR,
         "Received http status code %d (%s) from server '%s:%d' while fetching "
@@ -1996,12 +1998,6 @@ connection_dir_client_reached_eof(dir_connection_t *conn)
                  "'%s:%d'. Malformed rendezvous descriptor?",
                  escaped(reason), conn->_base.address, conn->_base.port);
         break;
-      case 503:
-        log_info(LD_REND,"http status 503 (%s) response from dirserver "
-                 "'%s:%d'. Node is (currently) not acting as v2 hidden "
-                 "service directory.",
-                 escaped(reason), conn->_base.address, conn->_base.port);
-        break;
       default:
         log_warn(LD_REND,"http status %d (%s) response unexpected (server "
                  "'%s:%d').",
@@ -2308,7 +2304,7 @@ directory_dump_request_log(void)
 }
 #endif
 
-/** Decide whether a client would accept the consensus we have
+/** Decide whether a client would accept the consensus we have.
  *
  * Clients can say they only want a consensus if it's signed by more
  * than half the authorities in a list.  They pass this list in
@@ -2955,18 +2951,9 @@ directory_handle_command_get(dir_connection_t *conn, const char *headers,
         note_request("/tor/rendezvous?/", desc_len);
         /* need to send descp separately, because it may include NULs */
         connection_write_to_buf(descp, desc_len, TO_CONN(conn));
-        /* report successful fetch to statistic */
-        if (options->HSAuthorityRecordStats) {
-          hs_usage_note_fetch_total(query, time(NULL));
-          hs_usage_note_fetch_successful(query, time(NULL));
-        }
         break;
       case 0: /* well-formed but not present */
         write_http_status_line(conn, 404, "Not found");
-        /* report (unsuccessful) fetch to statistic */
-        if (options->HSAuthorityRecordStats) {
-          hs_usage_note_fetch_total(query, time(NULL));
-        }
         break;
       case -1: /* not well-formed */
         write_http_status_line(conn, 400, "Bad request");
@@ -3024,7 +3011,8 @@ directory_handle_command_get(dir_connection_t *conn, const char *headers,
   if (!strcmp(url,"/tor/dbg-stability.txt")) {
     const char *stability;
     size_t len;
-    if (! authdir_mode_tests_reachability(options) ||
+    if (options->BridgeAuthoritativeDir ||
+        ! authdir_mode_tests_reachability(options) ||
         ! (stability = rep_hist_get_router_stability_doc(time(NULL)))) {
       write_http_status_line(conn, 404, "Not found.");
       goto done;
@@ -3242,8 +3230,8 @@ directory_handle_command(dir_connection_t *conn)
                               &body, &body_len, MAX_DIR_UL_SIZE, 0)) {
     case -1: /* overflow */
       log_warn(LD_DIRSERV,
-               "Invalid input from address '%s'. Closing.",
-               conn->_base.address);
+               "Request too large from address '%s' to DirPort. Closing.",
+               safe_str(conn->_base.address));
       return -1;
     case 0:
       log_debug(LD_DIRSERV,"command not all here yet.");

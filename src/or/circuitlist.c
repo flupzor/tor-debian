@@ -385,6 +385,12 @@ init_circuit_base(circuit_t *circ)
   circ->package_window = circuit_initial_package_window();
   circ->deliver_window = CIRCWINDOW_START;
 
+  /* Initialize the cell_ewma_t structure */
+  circ->n_cell_ewma.last_adjusted_tick = cell_ewma_get_tick();
+  circ->n_cell_ewma.cell_count = 0.0;
+  circ->n_cell_ewma.heap_index = -1;
+  circ->n_cell_ewma.is_for_p_conn = 0;
+
   circuit_add(circ);
 }
 
@@ -432,6 +438,16 @@ or_circuit_new(circid_t p_circ_id, or_connection_t *p_conn)
 
   init_circuit_base(TO_CIRCUIT(circ));
 
+  /* Initialize the cell_ewma_t structure */
+
+  /* Initialize the cell counts to 0 */
+  circ->p_cell_ewma.cell_count = 0.0;
+  circ->p_cell_ewma.last_adjusted_tick = cell_ewma_get_tick();
+  circ->p_cell_ewma.is_for_p_conn = 1;
+
+  /* It's not in any heap yet. */
+  circ->p_cell_ewma.heap_index = -1;
+
   return circ;
 }
 
@@ -442,25 +458,24 @@ circuit_free(circuit_t *circ)
 {
   void *mem;
   size_t memlen;
-  tor_assert(circ);
+  if (!circ)
+    return;
+
   if (CIRCUIT_IS_ORIGIN(circ)) {
     origin_circuit_t *ocirc = TO_ORIGIN_CIRCUIT(circ);
     mem = ocirc;
     memlen = sizeof(origin_circuit_t);
     tor_assert(circ->magic == ORIGIN_CIRCUIT_MAGIC);
     if (ocirc->build_state) {
-      if (ocirc->build_state->chosen_exit)
         extend_info_free(ocirc->build_state->chosen_exit);
-      if (ocirc->build_state->pending_final_cpath)
         circuit_free_cpath_node(ocirc->build_state->pending_final_cpath);
     }
     tor_free(ocirc->build_state);
 
     circuit_free_cpath(ocirc->cpath);
-    if (ocirc->intro_key)
-      crypto_free_pk_env(ocirc->intro_key);
-    if (ocirc->rend_data)
-      rend_data_free(ocirc->rend_data);
+
+    crypto_free_pk_env(ocirc->intro_key);
+    rend_data_free(ocirc->rend_data);
   } else {
     or_circuit_t *ocirc = TO_OR_CIRCUIT(circ);
     /* Remember cell statistics for this circuit before deallocating. */
@@ -470,14 +485,10 @@ circuit_free(circuit_t *circ)
     memlen = sizeof(or_circuit_t);
     tor_assert(circ->magic == OR_CIRCUIT_MAGIC);
 
-    if (ocirc->p_crypto)
-      crypto_free_cipher_env(ocirc->p_crypto);
-    if (ocirc->p_digest)
-      crypto_free_digest_env(ocirc->p_digest);
-    if (ocirc->n_crypto)
-      crypto_free_cipher_env(ocirc->n_crypto);
-    if (ocirc->n_digest)
-      crypto_free_digest_env(ocirc->n_digest);
+    crypto_free_cipher_env(ocirc->p_crypto);
+    crypto_free_digest_env(ocirc->p_digest);
+    crypto_free_cipher_env(ocirc->n_crypto);
+    crypto_free_digest_env(ocirc->n_digest);
 
     if (ocirc->rend_splice) {
       or_circuit_t *other = ocirc->rend_splice;
@@ -493,8 +504,7 @@ circuit_free(circuit_t *circ)
     cell_queue_clear(&ocirc->p_conn_cells);
   }
 
-  if (circ->n_hop)
-    extend_info_free(circ->n_hop);
+  extend_info_free(circ->n_hop);
   tor_free(circ->n_conn_onionskin);
 
   /* Remove from map. */
@@ -504,7 +514,7 @@ circuit_free(circuit_t *circ)
    * "active" checks will be violated. */
   cell_queue_clear(&circ->n_conn_cells);
 
-  memset(circ, 0xAA, memlen); /* poison memory */
+  memset(mem, 0xAA, memlen); /* poison memory */
   tor_free(mem);
 }
 
@@ -547,10 +557,10 @@ circuit_free_all(void)
     circuit_free(global_circuitlist);
     global_circuitlist = next;
   }
-  if (circuits_pending_or_conns) {
-    smartlist_free(circuits_pending_or_conns);
-    circuits_pending_or_conns = NULL;
-  }
+
+  smartlist_free(circuits_pending_or_conns);
+  circuits_pending_or_conns = NULL;
+
   HT_CLEAR(orconn_circid_map, &orconn_circid_circuit_map);
 }
 
@@ -558,18 +568,15 @@ circuit_free_all(void)
 static void
 circuit_free_cpath_node(crypt_path_t *victim)
 {
-  if (victim->f_crypto)
-    crypto_free_cipher_env(victim->f_crypto);
-  if (victim->b_crypto)
-    crypto_free_cipher_env(victim->b_crypto);
-  if (victim->f_digest)
-    crypto_free_digest_env(victim->f_digest);
-  if (victim->b_digest)
-    crypto_free_digest_env(victim->b_digest);
-  if (victim->dh_handshake_state)
-    crypto_dh_free(victim->dh_handshake_state);
-  if (victim->extend_info)
-    extend_info_free(victim->extend_info);
+  if (!victim)
+    return;
+
+  crypto_free_cipher_env(victim->f_crypto);
+  crypto_free_cipher_env(victim->b_crypto);
+  crypto_free_digest_env(victim->f_digest);
+  crypto_free_digest_env(victim->b_digest);
+  crypto_dh_free(victim->dh_handshake_state);
+  extend_info_free(victim->extend_info);
 
   memset(victim, 0xBB, sizeof(crypt_path_t)); /* poison memory */
   tor_free(victim);
@@ -1089,9 +1096,9 @@ _circuit_mark_for_close(circuit_t *circ, int reason, int line,
     tor_assert(ocirc->rend_data);
     /* treat this like getting a nack from it */
     log_info(LD_REND, "Failed intro circ %s to %s (awaiting ack). "
-             "Removing from descriptor.",
-             safe_str(ocirc->rend_data->onion_address),
-             safe_str(build_state_get_exit_nickname(ocirc->build_state)));
+           "Removing from descriptor.",
+           safe_str_client(ocirc->rend_data->onion_address),
+           safe_str_client(build_state_get_exit_nickname(ocirc->build_state)));
     rend_client_remove_intro_point(ocirc->build_state->chosen_exit,
                                    ocirc->rend_data);
   }
@@ -1103,6 +1110,7 @@ _circuit_mark_for_close(circuit_t *circ, int reason, int line,
     edge_connection_t *conn;
     for (conn=or_circ->n_streams; conn; conn=conn->next_stream)
       connection_edge_destroy(or_circ->p_circ_id, conn);
+    or_circ->n_streams = NULL;
 
     while (or_circ->resolving_streams) {
       conn = or_circ->resolving_streams;
@@ -1126,6 +1134,7 @@ _circuit_mark_for_close(circuit_t *circ, int reason, int line,
     edge_connection_t *conn;
     for (conn=ocirc->p_streams; conn; conn=conn->next_stream)
       connection_edge_destroy(circ->n_circ_id, conn);
+    ocirc->p_streams = NULL;
   }
 
   circ->marked_for_close = line;
@@ -1240,11 +1249,6 @@ assert_circuit_ok(const circuit_t *c)
       tor_assert(c == c2);
     }
   }
-#if 0 /* false now that rendezvous exits are attached to p_streams */
-  if (origin_circ)
-    for (conn = origin_circ->p_streams; conn; conn = conn->next_stream)
-      tor_assert(conn->_base.type == CONN_TYPE_AP);
-#endif
   if (or_circ)
     for (conn = or_circ->n_streams; conn; conn = conn->next_stream)
       tor_assert(conn->_base.type == CONN_TYPE_EXIT);

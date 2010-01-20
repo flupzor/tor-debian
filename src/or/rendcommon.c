@@ -22,6 +22,8 @@ rend_cmp_service_ids(const char *one, const char *two)
 void
 rend_service_descriptor_free(rend_service_descriptor_t *desc)
 {
+  if (!desc)
+    return;
   if (desc->pk)
     crypto_free_pk_env(desc->pk);
   if (desc->intro_nodes) {
@@ -125,7 +127,8 @@ rend_compute_v2_desc_id(char *desc_id_out, const char *service_id,
   if (!service_id ||
       strlen(service_id) != REND_SERVICE_ID_LEN_BASE32) {
     log_warn(LD_REND, "Could not compute v2 descriptor ID: "
-                      "Illegal service ID: %s", safe_str(service_id));
+                      "Illegal service ID: %s",
+             safe_str(service_id));
     return -1;
   }
   if (replica >= REND_NUMBER_OF_NON_CONSECUTIVE_REPLICAS) {
@@ -138,7 +141,7 @@ rend_compute_v2_desc_id(char *desc_id_out, const char *service_id,
                     service_id, REND_SERVICE_ID_LEN_BASE32) < 0) {
     log_warn(LD_REND, "Could not compute v2 descriptor ID: "
                       "Illegal characters in service ID: %s",
-             safe_str(service_id));
+             safe_str_client(service_id));
     return -1;
   }
   /* Calculate current time-period. */
@@ -403,8 +406,7 @@ rend_desc_v2_is_parsable(rend_encoded_v2_service_descriptor_t *desc)
                                          &test_intro_size,
                                          &test_encoded_size,
                                          &test_next, desc->desc_str);
-  if (test_parsed)
-    rend_service_descriptor_free(test_parsed);
+  rend_service_descriptor_free(test_parsed);
   tor_free(test_intro_content);
   return (res >= 0);
 }
@@ -414,6 +416,8 @@ void
 rend_encoded_v2_service_descriptor_free(
   rend_encoded_v2_service_descriptor_t *desc)
 {
+  if (!desc)
+    return;
   tor_free(desc->desc_str);
   tor_free(desc);
 }
@@ -422,10 +426,11 @@ rend_encoded_v2_service_descriptor_free(
 void
 rend_intro_point_free(rend_intro_point_t *intro)
 {
-  if (intro->extend_info)
-    extend_info_free(intro->extend_info);
-  if (intro->intro_key)
-    crypto_free_pk_env(intro->intro_key);
+  if (!intro)
+    return;
+
+  extend_info_free(intro->extend_info);
+  crypto_free_pk_env(intro->intro_key);
   tor_free(intro);
 }
 
@@ -772,22 +777,27 @@ rend_cache_init(void)
 
 /** Helper: free storage held by a single service descriptor cache entry. */
 static void
-_rend_cache_entry_free(void *p)
+rend_cache_entry_free(rend_cache_entry_t *e)
 {
-  rend_cache_entry_t *e = p;
+  if (!e)
+    return;
   rend_service_descriptor_free(e->parsed);
   tor_free(e->desc);
   tor_free(e);
+}
+
+static void
+_rend_cache_entry_free(void *p)
+{
+  rend_cache_entry_free(p);
 }
 
 /** Free all storage held by the service descriptor cache. */
 void
 rend_cache_free_all(void)
 {
-  if (rend_cache)
-    strmap_free(rend_cache, _rend_cache_entry_free);
-  if (rend_cache_v2_dir)
-    digestmap_free(rend_cache_v2_dir, _rend_cache_entry_free);
+  strmap_free(rend_cache, _rend_cache_entry_free);
+  digestmap_free(rend_cache_v2_dir, _rend_cache_entry_free);
   rend_cache = NULL;
   rend_cache_v2_dir = NULL;
 }
@@ -808,7 +818,7 @@ rend_cache_clean(void)
     ent = (rend_cache_entry_t*)val;
     if (ent->parsed->timestamp < cutoff) {
       iter = strmap_iter_next_rmv(rend_cache, iter);
-      _rend_cache_entry_free(ent);
+      rend_cache_entry_free(ent);
     } else {
       iter = strmap_iter_next(rend_cache, iter);
     }
@@ -834,9 +844,9 @@ rend_cache_clean_v2_descs_as_dir(void)
       char key_base32[REND_DESC_ID_V2_LEN_BASE32 + 1];
       base32_encode(key_base32, sizeof(key_base32), key, DIGEST_LEN);
       log_info(LD_REND, "Removing descriptor with ID '%s' from cache",
-               safe_str(key_base32));
+               safe_str_client(key_base32));
       iter = digestmap_iter_next_rmv(rend_cache_v2_dir, iter);
-      _rend_cache_entry_free(ent);
+      rend_cache_entry_free(ent);
     } else {
       iter = digestmap_iter_next(rend_cache_v2_dir, iter);
     }
@@ -995,7 +1005,6 @@ rend_cache_store(const char *desc, size_t desc_len, int published)
   char query[REND_SERVICE_ID_LEN_BASE32+1];
   char key[REND_SERVICE_ID_LEN_BASE32+2]; /* 0<query>\0 */
   time_t now;
-  or_options_t *options = get_options();
   tor_assert(rend_cache);
   parsed = rend_parse_service_descriptor(desc,desc_len);
   if (!parsed) {
@@ -1010,13 +1019,15 @@ rend_cache_store(const char *desc, size_t desc_len, int published)
   now = time(NULL);
   if (parsed->timestamp < now-REND_CACHE_MAX_AGE-REND_CACHE_MAX_SKEW) {
     log_fn(LOG_PROTOCOL_WARN, LD_REND,
-           "Service descriptor %s is too old.", safe_str(query));
+           "Service descriptor %s is too old.",
+           safe_str_client(query));
     rend_service_descriptor_free(parsed);
     return -2;
   }
   if (parsed->timestamp > now+REND_CACHE_MAX_SKEW) {
     log_fn(LOG_PROTOCOL_WARN, LD_REND,
-           "Service descriptor %s is too far in the future.", safe_str(query));
+           "Service descriptor %s is too far in the future.",
+           safe_str_client(query));
     rend_service_descriptor_free(parsed);
     return -2;
   }
@@ -1024,25 +1035,22 @@ rend_cache_store(const char *desc, size_t desc_len, int published)
   tor_snprintf(key, sizeof(key), "2%s", query);
   if (!published && strmap_get_lc(rend_cache, key)) {
     log_info(LD_REND, "We already have a v2 descriptor for service %s.",
-             safe_str(query));
+             safe_str_client(query));
     rend_service_descriptor_free(parsed);
     return -1;
-  }
-  /* report novel publication to statistics */
-  if (published && options->HSAuthorityRecordStats) {
-    hs_usage_note_publish_total(query, now);
   }
   tor_snprintf(key, sizeof(key), "0%s", query);
   e = (rend_cache_entry_t*) strmap_get_lc(rend_cache, key);
   if (e && e->parsed->timestamp > parsed->timestamp) {
     log_info(LD_REND,"We already have a newer service descriptor %s with the "
-             "same ID and version.", safe_str(query));
+             "same ID and version.",
+             safe_str_client(query));
     rend_service_descriptor_free(parsed);
     return 0;
   }
   if (e && e->len == desc_len && !memcmp(desc,e->desc,desc_len)) {
     log_info(LD_REND,"We already have this service descriptor %s.",
-             safe_str(query));
+             safe_str_client(query));
     e->received = time(NULL);
     rend_service_descriptor_free(parsed);
     return 0;
@@ -1050,10 +1058,6 @@ rend_cache_store(const char *desc, size_t desc_len, int published)
   if (!e) {
     e = tor_malloc_zero(sizeof(rend_cache_entry_t));
     strmap_set_lc(rend_cache, key, e);
-    /* report novel publication to statistics */
-    if (published && options->HSAuthorityRecordStats) {
-      hs_usage_note_publish_novel(query, now);
-    }
   } else {
     rend_service_descriptor_free(e->parsed);
     tor_free(e->desc);
@@ -1065,7 +1069,7 @@ rend_cache_store(const char *desc, size_t desc_len, int published)
   memcpy(e->desc, desc, desc_len);
 
   log_debug(LD_REND,"Successfully stored rend desc '%s', len %d.",
-            safe_str(query), (int)desc_len);
+            safe_str_client(query), (int)desc_len);
   return 1;
 }
 
@@ -1116,7 +1120,7 @@ rend_cache_store_v2_desc_as_dir(const char *desc)
     if (!hid_serv_responsible_for_desc_id(desc_id)) {
       log_info(LD_REND, "Service descriptor with desc ID %s is not in "
                         "interval that we are responsible for.",
-               safe_str(desc_id_base32));
+               safe_str_client(desc_id_base32));
       goto skip;
     }
     /* Is descriptor too old? */
@@ -1281,14 +1285,14 @@ rend_cache_store_v2_desc_as_client(const char *desc,
   /* Is descriptor too old? */
   if (parsed->timestamp < now - REND_CACHE_MAX_AGE-REND_CACHE_MAX_SKEW) {
     log_warn(LD_REND, "Service descriptor with service ID %s is too old.",
-             safe_str(service_id));
+             safe_str_client(service_id));
     retval = -2;
     goto err;
   }
   /* Is descriptor too far in the future? */
   if (parsed->timestamp > now + REND_CACHE_MAX_SKEW) {
     log_warn(LD_REND, "Service descriptor with service ID %s is too far in "
-                      "the future.", safe_str(service_id));
+                      "the future.", safe_str_client(service_id));
     retval = -2;
     goto err;
   }
@@ -1296,7 +1300,7 @@ rend_cache_store_v2_desc_as_client(const char *desc,
   tor_snprintf(key, sizeof(key), "0%s", service_id);
   if (strmap_get_lc(rend_cache, key)) {
     log_info(LD_REND, "We already have a v0 descriptor for service ID %s.",
-             safe_str(service_id));
+             safe_str_client(service_id));
     retval = -1;
     goto err;
   }
@@ -1306,14 +1310,14 @@ rend_cache_store_v2_desc_as_client(const char *desc,
   if (e && e->parsed->timestamp > parsed->timestamp) {
     log_info(LD_REND, "We already have a newer service descriptor for "
                       "service ID %s with the same desc ID and version.",
-             safe_str(service_id));
+             safe_str_client(service_id));
     retval = 0;
     goto err;
   }
   /* Do we already have this descriptor? */
   if (e && !strcmp(desc, e->desc)) {
     log_info(LD_REND,"We already have this service descriptor %s.",
-             safe_str(service_id));
+             safe_str_client(service_id));
     e->received = time(NULL);
     retval = 0;
     goto err;
@@ -1331,12 +1335,11 @@ rend_cache_store_v2_desc_as_client(const char *desc,
   strlcpy(e->desc, desc, encoded_size + 1);
   e->len = encoded_size;
   log_debug(LD_REND,"Successfully stored rend desc '%s', len %d.",
-            safe_str(service_id), (int)encoded_size);
+            safe_str_client(service_id), (int)encoded_size);
   return 1;
 
  err:
-  if (parsed)
-    rend_service_descriptor_free(parsed);
+  rend_service_descriptor_free(parsed);
   tor_free(intro_content);
   return retval;
 }
