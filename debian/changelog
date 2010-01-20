@@ -1,3 +1,12 @@
+tor (0.2.2.7-alpha-1) experimental; urgency=medium
+
+  * New upstream version.
+    - Rotate keys (both v3 identity and relay identity) for moria1
+      and gabelmoo.
+    [and more]
+
+ -- Peter Palfrader <weasel@debian.org>  Wed, 20 Jan 2010 19:29:08 +0100
+
 tor (0.2.2.6-alpha-1) experimental; urgency=low
 
   * New upstream version.
