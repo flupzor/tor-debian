@@ -9,6 +9,11 @@
 export PACKAGE=tor
 include /usr/share/dpatch/dpatch.make
 
+# enable hardning options
+include /usr/share/hardening-includes/hardening.make
+CFLAGS += $(HARDENING_CFLAGS)
+LDFLAGS += $(HARDENING_LDFLAGS)
+
 # These are used for cross-compiling and for saving the configure script
 # from having to guess our platform (since we know it already)
 #
@@ -61,6 +66,9 @@ ifneq (,$(findstring enable-openbsd-malloc,$(DEB_BUILD_OPTIONS)))
 	confflags += --enable-openbsd-malloc
 endif
 
+export LDFLAGS
+export CFLAGS
+
 configure: patch-stamp
 config.status: configure
 	# clean up test.h stuff.  XXX - expected to no longer be needed after tor-0.2.2.4-alpha
@@ -69,7 +77,7 @@ config.status: configure
 	cp debian/src-test-test.h src/test/test.h
 
 	dh_testdir
-	CFLAGS="$(CFLAGS)" ./configure \
+	./configure \
 		$(confflags) \
 		--prefix=/usr \
 		--mandir=\$${prefix}/share/man \
