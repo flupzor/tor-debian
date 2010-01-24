@@ -2,8 +2,11 @@ tor (0.2.2.7-alpha-2) experimental; urgency=low
 
   * debian/rules: Minor cleanup (use a single variable for making up our
     configure flags, not two).
+  * debian/rules: Remove logic that ignores the result of unit tests if
+    localhost does not resolve (or not to 127.0.0.1).  This should no
+    longer be necessary as our build chroots have gotten a lot better.
 
- -- Peter Palfrader <weasel@debian.org>  Sun, 24 Jan 2010 12:55:21 +0100
+ -- Peter Palfrader <weasel@debian.org>  Sun, 24 Jan 2010 13:22:26 +0100
 
 tor (0.2.2.7-alpha-1) experimental; urgency=medium
 

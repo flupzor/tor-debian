@@ -26,8 +26,6 @@ endif
 
 CFLAGS ?= -Wall -g
 
-LOCALHOST_IP  ?= $(shell getent hosts localhost | awk '{print $$1}')
-
 # Do not optimize the build with "noopt"
 ifneq (,$(findstring noopt,$(DEB_BUILD_OPTIONS)))
 	CFLAGS += -O0
@@ -70,7 +68,6 @@ config.status: configure
 	! [ -e src/test/test.h ] || mv src/test/test.h src/test/test.h.orig
 	cp debian/src-test-test.h src/test/test.h
 
-	@if [ "$(LOCALHOST_IP)" != "127.0.0.1" ]; then echo; echo; echo; echo; echo; echo "######################################################################"; echo "WARNING: This system does not think localhost is 127.0.0.1.  Will ignore result of testsuite.  Please fix your system/chroot."; echo "######################################################################"; echo; echo; echo; echo; echo "Note: 'getent hosts localhost' should return '127.0.0.1 localhost'"; echo; fi
 	dh_testdir
 	CFLAGS="$(CFLAGS)" ./configure \
 		$(confflags) \
@@ -92,14 +89,7 @@ build-stamp:  config.status
 	@echo
 	# Running unit tests
 	@if [ "$(RUN_TEST)" != "no" ]; then \
-		if [ "$(LOCALHOST_IP)" != "127.0.0.1" ]; then \
-			echo; echo; echo "######################################################################"; echo "WARNING: This system does not think localhost is 127.0.0.1.  Will ignore result of testsuite.  Please fix your system/chroot."; echo "######################################################################"; echo; echo; \
-			echo "make check || true"; \
-			make check || true; \
-		else \
-			echo "make check"; \
-			make check; \
-		fi; \
+		make check; \
 	else \
 		echo; echo; echo "Skipping unittests"; echo; \
 	fi
@@ -220,7 +210,6 @@ binary-indep: install
 # Build architecture dependant packages using the common target.
 binary-arch: install
 	$(MAKE) -f debian/rules DH_OPTIONS=-s binary-common
-	@if [ "$(LOCALHOST_IP)" != "127.0.0.1" ]; then echo; echo; echo; echo; echo; echo "######################################################################"; echo "WARNING: This system does not think localhost is 127.0.0.1.  Result of testsuite has been ignored.  Please fix your system/chroot."; echo "######################################################################"; echo; echo; echo; echo; echo "Note: 'getent hosts localhost' should return '127.0.0.1 localhost'"; echo; fi
 
 binary: binary-indep binary-arch
 .PHONY: build clean binary-common binary-indep binary-arch binary install
