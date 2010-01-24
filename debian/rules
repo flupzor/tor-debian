@@ -54,14 +54,13 @@ ifneq (,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
 	MAKEFLAGS += -j$(NUMJOBS)
 endif
 
-CONF_OPTIONS =
-# build against libdmalloc4 - it better be installed
+# allow building against libdmalloc4 - it better be installed
 ifneq (,$(findstring with-dmalloc,$(DEB_BUILD_OPTIONS)))
-	CONF_OPTIONS += --with-dmalloc
+	confflags += --with-dmalloc
 endif
 # allow building with --enable-openbsd-malloc
 ifneq (,$(findstring enable-openbsd-malloc,$(DEB_BUILD_OPTIONS)))
-	CONF_OPTIONS += --enable-openbsd-malloc
+	confflags += --enable-openbsd-malloc
 endif
 
 configure: patch-stamp
@@ -79,8 +78,7 @@ config.status: configure
 		--mandir=\$${prefix}/share/man \
 		--infodir=\$${prefix}/share/info \
 		--localstatedir=/var \
-		--sysconfdir=/etc \
-		$(CONF_OPTIONS)
+		--sysconfdir=/etc
 
 
 build: build-stamp
