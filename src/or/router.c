@@ -1382,6 +1382,7 @@ router_rebuild_descriptor(int force)
   if (extrainfo_dump_to_string(ei->cache_info.signed_descriptor_body,
                                ei_size, ei, get_identity_key()) < 0) {
     log_warn(LD_BUG, "Couldn't generate extra-info descriptor.");
+    routerinfo_free(ri);
     extrainfo_free(ei);
     return -1;
   }
@@ -1398,6 +1399,8 @@ router_rebuild_descriptor(int force)
   if (router_dump_router_to_string(ri->cache_info.signed_descriptor_body, 8192,
                                    ri, get_identity_key())<0) {
     log_warn(LD_BUG, "Couldn't generate router descriptor.");
+    routerinfo_free(ri);
+    extrainfo_free(ei);
     return -1;
   }
   ri->cache_info.signed_descriptor_len =
@@ -1895,6 +1898,10 @@ extrainfo_dump_to_string(char *s, size_t maxlen, extrainfo_t *extrainfo,
                         extrainfo->nickname, identity,
                         published, bandwidth_usage);
 
+  tor_free(bandwidth_usage);
+  if (result<0)
+    return -1;
+
   if (options->ExtraInfoStatistics && write_stats_to_extrainfo) {
     char *contents = NULL;
     log_info(LD_GENERAL, "Adding stats to extra-info descriptor.");
@@ -1907,6 +1914,7 @@ extrainfo_dump_to_string(char *s, size_t maxlen, extrainfo_t *extrainfo,
         log_warn(LD_DIR, "Could not write dirreq-stats to extra-info "
                  "descriptor.");
         s[pos] = '\0';
+        write_stats_to_extrainfo = 0;
       }
       tor_free(contents);
     }
@@ -1919,6 +1927,7 @@ extrainfo_dump_to_string(char *s, size_t maxlen, extrainfo_t *extrainfo,
         log_warn(LD_DIR, "Could not write entry-stats to extra-info "
                  "descriptor.");
         s[pos] = '\0';
+        write_stats_to_extrainfo = 0;
       }
       tor_free(contents);
     }
@@ -1931,6 +1940,7 @@ extrainfo_dump_to_string(char *s, size_t maxlen, extrainfo_t *extrainfo,
         log_warn(LD_DIR, "Could not write buffer-stats to extra-info "
                  "descriptor.");
         s[pos] = '\0';
+        write_stats_to_extrainfo = 0;
       }
       tor_free(contents);
     }
@@ -1943,17 +1953,14 @@ extrainfo_dump_to_string(char *s, size_t maxlen, extrainfo_t *extrainfo,
         log_warn(LD_DIR, "Could not write exit-stats to extra-info "
                  "descriptor.");
         s[pos] = '\0';
+        write_stats_to_extrainfo = 0;
       }
       tor_free(contents);
     }
   }
 
-  tor_free(bandwidth_usage);
-  if (result<0)
-    return -1;
-
-  if (should_record_bridge_info(options)) {
-    char *bridge_stats = geoip_get_bridge_stats_extrainfo(now);
+  if (should_record_bridge_info(options) && write_stats_to_extrainfo) {
+    const char *bridge_stats = geoip_get_bridge_stats_extrainfo(now);
     if (bridge_stats) {
       size_t pos = strlen(s);
       if (strlcpy(s + pos, bridge_stats, maxlen - strlen(s)) !=
@@ -1961,8 +1968,8 @@ extrainfo_dump_to_string(char *s, size_t maxlen, extrainfo_t *extrainfo,
         log_warn(LD_DIR, "Could not write bridge-stats to extra-info "
                  "descriptor.");
         s[pos] = '\0';
+        write_stats_to_extrainfo = 0;
       }
-      tor_free(bridge_stats);
     }
   }
 
@@ -1984,6 +1991,7 @@ extrainfo_dump_to_string(char *s, size_t maxlen, extrainfo_t *extrainfo,
       log_err(LD_BUG,
               "We just generated an extrainfo descriptor we can't parse.");
       log_err(LD_BUG, "Descriptor was: <<%s>>", s);
+      tor_free(s_dup);
       return -1;
     }
     tor_free(s_dup);

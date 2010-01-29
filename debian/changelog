@@ -1,3 +1,9 @@
+tor (0.2.2.8-alpha-1) experimental; urgency=low
+
+  * New upstream version.
+
+ -- Peter Palfrader <weasel@debian.org>  Fri, 29 Jan 2010 23:22:35 +0100
+
 tor (0.2.2.7-alpha-2) experimental; urgency=low
 
   * debian/rules: Minor cleanup (use a single variable for making up our
