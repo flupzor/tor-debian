@@ -21,8 +21,12 @@ tor (0.2.2.9-alpha-1) experimental; urgency=low
       debian/tor.docs.  No longer build-depend on texlive-base-bin,
       texlive-latex-base, texlive-fonts-recommended, transfig and
       ghostscript.
+    - Upstream tarballs no longer ship an AUTHORS file, or the website.
+      Therefore remove them from debian/tor.docs.  No longer shipping
+      parts of the website also closes: #443560.  Also no longer distribute
+      doc/TODO and doc/HACKING in the debian package.
 
- -- Peter Palfrader <weasel@debian.org>  Sat, 27 Feb 2010 15:52:13 +0100
+ -- Peter Palfrader <weasel@debian.org>  Sat, 27 Feb 2010 15:59:14 +0100
 
 tor (0.2.2.8-alpha-1) experimental; urgency=low
 
