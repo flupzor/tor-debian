@@ -31,8 +31,10 @@ tor (0.2.2.9-alpha-1) experimental; urgency=low
       package.
   * Move from comm to section net, where it might fit slightly better
     (closes: #482801).
+  * Ship contrib/tor-exit-notice.html in the tor package (put it into
+    usr/share/doc/tor; closes: #568934).
 
- -- Peter Palfrader <weasel@debian.org>  Sat, 27 Feb 2010 16:23:08 +0100
+ -- Peter Palfrader <weasel@debian.org>  Sat, 27 Feb 2010 16:23:32 +0100
 
 tor (0.2.2.8-alpha-1) experimental; urgency=low
 

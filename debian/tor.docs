@@ -1,2 +1,3 @@
 debian/README.Debian
 debian/README.privoxy
+contrib/tor-exit-notice.html
