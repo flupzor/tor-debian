@@ -23,24 +23,54 @@ esac
 exit 0
 
 @DPATCH@
-diff -urNad tor-0.1.1.5/contrib/torify.1 /tmp/dpep.fOA3Mm/tor-0.1.1.5/contrib/torify.1
---- tor-0.1.1.5/contrib/torify.1
-+++ /tmp/dpep.fOA3Mm/tor-0.1.1.5/contrib/torify.1
-@@ -35,7 +35,7 @@
- to suid binaries.
+diff -ur tor-0.2.2.9-alpha/doc/tor-gencert.1.txt tor-0.2.2.9-alpha.new/doc/tor-gencert.1.txt
+--- tor-0.2.2.9-alpha/doc/tor-gencert.1.txt	2010-02-02 22:40:22.000000000 +0100
++++ tor-0.2.2.9-alpha.new/doc/tor-gencert.1.txt	2010-02-27 13:47:29.655735605 +0100
+@@ -81,7 +81,7 @@
  
- .SH SEE ALSO
--.BR tor (1),
-+.BR tor (8),
- .BR tor-resolve (1),
- .BR torsocks (1),
- .BR tsocks (1),
-diff -urNad tor-0.1.1.5/doc/tor.1.in /tmp/dpep.fOA3Mm/tor-0.1.1.5/doc/tor.1.in
---- tor-0.1.1.5/doc/tor.1.in
-+++ /tmp/dpep.fOA3Mm/tor-0.1.1.5/doc/tor.1.in
-@@ -1,4 +1,4 @@
--.TH TOR 1 "August 2009" "TOR"
-+.TH TOR 8 "August 2009" "TOR"
- .SH NAME
- tor \- The second-generation onion router
- .SH SYNOPSIS
+ SEE ALSO
+ --------
+-**tor**(1) +
++**tor**(8) +
+ 
+ See also the "dir-spec.txt" file, distributed with Tor.
+ 
+diff -ur tor-0.2.2.9-alpha/doc/tor-resolve.1.txt tor-0.2.2.9-alpha.new/doc/tor-resolve.1.txt
+--- tor-0.2.2.9-alpha/doc/tor-resolve.1.txt	2010-02-02 22:40:22.000000000 +0100
++++ tor-0.2.2.9-alpha.new/doc/tor-resolve.1.txt	2010-02-27 13:47:37.643234209 +0100
+@@ -36,10 +36,10 @@
+ 
+ SEE ALSO
+ --------
+-**tor**(1), **torify**(1). +
++**tor**(8), **torify**(1). +
+ 
+ See doc/socks-extensions.txt in the Tor package for protocol details.
+ 
+ AUTHORS
+ -------
+-Roger Dingledine <arma@mit.edu>, Nick Mathewson <nickm@alum.mit.edu>.
+\ No newline at end of file
++Roger Dingledine <arma@mit.edu>, Nick Mathewson <nickm@alum.mit.edu>.
+diff -ur tor-0.2.2.9-alpha/doc/tor.1.txt tor-0.2.2.9-alpha.new/doc/tor.1.txt
+--- tor-0.2.2.9-alpha/doc/tor.1.txt	2010-02-22 22:22:33.000000000 +0100
++++ tor-0.2.2.9-alpha.new/doc/tor.1.txt	2010-02-27 13:47:18.531233093 +0100
+@@ -2,7 +2,7 @@
+ // See LICENSE for licensing information
+ // This is an asciidoc file used to generate the manpage/html reference.
+ // Learn asciidoc on http://www.methods.co.nz/asciidoc/userguide.html
+-TOR(1)
++TOR(8)
+ ======
+ 
+ NAME
+diff -ur tor-0.2.2.9-alpha/doc/torify.1.txt tor-0.2.2.9-alpha.new/doc/torify.1.txt
+--- tor-0.2.2.9-alpha/doc/torify.1.txt	2010-02-02 22:40:22.000000000 +0100
++++ tor-0.2.2.9-alpha.new/doc/torify.1.txt	2010-02-27 13:47:52.619234342 +0100
+@@ -46,5 +46,5 @@
+ 
+ SEE ALSO
+ --------
+-**tor**(1), **tor-resolve**(1), **torsocks**(1), **tsocks**(1),
++**tor**(8), **tor-resolve**(1), **torsocks**(1), **tsocks**(1),
+ **tsocks.conf**(5).

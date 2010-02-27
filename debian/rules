@@ -145,6 +145,9 @@ clean: unpatch
 		echo "\"`git rev-parse --short=16 HEAD`\"" > "debian/micro-revision.i" ; \
 	fi
 
+	# these get autobuilt from the .txt files, some of which we also patch
+	cd doc && rm -f tor.1.in torify.1.in tor-gencert.1.in tor-resolve.1.in
+
 	dh_clean
 
 install: build

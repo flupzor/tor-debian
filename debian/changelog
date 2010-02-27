@@ -6,8 +6,14 @@ tor (0.2.2.9-alpha-1) experimental; urgency=low
       autonegotiation at run-time rather than compile time.  Good.
       (This also means we no longer need to conflict with newer
        libssls when we built against an old one on backports.)
+    - The manpages are now built with asciidoc, also do that
+      at build time so we can properly patch them.  Therefore
+      build-depend on asciidoc, and update 03_tor_manpage_in_section_8
+      to patch the .txt files now.  Remove tor.1.in torify.1.in
+      tor-gencert.1.in tor-resolve.1.in in the doc directory during
+      clean.
 
- -- Peter Palfrader <weasel@debian.org>  Sat, 27 Feb 2010 13:19:02 +0100
+ -- Peter Palfrader <weasel@debian.org>  Sat, 27 Feb 2010 13:50:12 +0100
 
 tor (0.2.2.8-alpha-1) experimental; urgency=low
 
