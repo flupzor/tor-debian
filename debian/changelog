@@ -12,8 +12,14 @@ tor (0.2.2.9-alpha-1) experimental; urgency=low
       to patch the .txt files now.  Remove tor.1.in torify.1.in
       tor-gencert.1.in tor-resolve.1.in in the doc directory during
       clean.
+    - The original design paper is no longer shipped with Tor.  Remove
+      debian/hexdump-*.pdf (which we used to work around fig2dev bugs),
+      no longer build the paper in debian/rules, and remove it from
+      debian/tor.docs.  No longer build-depend on texlive-base-bin,
+      texlive-latex-base, texlive-fonts-recommended, transfig and
+      ghostscript.
 
- -- Peter Palfrader <weasel@debian.org>  Sat, 27 Feb 2010 13:50:12 +0100
+ -- Peter Palfrader <weasel@debian.org>  Sat, 27 Feb 2010 13:52:57 +0100
 
 tor (0.2.2.8-alpha-1) experimental; urgency=low
 

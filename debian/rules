@@ -102,29 +102,6 @@ build-stamp:  config.status
 		echo; echo; echo "Skipping unittests"; echo; \
 	fi
 	@echo
-
-	# XXX
-	# So, gs-gpl on s390 is broken (#457568) and fails to properly build
-	# .pdf files from .fig files using fig2dev.  Therefore we ship them
-	# until this bug is fixed.
-	#
-	# of course we can always give it a try
-	#
-	# the hexdumps were built using something like
-	#   perl -e 'while (<>) { print unpack ("H*", $_); }' interaction.pdf | fold > hexdump-interaction.pdf
-	# 
-	# And it fails on a bunch of other archs too.
-	cd doc/design-paper; \
-		fig2dev -L pdf cell-struct.fig cell-struct.pdf || \
-			( echo "** Using shipped pdf file because fig2dev failed"; \
-			  perl -e 'while (<>) { chomp; print pack ("H*", $$_); }' ../../debian/hexdump-cell-struct.pdf > cell-struct.pdf ); \
-		fig2dev -L pdf interaction.fig interaction.pdf || \
-			( echo "** Using shipped pdf file because fig2dev failed"; \
-			  perl -e 'while (<>) { chomp; print pack ("H*", $$_); }' ../../debian/hexdump-interaction.pdf > interaction.pdf ); \
-	# XXX ends
-
-	make -C doc/design-paper tor-design.ps tor-design.pdf
-
 	touch build-stamp
 
 clean: unpatch
