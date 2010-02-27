@@ -69,6 +69,8 @@ endif
 export LDFLAGS
 export CFLAGS
 
+MANPAGE_INS=doc/tor.1.in doc/torify.1.in doc/tor-gencert.1.in doc/tor-resolve.1.in
+
 configure: patch-stamp
 config.status: configure
 	# clean up test.h stuff.  XXX - expected to no longer be needed after tor-0.2.2.4-alpha
@@ -92,6 +94,15 @@ build-stamp:  config.status
 	dh_testdir
 	! [ debian/micro-revision.i ] || cp debian/micro-revision.i src/or/micro-revision.i
 
+	# create the manpages because the build-system shipped in the tarball is
+	# incomplete.  moving foo.8 to foo.1.in is intended.
+	for manpage in $(MANPAGE_INS); do \
+		base="$${manpage%%.1.in}"; \
+		a2x -f manpage "$$base".1.txt && \
+		if [ -e "$$base".1 ]; then mv "$$base".1 "$$base".1.in; \
+		elif [ -e "$$base".8 ]; then mv "$$base".8 "$$base".1.in; \
+		else echo >&2 "No output produced by a2px?" && exit 1; fi || exit 1; \
+	done
 	$(MAKE)
 	@echo
 	@echo
@@ -123,7 +134,7 @@ clean: unpatch
 	fi
 
 	# these get autobuilt from the .txt files, some of which we also patch
-	cd doc && rm -f tor.1.in torify.1.in tor-gencert.1.in tor-resolve.1.in
+	rm -f $(MANPAGE_INS)
 
 	dh_clean
 

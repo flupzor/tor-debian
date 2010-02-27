@@ -11,7 +11,8 @@ tor (0.2.2.9-alpha-1) experimental; urgency=low
       build-depend on asciidoc, and update 03_tor_manpage_in_section_8
       to patch the .txt files now.  Remove tor.1.in torify.1.in
       tor-gencert.1.in tor-resolve.1.in in the doc directory during
-      clean.
+      clean.  Oh, and try to work around missing (and if it wasn't,
+      broken) build-system for the manpages.
     - The original design paper is no longer shipped with Tor.  Remove
       debian/hexdump-*.pdf (which we used to work around fig2dev bugs),
       no longer build the paper in debian/rules, and remove it from
