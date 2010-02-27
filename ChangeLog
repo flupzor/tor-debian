@@ -1,3 +1,137 @@
+Changes in version 0.2.2.9-alpha - 2010-02-22
+  o Directory authority changes:
+    - Change IP address for dannenberg (v3 directory authority), and
+      remove moria2 (obsolete v1, v2 directory authority and v0 hidden
+      service directory authority) from the list.
+
+  o Major bugfixes:
+    - Make Tor work again on the latest OS X: when deciding whether to
+      use strange flags to turn TLS renegotiation on, detect the OpenSSL
+      version at run-time, not compile time. We need to do this because
+      Apple doesn't update its dev-tools headers when it updates its
+      libraries in a security patch.
+    - Fix a potential buffer overflow in lookup_last_hid_serv_request()
+      that could happen on 32-bit platforms with 64-bit time_t. Also fix
+      a memory leak when requesting a hidden service descriptor we've
+      requested before. Fixes bug 1242, bugfix on 0.2.0.18-alpha. Found
+      by aakova.
+    - Authorities could be tricked into giving out the Exit flag to relays
+      that didn't allow exiting to any ports. This bug could screw
+      with load balancing and stats. Bugfix on 0.1.1.6-alpha; fixes bug
+      1238. Bug discovered by Martin Kowalczyk.
+    - When freeing a cipher, zero it out completely. We only zeroed
+      the first ptrsize bytes. Bugfix on tor-0.0.2pre8. Discovered
+      and patched by ekir. Fixes bug 1254.
+
+  o Minor bugfixes:
+    - Fix static compilation by listing the openssl libraries in the right
+      order. Bugfix on Tor 0.2.2.8-alpha; fixes bug 1237.
+    - Resume handling .exit hostnames in a special way: originally we
+      stripped the .exit part and used the requested exit relay. In
+      0.2.2.1-alpha we stopped treating them in any special way, meaning
+      if you use a .exit address then Tor will pass it on to the exit
+      relay. Now we reject the .exit stream outright, since that behavior
+      might be more expected by the user. Found and diagnosed by Scott
+      Bennett and Downie on or-talk.
+    - Don't spam the controller with events when we have no file
+      descriptors available. Bugfix on 0.2.1.5-alpha. (Rate-limiting
+      for log messages was already solved from bug 748.)
+    - Avoid a bogus overlapped memcpy in tor_addr_copy(). Reported by
+      "memcpyfail".
+    - Make the DNSPort option work with libevent 2.x. Don't alter the
+      behaviour for libevent 1.x. Fixes bug 1143. Found by SwissTorExit.
+    - Emit a GUARD DROPPED controller event for a case we missed.
+    - Make more fields in the controller protocol case-insensitive, since
+      control-spec.txt said they were.
+    - Refactor resolve_my_address() to not use gethostbyname() anymore.
+      Fixes bug 1244; bugfix on 0.0.2pre25. Reported by Mike Mestnik.
+    - Fix a spec conformance issue: the network-status-version token
+      must be the first token in a v3 consensus or vote. Discovered by
+      parakeep. Bugfix on 0.2.0.3-alpha.
+
+  o Code simplifications and refactoring:
+    - Generate our manpage and HTML documentation using Asciidoc. This
+      change should make it easier to maintain the documentation, and
+      produce nicer HTML.
+    - Remove the --enable-iphone option. According to reports from Marco
+      Bonetti, Tor builds fine without any special tweaking on recent
+      iPhone SDK versions.
+    - Removed some unnecessary files from the source distribution. The
+      AUTHORS file has now been merged into the people page on the
+      website. The roadmaps and design doc can now be found in the
+      projects directory in svn.
+    - Enabled various circuit build timeout constants to be controlled
+      by consensus parameters. Also set better defaults for these
+      parameters based on experimentation on broadband and simulated
+      high latency links.
+
+  o Minor features:
+    - The 'EXTENDCIRCUIT' control port command can now be used with
+      a circ id of 0 and no path. This feature will cause Tor to build
+      a new 'fast' general purpose circuit using its own path selection
+      algorithms.
+    - Added a BUILDTIMEOUT_SET controller event to describe changes
+      to the circuit build timeout.
+    - Future-proof the controller protocol a bit by ignoring keyword
+      arguments we do not recognize.
+    - Expand homedirs passed to tor-checkkey. This should silence a
+      coverity complaint about passing a user-supplied string into
+      open() without checking it.
+
+
+Changes in version 0.2.1.24 - 2010-02-21
+  Tor 0.2.1.24 makes Tor work again on the latest OS X -- this time
+  for sure!
+
+  o Minor bugfixes:
+    - Work correctly out-of-the-box with even more vendor-patched versions
+      of OpenSSL. In particular, make it so Debian and OS X don't need
+      customized patches to run/build.
+
+
+Changes in version 0.2.1.23 - 2010-02-13
+  Tor 0.2.1.23 fixes a huge client-side performance bug, makes Tor work
+  again on the latest OS X, and updates the location of a directory
+  authority.
+
+  o Major bugfixes (performance):
+    - We were selecting our guards uniformly at random, and then weighting
+      which of our guards we'd use uniformly at random. This imbalance
+      meant that Tor clients were severely limited on throughput (and
+      probably latency too) by the first hop in their circuit. Now we
+      select guards weighted by currently advertised bandwidth. We also
+      automatically discard guards picked using the old algorithm. Fixes
+      bug 1217; bugfix on 0.2.1.3-alpha. Found by Mike Perry.
+
+  o Major bugfixes:
+    - Make Tor work again on the latest OS X: when deciding whether to
+      use strange flags to turn TLS renegotiation on, detect the OpenSSL
+      version at run-time, not compile time. We need to do this because
+      Apple doesn't update its dev-tools headers when it updates its
+      libraries in a security patch.
+    - Fix a potential buffer overflow in lookup_last_hid_serv_request()
+      that could happen on 32-bit platforms with 64-bit time_t. Also fix
+      a memory leak when requesting a hidden service descriptor we've
+      requested before. Fixes bug 1242, bugfix on 0.2.0.18-alpha. Found
+      by aakova.
+
+  o Directory authority changes:
+    - Change IP address for dannenberg (v3 directory authority), and
+      remove moria2 (obsolete v1, v2 directory authority and v0 hidden
+      service directory authority) from the list.
+
+  o Minor bugfixes:
+    - Refactor resolve_my_address() to not use gethostbyname() anymore.
+      Fixes bug 1244; bugfix on 0.0.2pre25. Reported by Mike Mestnik.
+
+  o Minor features:
+    - Avoid a mad rush at the beginning of each month when each client
+      rotates half of its guards. Instead we spread the rotation out
+      throughout the month, but we still avoid leaving a precise timestamp
+      in the state file about when we first picked the guard. Improves
+      over the behavior introduced in 0.1.2.17.
+
+
 Changes in version 0.2.2.8-alpha - 2010-01-26
   o Major bugfixes:
     - Fix a memory corruption bug on bridges that occured during the
@@ -11,24 +145,6 @@ Changes in version 0.2.2.8-alpha - 2010-01-26
       Connections to localhost need to come _from_ localhost, or else
       local servers (like DNS and outgoing HTTP/SOCKS proxies) will often
       refuse to listen.
-
-
-Changes in version 0.2.1.23 - 2010-0?-??
-  o Major bugfixes (performance):
-    - We were selecting our guards uniformly at random, and then weighting
-      which of our guards we'd use uniformly at random. This imbalance
-      meant that Tor clients were severely limited on throughput (and
-      probably latency too) by the first hop in their circuit. Now we
-      select guards weighted by currently advertised bandwidth. We also
-      automatically discard guards picked using the old algorithm. Fixes
-      bug 1217; bugfix on 0.2.1.3-alpha. Found by Mike Perry.
-
-  o Minor features:
-    - Avoid a mad rush at the beginning of each month when each client
-      rotates half of its guards. Instead we spread the rotation out
-      throughout the month, but we still avoid leaving a precise timestamp
-      in the state file about when we first picked the guard. Improves
-      over the behavior introduced in 0.1.2.17.
 
 
 Changes in version 0.2.2.7-alpha - 2010-01-19

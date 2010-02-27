@@ -865,6 +865,49 @@ policies_set_router_exitpolicy_to_reject_all(routerinfo_t *r)
   smartlist_add(r->exit_policy, item);
 }
 
+/** Return 1 if there is at least one /8 subnet in <b>policy</b> that
+ * allows exiting to <b>port</b>.  Otherwise, return 0. */
+static int
+exit_policy_is_general_exit_helper(smartlist_t *policy, int port)
+{
+  uint32_t mask, ip, i;
+  /* Is this /8 rejected (1), or undecided (0)? */
+  char subnet_status[256];
+
+  memset(subnet_status, 0, sizeof(subnet_status));
+  SMARTLIST_FOREACH(policy, addr_policy_t *, p, {
+    if (p->prt_min > port || p->prt_max < port)
+      continue; /* Doesn't cover our port. */
+    mask = 0;
+    tor_assert(p->maskbits <= 32);
+
+    if (p->maskbits)
+      mask = UINT32_MAX<<(32-p->maskbits);
+    ip = tor_addr_to_ipv4h(&p->addr);
+
+    /* Calculate the first and last subnet that this exit policy touches
+     * and set it as loop boundaries. */
+    for (i = ((mask & ip)>>24); i <= (~((mask & ip) ^ mask)>>24); ++i) {
+      tor_addr_t addr;
+      if (subnet_status[i] != 0)
+        continue; /* We already reject some part of this /8 */
+      tor_addr_from_ipv4h(&addr, i<<24);
+      if (tor_addr_is_internal(&addr, 0))
+        continue; /* Local or non-routable addresses */
+      if (p->policy_type == ADDR_POLICY_ACCEPT) {
+        if (p->maskbits > 8)
+          continue; /* Narrower than a /8. */
+        /* We found an allowed subnet of at least size /8. Done
+         * for this port! */
+        return 1;
+      } else if (p->policy_type == ADDR_POLICY_REJECT) {
+        subnet_status[i] = 1;
+      }
+    }
+  });
+  return 0;
+}
+
 /** Return true iff <b>ri</b> is "useful as an exit node", meaning
  * it allows exit to at least one /8 address space for at least
  * two of ports 80, 443, and 6667. */
@@ -878,19 +921,7 @@ exit_policy_is_general_exit(smartlist_t *policy)
     return 0;
 
   for (i = 0; i < 3; ++i) {
-    SMARTLIST_FOREACH(policy, addr_policy_t *, p, {
-      if (p->prt_min > ports[i] || p->prt_max < ports[i])
-        continue; /* Doesn't cover our port. */
-      if (p->maskbits > 8)
-        continue; /* Narrower than a /8. */
-      if (tor_addr_is_loopback(&p->addr))
-        continue; /* 127.x or ::1. */
-      /* We have a match that is at least a /8. */
-      if (p->policy_type == ADDR_POLICY_ACCEPT) {
-        ++n_allowed;
-        break; /* stop considering this port */
-      }
-    });
+    n_allowed += exit_policy_is_general_exit_helper(policy, ports[i]);
   }
   return n_allowed >= 2;
 }

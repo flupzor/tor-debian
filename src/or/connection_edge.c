@@ -2607,7 +2607,7 @@ connection_exit_begin_conn(cell_t *cell, circuit_t *circ)
   if (rh.command == RELAY_COMMAND_BEGIN_DIR) {
     tor_assert(or_circ);
     if (or_circ->p_conn && !tor_addr_is_null(&or_circ->p_conn->real_addr))
-      tor_addr_assign(&n_stream->_base.addr, &or_circ->p_conn->real_addr);
+      tor_addr_copy(&n_stream->_base.addr, &or_circ->p_conn->real_addr);
     return connection_exit_connect_dir(n_stream);
   }
 
@@ -2779,7 +2779,7 @@ connection_exit_connect_dir(edge_connection_t *exitconn)
 
   dirconn = dir_connection_new(AF_INET);
 
-  tor_addr_assign(&dirconn->_base.addr, &exitconn->_base.addr);
+  tor_addr_copy(&dirconn->_base.addr, &exitconn->_base.addr);
   dirconn->_base.port = 0;
   dirconn->_base.address = tor_strdup(exitconn->_base.address);
   dirconn->_base.type = CONN_TYPE_DIR;
@@ -2935,10 +2935,13 @@ parse_extended_hostname(char *address, int allowdotexit)
       if (allowdotexit) {
         *s = 0; /* NUL-terminate it */
         return EXIT_HOSTNAME; /* .exit */
-      } /* else */
-      log_warn(LD_APP, "The \".exit\" notation is disabled in Tor due to "
-               "security risks. Set AllowDotExit in your torrc to enable it.");
-      /* FFFF send a controller event too to notify Vidalia users */
+      } else {
+        log_warn(LD_APP, "The \".exit\" notation is disabled in Tor due to "
+                 "security risks. Set AllowDotExit in your torrc to enable "
+                 "it.");
+        /* FFFF send a controller event too to notify Vidalia users */
+        return BAD_HOSTNAME;
+      }
     }
     if (strcmp(s+1,"onion"))
       return NORMAL_HOSTNAME; /* neither .exit nor .onion, thus normal */

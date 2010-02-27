@@ -69,6 +69,8 @@ endif
 export LDFLAGS
 export CFLAGS
 
+MANPAGE_INS=doc/tor.1.in doc/torify.1.in doc/tor-gencert.1.in doc/tor-resolve.1.in
+
 configure: patch-stamp
 config.status: configure
 	# clean up test.h stuff.  XXX - expected to no longer be needed after tor-0.2.2.4-alpha
@@ -92,6 +94,18 @@ build-stamp:  config.status
 	dh_testdir
 	! [ debian/micro-revision.i ] || cp debian/micro-revision.i src/or/micro-revision.i
 
+	# create the manpages because the build-system shipped in the tarball is
+	# incomplete.  moving foo.8 to foo.1.in is intended.
+	for manpage in $(MANPAGE_INS); do \
+		base="$${manpage%%.1.in}"; \
+		a2x -f manpage "$$base".1.txt && \
+		if [ -e "$$base".1 ]; then mv "$$base".1 "$$base".1.in; \
+		elif [ -e "$$base".8 ]; then mv "$$base".8 "$$base".1.in; \
+		else echo >&2 "No output produced by a2px?" && exit 1; fi || exit 1; \
+	done
+	# Also touch all the .html files or else the build system will
+	# try to re-create them and fail badly
+	for file in $(MANPAGE_INS); do touch $${file%%.1.in}.html.in || exit 1; done
 	$(MAKE)
 	@echo
 	@echo
@@ -102,29 +116,6 @@ build-stamp:  config.status
 		echo; echo; echo "Skipping unittests"; echo; \
 	fi
 	@echo
-
-	# XXX
-	# So, gs-gpl on s390 is broken (#457568) and fails to properly build
-	# .pdf files from .fig files using fig2dev.  Therefore we ship them
-	# until this bug is fixed.
-	#
-	# of course we can always give it a try
-	#
-	# the hexdumps were built using something like
-	#   perl -e 'while (<>) { print unpack ("H*", $_); }' interaction.pdf | fold > hexdump-interaction.pdf
-	# 
-	# And it fails on a bunch of other archs too.
-	cd doc/design-paper; \
-		fig2dev -L pdf cell-struct.fig cell-struct.pdf || \
-			( echo "** Using shipped pdf file because fig2dev failed"; \
-			  perl -e 'while (<>) { chomp; print pack ("H*", $$_); }' ../../debian/hexdump-cell-struct.pdf > cell-struct.pdf ); \
-		fig2dev -L pdf interaction.fig interaction.pdf || \
-			( echo "** Using shipped pdf file because fig2dev failed"; \
-			  perl -e 'while (<>) { chomp; print pack ("H*", $$_); }' ../../debian/hexdump-interaction.pdf > interaction.pdf ); \
-	# XXX ends
-
-	make -C doc/design-paper tor-design.ps tor-design.pdf
-
 	touch build-stamp
 
 clean: unpatch
@@ -145,6 +136,9 @@ clean: unpatch
 		echo "\"`git rev-parse --short=16 HEAD`\"" > "debian/micro-revision.i" ; \
 	fi
 
+	# these get autobuilt from the .txt files, some of which we also patch
+	rm -f $(MANPAGE_INS)
+
 	dh_clean
 
 install: build
@@ -161,7 +155,6 @@ install: build
 	mv $(CURDIR)/debian/tor/usr/share/man/man1/tor.1 $(CURDIR)/debian/tor/usr/share/man/man8/tor.8
 
 	install -m 755 contrib/torify $(CURDIR)/debian/tor/usr/bin
-	install -m 644 contrib/torify.1 $(CURDIR)/debian/tor/usr/share/man/man1
 	install -m 644 contrib/tor-tsocks.conf $(CURDIR)/debian/tor/etc/tor
 
 	install -m 644 debian/tor.lintian-override $(CURDIR)/debian/tor/usr/share/lintian/overrides/tor
