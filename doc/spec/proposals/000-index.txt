@@ -71,7 +71,7 @@ Proposals by number:
 148  Stream end reasons from the client side should be uniform [CLOSED]
 149  Using data from NETINFO cells [OPEN]
 150  Exclude Exit Nodes from a circuit [CLOSED]
-151  Improving Tor Path Selection [DRAFT]
+151  Improving Tor Path Selection [FINISHED]
 152  Optionally allow exit from single-hop circuits [CLOSED]
 153  Automatic software update protocol [SUPERSEDED]
 154  Automatic Software Update Protocol [SUPERSEDED]
@@ -80,8 +80,8 @@ Proposals by number:
 157  Make certificate downloads specific [ACCEPTED]
 158  Clients download consensus + microdescriptors [OPEN]
 159  Exit Scanning [OPEN]
-160  Authorities vote for bandwidth offsets in consensus [OPEN]
-161  Computing Bandwidth Adjustments [OPEN]
+160  Authorities vote for bandwidth offsets in consensus [FINISHED]
+161  Computing Bandwidth Adjustments [FINISHED]
 162  Publish the consensus in multiple flavors [OPEN]
 163  Detecting whether a connection comes from a client [OPEN]
 164  Reporting the status of server votes [OPEN]
@@ -89,6 +89,7 @@ Proposals by number:
 166  Including Network Statistics in Extra-Info Documents [ACCEPTED]
 167  Vote on network parameters in consensus [CLOSED]
 168  Reduce default circuit window [OPEN]
+169  Eliminate TLS renegotiation for the Tor connection handshake [DRAFT]
 
 
 Proposals by status:
@@ -99,7 +100,7 @@ Proposals by status:
    133  Incorporate Unreachable ORs into the Tor Network
    141  Download server descriptors on demand
    144  Increase the diversity of circuits by detecting nodes belonging the same provider
-   151  Improving Tor Path Selection
+   169  Eliminate TLS renegotiation for the Tor connection handshake [for 0.2.2]
  NEEDS-REVISION:
    131  Help users to verify they are using Tor
  OPEN:
@@ -110,8 +111,6 @@ Proposals by status:
    156  Tracking blocked ports on the client side [for 0.2.?]
    158  Clients download consensus + microdescriptors
    159  Exit Scanning
-   160  Authorities vote for bandwidth offsets in consensus [for 0.2.2.x]
-   161  Computing Bandwidth Adjustments [for 0.2.2.x]
    162  Publish the consensus in multiple flavors [for 0.2.2]
    163  Detecting whether a connection comes from a client [for 0.2.2]
    164  Reporting the status of server votes [for 0.2.2]
@@ -132,7 +131,10 @@ Proposals by status:
    099  Miscellaneous proposals
  FINISHED:
    121  Hidden Service Authentication [in 0.2.1.x]
+   151  Improving Tor Path Selection
    155  Four Improvements of Hidden Service Performance [in 0.2.1.x]
+   160  Authorities vote for bandwidth offsets in consensus [for 0.2.2.x]
+   161  Computing Bandwidth Adjustments [for 0.2.2.x]
  CLOSED:
    101  Voting on the Tor Directory System [in 0.2.0.x]
    102  Dropping "opt" from the directory format [in 0.2.0.x]

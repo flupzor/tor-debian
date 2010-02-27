@@ -53,6 +53,24 @@
 
 #define ADDR(tls) (((tls) && (tls)->address) ? tls->address : "peer")
 
+/* We redefine these so that we can run correctly even if the vendor gives us
+ * a version of OpenSSL that does not match its header files.  (Apple: I am
+ * looking at you.)
+ */
+#ifndef SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION
+#define SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION 0x00040000L
+#endif
+#ifndef SSL3_FLAGS_ALLOW_UNSAFE_LEGACY_RENEGOTIATION
+#define SSL3_FLAGS_ALLOW_UNSAFE_LEGACY_RENEGOTIATION 0x0010
+#endif
+
+/** Does the run-time openssl version look like we need
+ * SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION? */
+static int use_unsafe_renegotiation_op = 0;
+/** Does the run-time openssl version look like we need
+ * SSL3_FLAGS_ALLOW_UNSAFE_LEGACY_RENEGOTIATION? */
+static int use_unsafe_renegotiation_flag = 0;
+
 /** Structure holding the TLS state for a single connection. */
 typedef struct tor_tls_context_t {
   int refcnt;
@@ -333,8 +351,57 @@ static void
 tor_tls_init(void)
 {
   if (!tls_library_is_initialized) {
+    long version;
     SSL_library_init();
     SSL_load_error_strings();
+
+    version = SSLeay();
+
+    /* OpenSSL 0.9.8l introduced SSL3_FLAGS_ALLOW_UNSAGE_LEGACY_RENEGOTIATION
+     * here, but without thinking too hard about it: it turns out that the
+     * flag in question needed to be set at the last minute, and that it
+     * conflicted with an existing flag number that had already been added
+     * in the OpenSSL 1.0.0 betas.  OpenSSL 0.9.8m thoughtfully replaced
+     * the flag with an option and (it seems) broke anything that used
+     * SSL3_FLAGS_* for the purpose.  So we need to know how to do both,
+     * and we mustn't use the SSL3_FLAGS option with anything besides
+     * OpenSSL 0.9.8l.
+     *
+     * No, we can't just set flag 0x0010 everywhere.  It breaks Tor with
+     * OpenSSL 1.0.0beta3 and later.  No, we can't just set option
+     * 0x00040000L everywhere: before 0.9.8m, it meant something else.
+     *
+     * No, we can't simply detect whether the flag or the option is present
+     * in the headers at build-time: some vendors (notably Apple) like to
+     * leave their headers out of sync with their libraries.
+     *
+     * Yes, it _is_ almost as if the OpenSSL developers decided that no
+     * program should be allowed to use renegotiation unless it first passed
+     * a test of intelligence and determination.
+     */
+    if (version >= 0x009080c0L && version < 0x009080d0L) {
+      log_notice(LD_GENERAL, "OpenSSL %s looks like version 0.9.8l; "
+                 "I will try SSL3_FLAGS to enable renegotation.",
+                 SSLeay_version(SSLEAY_VERSION));
+      use_unsafe_renegotiation_flag = 1;
+      use_unsafe_renegotiation_op = 1;
+    } else if (version >= 0x009080d0L) {
+      log_notice(LD_GENERAL, "OpenSSL %s looks like version 0.9.8m or later; "
+                 "I will try SSL_OP to enable renegotiation",
+                 SSLeay_version(SSLEAY_VERSION));
+      use_unsafe_renegotiation_op = 1;
+    } else if (version < 0x009080c0L) {
+      log_notice(LD_GENERAL, "OpenSSL %s [%lx] looks like it's older than "
+                 "0.9.8l, but some vendors have backported 0.9.8l's "
+                 "renegotiation code to earlier versions.  I'll set "
+                 "SSL3_FLAGS just to be safe.",
+                 SSLeay_version(SSLEAY_VERSION), version);
+      use_unsafe_renegotiation_flag = 1;
+    } else {
+      log_info(LD_GENERAL, "OpenSSL %s has version %lx",
+               SSLeay_version(SSLEAY_VERSION), version);
+    }
+
     tls_library_is_initialized = 1;
   }
 }
@@ -591,18 +658,13 @@ tor_tls_context_new(crypto_pk_env_t *identity, unsigned int key_lifetime)
   SSL_CTX_set_options(result->ctx,
                       SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION);
 #endif
-#ifdef SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION
   /* Yes, we know what we are doing here.  No, we do not treat a renegotiation
    * as authenticating any earlier-received data.
-   *
-   * (OpenSSL 0.9.8l introdeced SSL3_FLAGS_ALLOW_UNSAGE_LEGACY_RENEGOTIATION
-   * here.  OpenSSL 0.9.8m thoughtfully turned it into an option and (it
-   * seems) broke anything that used SSL3_FLAGS_* for the purpose.  So we need
-   * to do both.)
    */
-  SSL_CTX_set_options(result->ctx,
-                      SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION);
-#endif
+  if (use_unsafe_renegotiation_op) {
+    SSL_CTX_set_options(result->ctx,
+                        SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION);
+  }
   /* Don't actually allow compression; it uses ram and time, but the data
    * we transmit is all encrypted anyway. */
   if (result->ctx->comp_methods)
@@ -905,6 +967,7 @@ tor_tls_new(int sock, int isServer)
     SSL_set_info_callback(result->ssl, tor_tls_server_info_callback);
   }
 #endif
+
   /* Not expected to get called. */
   tls_log_errors(NULL, LOG_WARN, LD_NET, "generating TLS context");
   return result;
@@ -943,19 +1006,20 @@ tor_tls_set_renegotiate_callback(tor_tls_t *tls,
 }
 
 /** If this version of openssl requires it, turn on renegotiation on
- * <b>tls</b>.  (Our protocol never requires this for security, but it's nice
- * to use belt-and-suspenders here.)
+ * <b>tls</b>.
  */
 static void
 tor_tls_unblock_renegotiation(tor_tls_t *tls)
 {
-#ifdef SSL3_FLAGS_ALLOW_UNSAFE_LEGACY_RENEGOTIATION
   /* Yes, we know what we are doing here.  No, we do not treat a renegotiation
    * as authenticating any earlier-received data. */
-  tls->ssl->s3->flags |= SSL3_FLAGS_ALLOW_UNSAFE_LEGACY_RENEGOTIATION;
-#else
-  (void)tls;
-#endif
+  if (use_unsafe_renegotiation_flag) {
+    tls->ssl->s3->flags |= SSL3_FLAGS_ALLOW_UNSAFE_LEGACY_RENEGOTIATION;
+  }
+  if (use_unsafe_renegotiation_op) {
+    SSL_set_options(tls->ssl,
+                    SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION);
+  }
 }
 
 /** If this version of openssl supports it, turn off renegotiation on
@@ -965,11 +1029,7 @@ tor_tls_unblock_renegotiation(tor_tls_t *tls)
 void
 tor_tls_block_renegotiation(tor_tls_t *tls)
 {
-#ifdef SSL3_FLAGS_ALLOW_UNSAFE_LEGACY_RENEGOTIATION
   tls->ssl->s3->flags &= ~SSL3_FLAGS_ALLOW_UNSAFE_LEGACY_RENEGOTIATION;
-#else
-  (void)tls;
-#endif
 }
 
 /** Return whether this tls initiated the connect (client) or
