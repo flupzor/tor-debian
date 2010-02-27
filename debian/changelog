@@ -9,7 +9,8 @@ tor (0.2.2.9-alpha-1) experimental; urgency=low
     - The manpages are now built with asciidoc.  While the upstream
       tarball already ships with the output of asciidoc, we instead
       build the manpages during package build time so we can patch them.
-      + Therefore build-depend on asciidoc.
+      + Therefore build-depend on asciidoc (>= 8.2), docbook-xml,
+        docbook-xsl, and xmlto.
       + update 03_tor_manpage_in_section_8 to patch the .txt files now.
       + Remove tor.1.in torify.1.in tor-gencert.1.in tor-resolve.1.in in
         the doc directory during clean.
@@ -41,7 +42,7 @@ tor (0.2.2.9-alpha-1) experimental; urgency=low
   * Finally apply Peter Eisentraut's patch for tor's init script to support
     status as an argument (closes: #526371).
 
- -- Peter Palfrader <weasel@debian.org>  Sat, 27 Feb 2010 16:36:48 +0100
+ -- Peter Palfrader <weasel@debian.org>  Sun, 28 Feb 2010 10:58:10 +0100
 
 tor (0.2.2.8-alpha-1) experimental; urgency=low
 
