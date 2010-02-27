@@ -182,8 +182,26 @@ case "$1" in
 	sleep 1
 	$0 start
 	;;
+  status)
+	if test ! -r $(dirname $TORPID); then
+		echo "cannot read tor PID file"
+		exit 4
+	fi
+	pid=`cat $TORPID 2>/dev/null` || true
+	if test ! -f $TORPID -o -z "$pid"; then
+		echo "tor is not running"
+		exit 3
+	fi
+	if ps "$pid" >/dev/null 2>&1; then
+		echo "tor is running"
+		exit 0
+	else
+		echo "tor is not running"
+		exit 1
+	fi
+	;;
   *)
-	echo "Usage: $0 {start|stop|restart|reload|force-reload}" >&2
+	echo "Usage: $0 {start|stop|restart|reload|force-reload|status}" >&2
 	exit 1
 	;;
 esac
