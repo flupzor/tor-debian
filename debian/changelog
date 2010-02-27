@@ -35,8 +35,11 @@ tor (0.2.2.9-alpha-1) experimental; urgency=low
     usr/share/doc/tor; closes: #568934).
   * Add stark README.polipo with the instructions from Juliusz Chroboczek.
     (closes: #413730)
+  * 0.2.2.4-alpha failed to ship test.h so we had included it in the
+    debian diff.  The upstream bug has long since been fixed so we should
+    probably stop shipping our own copy of test.h
 
- -- Peter Palfrader <weasel@debian.org>  Sat, 27 Feb 2010 16:27:52 +0100
+ -- Peter Palfrader <weasel@debian.org>  Sat, 27 Feb 2010 16:33:22 +0100
 
 tor (0.2.2.8-alpha-1) experimental; urgency=low
 

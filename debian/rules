@@ -73,11 +73,6 @@ MANPAGE_INS=doc/tor.1.in doc/torify.1.in doc/tor-gencert.1.in doc/tor-resolve.1.
 
 configure: patch-stamp
 config.status: configure
-	# clean up test.h stuff.  XXX - expected to no longer be needed after tor-0.2.2.4-alpha
-	rm -f src/test/test.h.orig
-	! [ -e src/test/test.h ] || mv src/test/test.h src/test/test.h.orig
-	cp debian/src-test-test.h src/test/test.h
-
 	dh_testdir
 	./configure \
 		$(confflags) \
@@ -126,10 +121,6 @@ clean: unpatch
 	rm -f src/or/micro-revision.i
 
 	[ ! -f Makefile ] || $(MAKE) distclean
-
-	# clean up test.h stuff.  XXX - expected to no longer be needed after tor-0.2.2.4-alpha
-	rm -f src/test/test.h
-	! [ -e src/test/test.h.orig ] || mv src/test/test.h.orig src/test/test.h
 
 	# Normally the .deb wouldn't ship with a ../.git
 	if [ -d .git ] && which git >/dev/null; then \
