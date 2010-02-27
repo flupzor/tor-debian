@@ -29,8 +29,10 @@ tor (0.2.2.9-alpha-1) experimental; urgency=low
       the website also closes: #443560.
     - Also no longer distribute doc/TODO and doc/HACKING in the debian
       package.
+  * Move from comm to section net, where it might fit slightly better
+    (closes: #482801).
 
- -- Peter Palfrader <weasel@debian.org>  Sat, 27 Feb 2010 15:59:14 +0100
+ -- Peter Palfrader <weasel@debian.org>  Sat, 27 Feb 2010 16:23:08 +0100
 
 tor (0.2.2.8-alpha-1) experimental; urgency=low
 

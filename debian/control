@@ -1,5 +1,5 @@
 Source: tor
-Section: comm
+Section: net
 Priority: optional
 Maintainer: Peter Palfrader <weasel@debian.org>
 Build-Depends: debhelper (>= 5), libssl-dev, dpatch, zlib1g-dev, libevent-dev (>= 1.1), binutils (>= 2.14.90.0.7), hardening-includes, asciidoc
