@@ -103,6 +103,9 @@ build-stamp:  config.status
 		elif [ -e "$$base".8 ]; then mv "$$base".8 "$$base".1.in; \
 		else echo >&2 "No output produced by a2px?" && exit 1; fi || exit 1; \
 	done
+	# Also touch all the .html files or else the build system will
+	# try to re-create them and fail badly
+	for file in $(MANPAGE_INS); do touch $${file%%.1.in}.html.in || exit 1; done
 	$(MAKE)
 	@echo
 	@echo
