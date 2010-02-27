@@ -85,19 +85,20 @@ config.status: configure
 
 build: build-stamp
 
-build-stamp:  config.status
-	dh_testdir
-	! [ debian/micro-revision.i ] || cp debian/micro-revision.i src/or/micro-revision.i
 
-	# create the manpages because the build-system shipped in the tarball is
-	# incomplete.  moving foo.8 to foo.1.in is intended.
-	for manpage in $(MANPAGE_INS); do \
-		base="$${manpage%%.1.in}"; \
+# create the manpages here because the build-system shipped in the tarball is
+# incomplete.  moving foo.8 to foo.1.in is intended.
+doc/%.1.in: doc/%.1.txt
+	target="$@"; base="$${target%%.1.in}"; \
 		a2x -f manpage "$$base".1.txt && \
 		if [ -e "$$base".1 ]; then mv "$$base".1 "$$base".1.in; \
 		elif [ -e "$$base".8 ]; then mv "$$base".8 "$$base".1.in; \
-		else echo >&2 "No output produced by a2px?" && exit 1; fi || exit 1; \
-	done
+		else echo >&2 "No output produced by a2px?" && exit 1; fi
+
+build-stamp:  config.status $(MANPAGE_INS)
+	dh_testdir
+	! [ debian/micro-revision.i ] || cp debian/micro-revision.i src/or/micro-revision.i
+
 	# Also touch all the .html files or else the build system will
 	# try to re-create them and fail badly
 	for file in $(MANPAGE_INS); do touch $${file%%.1.in}.html.in || exit 1; done
