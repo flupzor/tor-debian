@@ -88,7 +88,7 @@ build: build-stamp
 
 # create the manpages here because the build-system shipped in the tarball is
 # incomplete.  moving foo.8 to foo.1.in is intended.
-doc/%.1.in: doc/%.1.txt
+doc/%.1.in: doc/%.1.txt patch-stamp
 	target="$@"; base="$${target%%.1.in}"; \
 		a2x -f manpage "$$base".1.txt && \
 		if [ -e "$$base".1 ]; then mv "$$base".1 "$$base".1.in; \
@@ -97,7 +97,7 @@ doc/%.1.in: doc/%.1.txt
 
 build-stamp:  config.status $(MANPAGE_INS)
 	dh_testdir
-	! [ debian/micro-revision.i ] || cp debian/micro-revision.i src/or/micro-revision.i
+	! [ -e debian/micro-revision.i ] || cp debian/micro-revision.i src/or/micro-revision.i
 
 	# Also touch all the .html files or else the build system will
 	# try to re-create them and fail badly
