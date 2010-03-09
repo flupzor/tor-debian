@@ -1,6 +1,6 @@
 /* Copyright (c) 2001-2004, Roger Dingledine.
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2009, The Tor Project, Inc. */
+ * Copyright (c) 2007-2010, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 /* Ordinarily defined in tor_main.c; this bit is just here to provide one
@@ -607,7 +607,6 @@ test_circuit_timeout(void)
 
     if (circuit_build_times_add_timeout(&final, 1, approx_time()-1))
       final.have_computed_timeout = 1;
-
   }
 
 done:
