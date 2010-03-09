@@ -1,7 +1,7 @@
 /* Copyright (c) 2001 Matej Pfajfar.
  * Copyright (c) 2001-2004, Roger Dingledine.
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2009, The Tor Project, Inc. */
+ * Copyright (c) 2007-2010, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 /**
@@ -11,6 +11,8 @@
 
 #include "or.h"
 #include "memarea.h"
+#undef log
+#include <math.h>
 
 /****************************************************************************/
 
@@ -104,6 +106,7 @@ typedef enum {
 
   K_KNOWN_FLAGS,
   K_PARAMS,
+  K_BW_WEIGHTS,
   K_VOTE_DIGEST,
   K_CONSENSUS_DIGEST,
   K_ADDITIONAL_DIGEST,
@@ -111,6 +114,7 @@ typedef enum {
   K_CONSENSUS_METHODS,
   K_CONSENSUS_METHOD,
   K_LEGACY_DIR_KEY,
+  K_DIRECTORY_FOOTER,
 
   A_PURPOSE,
   A_LAST_LISTED,
@@ -485,7 +489,9 @@ static token_rule_t networkstatus_consensus_token_table[] = {
 /** List of tokens allowable in the footer of v1/v2 directory/networkstatus
  * footers. */
 static token_rule_t networkstatus_vote_footer_token_table[] = {
-  T(  "directory-signature", K_DIRECTORY_SIGNATURE, GE(2),   NEED_OBJ ),
+  T01("directory-footer",    K_DIRECTORY_FOOTER,    NO_ARGS,   NO_OBJ ),
+  T01("bandwidth-weights",   K_BW_WEIGHTS,          ARGS,      NO_OBJ ),
+  T(  "directory-signature", K_DIRECTORY_SIGNATURE, GE(2),     NEED_OBJ ),
   END_OF_TABLE
 };
 
@@ -516,11 +522,12 @@ static int router_add_exit_policy(routerinfo_t *router,directory_token_t *tok);
 static addr_policy_t *router_parse_addr_policy(directory_token_t *tok);
 static addr_policy_t *router_parse_addr_policy_private(directory_token_t *tok);
 
-static int router_get_hash_impl(const char *s, char *digest,
+static int router_get_hash_impl(const char *s, size_t s_len, char *digest,
                                 const char *start_str, const char *end_str,
                                 char end_char,
                                 digest_algorithm_t alg);
-static int router_get_hashes_impl(const char *s, digests_t *digests,
+static int router_get_hashes_impl(const char *s, size_t s_len,
+                                  digests_t *digests,
                                   const char *start_str, const char *end_str,
                                   char end_char);
 static void token_clear(directory_token_t *tok);
@@ -602,7 +609,7 @@ dump_desc(const char *desc, const char *type)
 int
 router_get_dir_hash(const char *s, char *digest)
 {
-  return router_get_hash_impl(s,digest,
+  return router_get_hash_impl(s, strlen(s), digest,
                               "signed-directory","\ndirectory-signature",'\n',
                               DIGEST_SHA1);
 }
@@ -611,9 +618,9 @@ router_get_dir_hash(const char *s, char *digest)
  * <b>s</b>. Return 0 on success, -1 on failure.
  */
 int
-router_get_router_hash(const char *s, char *digest)
+router_get_router_hash(const char *s, size_t s_len, char *digest)
 {
-  return router_get_hash_impl(s,digest,
+  return router_get_hash_impl(s, s_len, digest,
                               "router ","\nrouter-signature", '\n',
                               DIGEST_SHA1);
 }
@@ -624,7 +631,7 @@ router_get_router_hash(const char *s, char *digest)
 int
 router_get_runningrouters_hash(const char *s, char *digest)
 {
-  return router_get_hash_impl(s,digest,
+  return router_get_hash_impl(s, strlen(s), digest,
                               "network-status","\ndirectory-signature", '\n',
                               DIGEST_SHA1);
 }
@@ -634,7 +641,7 @@ router_get_runningrouters_hash(const char *s, char *digest)
 int
 router_get_networkstatus_v2_hash(const char *s, char *digest)
 {
-  return router_get_hash_impl(s,digest,
+  return router_get_hash_impl(s, strlen(s), digest,
                               "network-status-version","\ndirectory-signature",
                               '\n',
                               DIGEST_SHA1);
@@ -645,7 +652,7 @@ router_get_networkstatus_v2_hash(const char *s, char *digest)
 int
 router_get_networkstatus_v3_hashes(const char *s, digests_t *digests)
 {
-  return router_get_hashes_impl(s,digests,
+  return router_get_hashes_impl(s,strlen(s),digests,
                                 "network-status-version",
                                 "\ndirectory-signature",
                                 ' ');
@@ -657,7 +664,7 @@ int
 router_get_networkstatus_v3_hash(const char *s, char *digest,
                                  digest_algorithm_t alg)
 {
-  return router_get_hash_impl(s,digest,
+  return router_get_hash_impl(s, strlen(s), digest,
                               "network-status-version",
                               "\ndirectory-signature",
                               ' ', alg);
@@ -668,8 +675,8 @@ router_get_networkstatus_v3_hash(const char *s, char *digest,
 int
 router_get_extrainfo_hash(const char *s, char *digest)
 {
-  return router_get_hash_impl(s,digest,"extra-info","\nrouter-signature",'\n',
-                              DIGEST_SHA1);
+  return router_get_hash_impl(s, strlen(s), digest, "extra-info",
+                              "\nrouter-signature",'\n', DIGEST_SHA1);
 }
 
 /** Helper: used to generate signatures for routers, directories and
@@ -1238,6 +1245,8 @@ dump_distinct_digest_count(int severity)
  * s through end into the signed_descriptor_body of the resulting
  * routerinfo_t.
  *
+ * If <b>end</b> is NULL, <b>s</b> must be properly NULL-terminated.
+ *
  * If <b>allow_annotations</b>, it's okay to encounter annotations in <b>s</b>
  * before the router; if it's false, reject the router if it's annotated.  If
  * <b>prepend_annotations</b> is set, it should contain some annotations:
@@ -1300,7 +1309,7 @@ router_parse_entry_from_string(const char *s, const char *end,
     }
   }
 
-  if (router_get_router_hash(s, digest) < 0) {
+  if (router_get_router_hash(s, end - s, digest) < 0) {
     log_warn(LD_DIR, "Couldn't compute router hash.");
     goto err;
   }
@@ -1722,7 +1731,7 @@ authority_cert_parse_from_string(const char *s, const char **end_of_string)
     log_warn(LD_DIR, "Error tokenizing key certificate");
     goto err;
   }
-  if (router_get_hash_impl(s, digest, "dir-key-certificate-version",
+  if (router_get_hash_impl(s, strlen(s), digest, "dir-key-certificate-version",
                            "\ndir-key-certification", '\n', DIGEST_SHA1) < 0)
     goto err;
   tok = smartlist_get(tokens, 0);
@@ -1866,23 +1875,28 @@ authority_cert_parse_from_string(const char *s, const char **end_of_string)
 
 /** Helper: given a string <b>s</b>, return the start of the next router-status
  * object (starting with "r " at the start of a line).  If none is found,
- * return the start of the next directory signature.  If none is found, return
- * the end of the string. */
+ * return the start of the directory footer, or the next directory signature.
+ * If none is found, return the end of the string. */
 static INLINE const char *
 find_start_of_next_routerstatus(const char *s)
 {
-  const char *eos = strstr(s, "\nr ");
-  if (eos) {
-    const char *eos2 = tor_memstr(s, eos-s, "\ndirectory-signature");
-    if (eos2 && eos2 < eos)
-      return eos2;
-    else
-      return eos+1;
-  } else {
-    if ((eos = strstr(s, "\ndirectory-signature")))
-      return eos+1;
-    return s + strlen(s);
-  }
+  const char *eos, *footer, *sig;
+  if ((eos = strstr(s, "\nr ")))
+    ++eos;
+  else
+    eos = s + strlen(s);
+
+  footer = tor_memstr(s, eos-s, "\ndirectory-footer");
+  sig = tor_memstr(s, eos-s, "\ndirectory-signature");
+
+  if (footer && sig)
+    return MIN(footer, sig) + 1;
+  else if (footer)
+    return footer+1;
+  else if (sig)
+    return sig+1;
+  else
+    return eos;
 }
 
 /** Given a string at *<b>s</b>, containing a routerstatus object, and an
@@ -2327,6 +2341,395 @@ networkstatus_v2_parse_from_string(const char *s)
   return ns;
 }
 
+/** Verify the bandwidth weights of a network status document */
+int
+networkstatus_verify_bw_weights(networkstatus_t *ns)
+{
+  int64_t weight_scale;
+  int64_t G=0, M=0, E=0, D=0, T=0;
+  double Wgg, Wgm, Wgd, Wmg, Wmm, Wme, Wmd, Weg, Wem, Wee, Wed;
+  double Gtotal=0, Mtotal=0, Etotal=0;
+  const char *casename = NULL;
+  int valid = 1;
+
+  weight_scale = networkstatus_get_param(ns, "bwweightscale", BW_WEIGHT_SCALE);
+  Wgg = networkstatus_get_bw_weight(ns, "Wgg", -1);
+  Wgm = networkstatus_get_bw_weight(ns, "Wgm", -1);
+  Wgd = networkstatus_get_bw_weight(ns, "Wgd", -1);
+  Wmg = networkstatus_get_bw_weight(ns, "Wmg", -1);
+  Wmm = networkstatus_get_bw_weight(ns, "Wmm", -1);
+  Wme = networkstatus_get_bw_weight(ns, "Wme", -1);
+  Wmd = networkstatus_get_bw_weight(ns, "Wmd", -1);
+  Weg = networkstatus_get_bw_weight(ns, "Weg", -1);
+  Wem = networkstatus_get_bw_weight(ns, "Wem", -1);
+  Wee = networkstatus_get_bw_weight(ns, "Wee", -1);
+  Wed = networkstatus_get_bw_weight(ns, "Wed", -1);
+
+  if (Wgg<0 || Wgm<0 || Wgd<0 || Wmg<0 || Wmm<0 || Wme<0 || Wmd<0 || Weg<0
+          || Wem<0 || Wee<0 || Wed<0) {
+    log_warn(LD_BUG, "No bandwidth weights produced in consensus!");
+    return 0;
+  }
+
+  // First, sanity check basic summing properties that hold for all cases
+  // We use > 1 as the check for these because they are computed as integers.
+  // Sometimes there are rounding errors.
+  if (fabs(Wmm - weight_scale) > 1) {
+    log_warn(LD_BUG, "Wmm=%lf != "I64_FORMAT,
+             Wmm, I64_PRINTF_ARG(weight_scale));
+    valid = 0;
+  }
+
+  if (fabs(Wem - Wee) > 1) {
+    log_warn(LD_BUG, "Wem=%lf != Wee=%lf", Wem, Wee);
+    valid = 0;
+  }
+
+  if (fabs(Wgm - Wgg) > 1) {
+    log_warn(LD_BUG, "Wgm=%lf != Wgg=%lf", Wgm, Wgg);
+    valid = 0;
+  }
+
+  if (fabs(Weg - Wed) > 1) {
+    log_warn(LD_BUG, "Wed=%lf != Weg=%lf", Wed, Weg);
+    valid = 0;
+  }
+
+  if (fabs(Wgg + Wmg - weight_scale) > 0.001*weight_scale) {
+    log_warn(LD_BUG, "Wgg=%lf != "I64_FORMAT" - Wmg=%lf", Wgg,
+             I64_PRINTF_ARG(weight_scale), Wmg);
+    valid = 0;
+  }
+
+  if (fabs(Wee + Wme - weight_scale) > 0.001*weight_scale) {
+    log_warn(LD_BUG, "Wee=%lf != "I64_FORMAT" - Wme=%lf", Wee,
+             I64_PRINTF_ARG(weight_scale), Wme);
+    valid = 0;
+  }
+
+  if (fabs(Wgd + Wmd + Wed - weight_scale) > 0.001*weight_scale) {
+    log_warn(LD_BUG, "Wgd=%lf + Wmd=%lf + Wed=%lf != "I64_FORMAT,
+             Wgd, Wmd, Wed, I64_PRINTF_ARG(weight_scale));
+    valid = 0;
+  }
+
+  Wgg /= weight_scale;
+  Wgm /= weight_scale;
+  Wgd /= weight_scale;
+
+  Wmg /= weight_scale;
+  Wmm /= weight_scale;
+  Wme /= weight_scale;
+  Wmd /= weight_scale;
+
+  Weg /= weight_scale;
+  Wem /= weight_scale;
+  Wee /= weight_scale;
+  Wed /= weight_scale;
+
+  // Then, gather G, M, E, D, T to determine case
+  SMARTLIST_FOREACH_BEGIN(ns->routerstatus_list, routerstatus_t *, rs) {
+    if (rs->has_bandwidth) {
+      T += rs->bandwidth;
+      if (rs->is_exit && rs->is_possible_guard) {
+        D += rs->bandwidth;
+        Gtotal += Wgd*rs->bandwidth;
+        Mtotal += Wmd*rs->bandwidth;
+        Etotal += Wed*rs->bandwidth;
+      } else if (rs->is_exit) {
+        E += rs->bandwidth;
+        Mtotal += Wme*rs->bandwidth;
+        Etotal += Wee*rs->bandwidth;
+      } else if (rs->is_possible_guard) {
+        G += rs->bandwidth;
+        Gtotal += Wgg*rs->bandwidth;
+        Mtotal += Wmg*rs->bandwidth;
+      } else {
+        M += rs->bandwidth;
+        Mtotal += Wmm*rs->bandwidth;
+      }
+    } else {
+      log_warn(LD_BUG, "Missing consensus bandwidth for router %s",
+          rs->nickname);
+    }
+  } SMARTLIST_FOREACH_END(rs);
+
+  // Finally, check equality conditions depending upon case 1, 2 or 3
+  // Full equality cases: 1, 3b
+  // Partial equality cases: 2b (E=G), 3a (M=E)
+  // Fully unknown: 2a
+  if (3*E >= T && 3*G >= T) {
+    // Case 1: Neither are scarce
+    casename = "Case 1";
+    if (fabs(Etotal-Mtotal) > 0.01*MAX(Etotal,Mtotal)) {
+      log_warn(LD_DIR,
+               "Bw Weight Failure for %s: Etotal %lf != Mtotal %lf. "
+               "G="I64_FORMAT" M="I64_FORMAT" E="I64_FORMAT" D="I64_FORMAT
+               " T="I64_FORMAT". "
+               "Wgg=%lf Wgd=%lf Wmg=%lf Wme=%lf Wmd=%lf Wee=%lf Wed=%lf",
+               casename, Etotal, Mtotal,
+               I64_PRINTF_ARG(G), I64_PRINTF_ARG(M), I64_PRINTF_ARG(E),
+               I64_PRINTF_ARG(D), I64_PRINTF_ARG(T),
+               Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+      valid = 0;
+    }
+    if (fabs(Etotal-Gtotal) > 0.01*MAX(Etotal,Gtotal)) {
+      log_warn(LD_DIR,
+               "Bw Weight Failure for %s: Etotal %lf != Gtotal %lf. "
+               "G="I64_FORMAT" M="I64_FORMAT" E="I64_FORMAT" D="I64_FORMAT
+               " T="I64_FORMAT". "
+               "Wgg=%lf Wgd=%lf Wmg=%lf Wme=%lf Wmd=%lf Wee=%lf Wed=%lf",
+               casename, Etotal, Gtotal,
+               I64_PRINTF_ARG(G), I64_PRINTF_ARG(M), I64_PRINTF_ARG(E),
+               I64_PRINTF_ARG(D), I64_PRINTF_ARG(T),
+               Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+      valid = 0;
+    }
+    if (fabs(Gtotal-Mtotal) > 0.01*MAX(Gtotal,Mtotal)) {
+      log_warn(LD_DIR,
+               "Bw Weight Failure for %s: Mtotal %lf != Gtotal %lf. "
+               "G="I64_FORMAT" M="I64_FORMAT" E="I64_FORMAT" D="I64_FORMAT
+               " T="I64_FORMAT". "
+               "Wgg=%lf Wgd=%lf Wmg=%lf Wme=%lf Wmd=%lf Wee=%lf Wed=%lf",
+               casename, Mtotal, Gtotal,
+               I64_PRINTF_ARG(G), I64_PRINTF_ARG(M), I64_PRINTF_ARG(E),
+               I64_PRINTF_ARG(D), I64_PRINTF_ARG(T),
+               Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+      valid = 0;
+    }
+  } else if (3*E < T && 3*G < T) {
+    int64_t R = MIN(E, G);
+    int64_t S = MAX(E, G);
+    /*
+     * Case 2: Both Guards and Exits are scarce
+     * Balance D between E and G, depending upon
+     * D capacity and scarcity. Devote no extra
+     * bandwidth to middle nodes.
+     */
+    if (R+D < S) { // Subcase a
+      double Rtotal, Stotal;
+      if (E < G) {
+        Rtotal = Etotal;
+        Stotal = Gtotal;
+      } else {
+        Rtotal = Gtotal;
+        Stotal = Etotal;
+      }
+      casename = "Case 2a";
+      // Rtotal < Stotal
+      if (Rtotal > Stotal) {
+        log_warn(LD_DIR,
+                   "Bw Weight Failure for %s: Rtotal %lf > Stotal %lf. "
+                   "G="I64_FORMAT" M="I64_FORMAT" E="I64_FORMAT" D="I64_FORMAT
+                   " T="I64_FORMAT". "
+                   "Wgg=%lf Wgd=%lf Wmg=%lf Wme=%lf Wmd=%lf Wee=%lf Wed=%lf",
+                   casename, Rtotal, Stotal,
+                   I64_PRINTF_ARG(G), I64_PRINTF_ARG(M), I64_PRINTF_ARG(E),
+                   I64_PRINTF_ARG(D), I64_PRINTF_ARG(T),
+                   Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+        valid = 0;
+      }
+      // Rtotal < T/3
+      if (3*Rtotal > T) {
+        log_warn(LD_DIR,
+                   "Bw Weight Failure for %s: 3*Rtotal %lf > T "
+                   I64_FORMAT". G="I64_FORMAT" M="I64_FORMAT" E="I64_FORMAT
+                   " D="I64_FORMAT" T="I64_FORMAT". "
+                   "Wgg=%lf Wgd=%lf Wmg=%lf Wme=%lf Wmd=%lf Wee=%lf Wed=%lf",
+                   casename, Rtotal*3, I64_PRINTF_ARG(T),
+                   I64_PRINTF_ARG(G), I64_PRINTF_ARG(M), I64_PRINTF_ARG(E),
+                   I64_PRINTF_ARG(D), I64_PRINTF_ARG(T),
+                   Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+        valid = 0;
+      }
+      // Stotal < T/3
+      if (3*Stotal > T) {
+        log_warn(LD_DIR,
+                   "Bw Weight Failure for %s: 3*Stotal %lf > T "
+                   I64_FORMAT". G="I64_FORMAT" M="I64_FORMAT" E="I64_FORMAT
+                   " D="I64_FORMAT" T="I64_FORMAT". "
+                   "Wgg=%lf Wgd=%lf Wmg=%lf Wme=%lf Wmd=%lf Wee=%lf Wed=%lf",
+                   casename, Stotal*3, I64_PRINTF_ARG(T),
+                   I64_PRINTF_ARG(G), I64_PRINTF_ARG(M), I64_PRINTF_ARG(E),
+                   I64_PRINTF_ARG(D), I64_PRINTF_ARG(T),
+                   Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+        valid = 0;
+      }
+      // Mtotal > T/3
+      if (3*Mtotal < T) {
+        log_warn(LD_DIR,
+                   "Bw Weight Failure for %s: 3*Mtotal %lf < T "
+                   I64_FORMAT". "
+                   "G="I64_FORMAT" M="I64_FORMAT" E="I64_FORMAT" D="I64_FORMAT
+                   " T="I64_FORMAT". "
+                   "Wgg=%lf Wgd=%lf Wmg=%lf Wme=%lf Wmd=%lf Wee=%lf Wed=%lf",
+                   casename, Mtotal*3, I64_PRINTF_ARG(T),
+                   I64_PRINTF_ARG(G), I64_PRINTF_ARG(M), I64_PRINTF_ARG(E),
+                   I64_PRINTF_ARG(D), I64_PRINTF_ARG(T),
+                   Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+        valid = 0;
+      }
+    } else { // Subcase b: R+D > S
+      casename = "Case 2b";
+
+      /* Check the rare-M redirect case. */
+      if (D != 0 && 3*M < T) {
+        casename = "Case 2b (balanced)";
+        if (fabs(Etotal-Mtotal) > 0.01*MAX(Etotal,Mtotal)) {
+          log_warn(LD_DIR,
+                   "Bw Weight Failure for %s: Etotal %lf != Mtotal %lf. "
+                   "G="I64_FORMAT" M="I64_FORMAT" E="I64_FORMAT" D="I64_FORMAT
+                   " T="I64_FORMAT". "
+                   "Wgg=%lf Wgd=%lf Wmg=%lf Wme=%lf Wmd=%lf Wee=%lf Wed=%lf",
+                   casename, Etotal, Mtotal,
+                   I64_PRINTF_ARG(G), I64_PRINTF_ARG(M), I64_PRINTF_ARG(E),
+                   I64_PRINTF_ARG(D), I64_PRINTF_ARG(T),
+                   Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+          valid = 0;
+        }
+        if (fabs(Etotal-Gtotal) > 0.01*MAX(Etotal,Gtotal)) {
+          log_warn(LD_DIR,
+                   "Bw Weight Failure for %s: Etotal %lf != Gtotal %lf. "
+                   "G="I64_FORMAT" M="I64_FORMAT" E="I64_FORMAT" D="I64_FORMAT
+                   " T="I64_FORMAT". "
+                   "Wgg=%lf Wgd=%lf Wmg=%lf Wme=%lf Wmd=%lf Wee=%lf Wed=%lf",
+                   casename, Etotal, Gtotal,
+                   I64_PRINTF_ARG(G), I64_PRINTF_ARG(M), I64_PRINTF_ARG(E),
+                   I64_PRINTF_ARG(D), I64_PRINTF_ARG(T),
+                   Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+          valid = 0;
+        }
+        if (fabs(Gtotal-Mtotal) > 0.01*MAX(Gtotal,Mtotal)) {
+          log_warn(LD_DIR,
+                   "Bw Weight Failure for %s: Mtotal %lf != Gtotal %lf. "
+                   "G="I64_FORMAT" M="I64_FORMAT" E="I64_FORMAT" D="I64_FORMAT
+                   " T="I64_FORMAT". "
+                   "Wgg=%lf Wgd=%lf Wmg=%lf Wme=%lf Wmd=%lf Wee=%lf Wed=%lf",
+                   casename, Mtotal, Gtotal,
+                   I64_PRINTF_ARG(G), I64_PRINTF_ARG(M), I64_PRINTF_ARG(E),
+                   I64_PRINTF_ARG(D), I64_PRINTF_ARG(T),
+                   Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+          valid = 0;
+        }
+      } else {
+        if (fabs(Etotal-Gtotal) > 0.01*MAX(Etotal,Gtotal)) {
+          log_warn(LD_DIR,
+                   "Bw Weight Failure for %s: Etotal %lf != Gtotal %lf. "
+                   "G="I64_FORMAT" M="I64_FORMAT" E="I64_FORMAT" D="I64_FORMAT
+                   " T="I64_FORMAT". "
+                   "Wgg=%lf Wgd=%lf Wmg=%lf Wme=%lf Wmd=%lf Wee=%lf Wed=%lf",
+                   casename, Etotal, Gtotal,
+                   I64_PRINTF_ARG(G), I64_PRINTF_ARG(M), I64_PRINTF_ARG(E),
+                   I64_PRINTF_ARG(D), I64_PRINTF_ARG(T),
+                   Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+          valid = 0;
+        }
+      }
+    }
+  } else { // if (E < T/3 || G < T/3) {
+    int64_t S = MIN(E, G);
+    int64_t NS = MAX(E, G);
+    if (3*(S+D) < T) { // Subcase a:
+      double Stotal;
+      double NStotal;
+      if (G < E) {
+        casename = "Case 3a (G scarce)";
+        Stotal = Gtotal;
+        NStotal = Etotal;
+      } else { // if (G >= E) {
+        casename = "Case 3a (E scarce)";
+        NStotal = Gtotal;
+        Stotal = Etotal;
+      }
+      // Stotal < T/3
+      if (3*Stotal > T) {
+        log_warn(LD_DIR,
+                   "Bw Weight Failure for %s: 3*Stotal %lf > T "
+                   I64_FORMAT". G="I64_FORMAT" M="I64_FORMAT" E="I64_FORMAT
+                   " D="I64_FORMAT" T="I64_FORMAT". "
+                   "Wgg=%lf Wgd=%lf Wmg=%lf Wme=%lf Wmd=%lf Wee=%lf Wed=%lf",
+                   casename, Stotal*3, I64_PRINTF_ARG(T),
+                   I64_PRINTF_ARG(G), I64_PRINTF_ARG(M), I64_PRINTF_ARG(E),
+                   I64_PRINTF_ARG(D), I64_PRINTF_ARG(T),
+                   Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+        valid = 0;
+      }
+      if (NS >= M) {
+        if (fabs(NStotal-Mtotal) > 0.01*MAX(NStotal,Mtotal)) {
+          log_warn(LD_DIR,
+                   "Bw Weight Failure for %s: NStotal %lf != Mtotal %lf. "
+                   "G="I64_FORMAT" M="I64_FORMAT" E="I64_FORMAT" D="I64_FORMAT
+                   " T="I64_FORMAT". "
+                   "Wgg=%lf Wgd=%lf Wmg=%lf Wme=%lf Wmd=%lf Wee=%lf Wed=%lf",
+                   casename, NStotal, Mtotal,
+                   I64_PRINTF_ARG(G), I64_PRINTF_ARG(M), I64_PRINTF_ARG(E),
+                   I64_PRINTF_ARG(D), I64_PRINTF_ARG(T),
+                   Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+          valid = 0;
+        }
+      } else {
+        // if NS < M, NStotal > T/3 because only one of G or E is scarce
+        if (3*NStotal < T) {
+          log_warn(LD_DIR,
+                     "Bw Weight Failure for %s: 3*NStotal %lf < T "
+                     I64_FORMAT". G="I64_FORMAT" M="I64_FORMAT
+                     " E="I64_FORMAT" D="I64_FORMAT" T="I64_FORMAT". "
+                     "Wgg=%lf Wgd=%lf Wmg=%lf Wme=%lf Wmd=%lf Wee=%lf Wed=%lf",
+                     casename, NStotal*3, I64_PRINTF_ARG(T),
+                     I64_PRINTF_ARG(G), I64_PRINTF_ARG(M), I64_PRINTF_ARG(E),
+                     I64_PRINTF_ARG(D), I64_PRINTF_ARG(T),
+                     Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+          valid = 0;
+        }
+      }
+    } else { // Subcase b: S+D >= T/3
+      casename = "Case 3b";
+      if (fabs(Etotal-Mtotal) > 0.01*MAX(Etotal,Mtotal)) {
+        log_warn(LD_DIR,
+                 "Bw Weight Failure for %s: Etotal %lf != Mtotal %lf. "
+                 "G="I64_FORMAT" M="I64_FORMAT" E="I64_FORMAT" D="I64_FORMAT
+                 " T="I64_FORMAT". "
+                 "Wgg=%lf Wgd=%lf Wmg=%lf Wme=%lf Wmd=%lf Wee=%lf Wed=%lf",
+                 casename, Etotal, Mtotal,
+                 I64_PRINTF_ARG(G), I64_PRINTF_ARG(M), I64_PRINTF_ARG(E),
+                 I64_PRINTF_ARG(D), I64_PRINTF_ARG(T),
+                 Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+        valid = 0;
+      }
+      if (fabs(Etotal-Gtotal) > 0.01*MAX(Etotal,Gtotal)) {
+        log_warn(LD_DIR,
+                 "Bw Weight Failure for %s: Etotal %lf != Gtotal %lf. "
+                 "G="I64_FORMAT" M="I64_FORMAT" E="I64_FORMAT" D="I64_FORMAT
+                 " T="I64_FORMAT". "
+                 "Wgg=%lf Wgd=%lf Wmg=%lf Wme=%lf Wmd=%lf Wee=%lf Wed=%lf",
+                 casename, Etotal, Gtotal,
+                 I64_PRINTF_ARG(G), I64_PRINTF_ARG(M), I64_PRINTF_ARG(E),
+                 I64_PRINTF_ARG(D), I64_PRINTF_ARG(T),
+                 Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+        valid = 0;
+      }
+      if (fabs(Gtotal-Mtotal) > 0.01*MAX(Gtotal,Mtotal)) {
+        log_warn(LD_DIR,
+                 "Bw Weight Failure for %s: Mtotal %lf != Gtotal %lf. "
+                 "G="I64_FORMAT" M="I64_FORMAT" E="I64_FORMAT" D="I64_FORMAT
+                 " T="I64_FORMAT". "
+                 "Wgg=%lf Wgd=%lf Wmg=%lf Wme=%lf Wmd=%lf Wee=%lf Wed=%lf",
+                 casename, Mtotal, Gtotal,
+                 I64_PRINTF_ARG(G), I64_PRINTF_ARG(M), I64_PRINTF_ARG(E),
+                 I64_PRINTF_ARG(D), I64_PRINTF_ARG(T),
+                 Wgg, Wgd, Wmg, Wme, Wmd, Wee, Wed);
+        valid = 0;
+      }
+    }
+  }
+
+  if (valid)
+    log_notice(LD_DIR, "Bandwidth-weight %s is verified and valid.",
+               casename);
+
+  return valid;
+}
+
 /** Parse a v3 networkstatus vote, opinion, or consensus (depending on
  * ns_type), from <b>s</b>, and return the result.  Return NULL on failure. */
 networkstatus_t *
@@ -2673,6 +3076,46 @@ networkstatus_parse_vote_from_string(const char *s, const char **eos_out,
                       networkstatus_vote_footer_token_table, 0)) {
     log_warn(LD_DIR, "Error tokenizing network-status vote footer.");
     goto err;
+  }
+
+  {
+    int found_sig = 0;
+    SMARTLIST_FOREACH_BEGIN(footer_tokens, directory_token_t *, _tok) {
+      tok = _tok;
+      if (tok->tp == K_DIRECTORY_SIGNATURE)
+        found_sig = 1;
+      else if (found_sig) {
+        log_warn(LD_DIR, "Extraneous token after first directory-signature");
+        goto err;
+      }
+    } SMARTLIST_FOREACH_END(_tok);
+  }
+
+  if ((tok = find_opt_by_keyword(footer_tokens, K_DIRECTORY_FOOTER))) {
+    if (tok != smartlist_get(footer_tokens, 0)) {
+      log_warn(LD_DIR, "Misplaced directory-footer token");
+      goto err;
+    }
+  }
+
+  tok = find_opt_by_keyword(footer_tokens, K_BW_WEIGHTS);
+  if (tok) {
+    ns->weight_params = smartlist_create();
+    for (i = 0; i < tok->n_args; ++i) {
+      int ok=0;
+      char *eq = strchr(tok->args[i], '=');
+      if (!eq) {
+        log_warn(LD_DIR, "Bad element '%s' in weight params",
+                 escaped(tok->args[i]));
+        goto err;
+      }
+      tor_parse_long(eq+1, 10, INT32_MIN, INT32_MAX, &ok, NULL);
+      if (!ok) {
+        log_warn(LD_DIR, "Bad element '%s' in params", escaped(tok->args[i]));
+        goto err;
+      }
+      smartlist_add(ns->weight_params, tor_strdup(tok->args[i]));
+    }
   }
 
   SMARTLIST_FOREACH_BEGIN(footer_tokens, directory_token_t *, _tok) {
@@ -3632,13 +4075,13 @@ find_all_exitpolicy(smartlist_t *s)
 }
 
 static int
-router_get_hash_impl_helper(const char *s,
+router_get_hash_impl_helper(const char *s, size_t s_len,
                             const char *start_str,
                             const char *end_str, char end_c,
                             const char **start_out, const char **end_out)
 {
-  char *start, *end;
-  start = strstr(s, start_str);
+  const char *start, *end;
+  start = tor_memstr(s, s_len, start_str);
   if (!start) {
     log_warn(LD_DIR,"couldn't find start of hashed material \"%s\"",start_str);
     return -1;
@@ -3649,12 +4092,13 @@ router_get_hash_impl_helper(const char *s,
              start_str);
     return -1;
   }
-  end = strstr(start+strlen(start_str), end_str);
+  end = tor_memstr(start+strlen(start_str),
+                   s_len - (start-s) - strlen(start_str), end_str);
   if (!end) {
     log_warn(LD_DIR,"couldn't find end of hashed material \"%s\"",end_str);
     return -1;
   }
-  end = strchr(end+strlen(end_str), end_c);
+  end = memchr(end+strlen(end_str), end_c, s_len - (end-s) - strlen(end_str));
   if (!end) {
     log_warn(LD_DIR,"couldn't find EOL");
     return -1;
@@ -3674,13 +4118,14 @@ router_get_hash_impl_helper(const char *s,
  * If no such substring exists, return -1.
  */
 static int
-router_get_hash_impl(const char *s, char *digest,
+router_get_hash_impl(const char *s, size_t s_len, char *digest,
                      const char *start_str,
                      const char *end_str, char end_c,
                      digest_algorithm_t alg)
 {
   const char *start=NULL, *end=NULL;
-  if (router_get_hash_impl_helper(s,start_str,end_str,end_c,&start,&end)<0)
+  if (router_get_hash_impl_helper(s,s_len,start_str,end_str,end_c,
+                                  &start,&end)<0)
     return -1;
 
   if (alg == DIGEST_SHA1) {
@@ -3700,12 +4145,13 @@ router_get_hash_impl(const char *s, char *digest,
 
 /** As router_get_hash_impl, but compute all hashes. */
 static int
-router_get_hashes_impl(const char *s, digests_t *digests,
+router_get_hashes_impl(const char *s, size_t s_len, digests_t *digests,
                        const char *start_str,
                        const char *end_str, char end_c)
 {
   const char *start=NULL, *end=NULL;
-  if (router_get_hash_impl_helper(s,start_str,end_str,end_c,&start,&end)<0)
+  if (router_get_hash_impl_helper(s,s_len,start_str,end_str,end_c,
+                                  &start,&end)<0)
     return -1;
 
   if (crypto_digest_all(digests, start, end-start)) {
@@ -4123,7 +4569,7 @@ rend_parse_v2_service_descriptor(rend_service_descriptor_t **parsed_out,
     goto err;
   }
   /* Compute descriptor hash for later validation. */
-  if (router_get_hash_impl(desc, desc_hash,
+  if (router_get_hash_impl(desc, strlen(desc), desc_hash,
                            "rendezvous-service-descriptor ",
                            "\nsignature", '\n', DIGEST_SHA1) < 0) {
     log_warn(LD_REND, "Couldn't compute descriptor hash.");

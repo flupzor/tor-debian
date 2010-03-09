@@ -1,7 +1,7 @@
 /* Copyright (c) 2001 Matej Pfajfar.
  * Copyright (c) 2001-2004, Roger Dingledine.
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2009, The Tor Project, Inc. */
+ * Copyright (c) 2007-2010, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 /**
@@ -1030,7 +1030,6 @@ circuit_build_times_set_timeout(circuit_build_times_t *cbt)
            "Set circuit build timeout to %lds (%lfms, Xm: %d, a: %lf) "
            "based on %d circuit times", tor_lround(cbt->timeout_ms/1000),
            cbt->timeout_ms, cbt->Xm, cbt->alpha, cbt->total_build_times);
-
 }
 
 /** Iterate over values of circ_id, starting from conn-\>next_circ_id,
@@ -1111,11 +1110,11 @@ circuit_list_path_impl(origin_circuit_t *circ, int verbose, int verbose_names)
     const char *id;
     if (!hop)
       break;
-    id = hop->extend_info->identity_digest;
     if (!verbose && hop->state != CPATH_STATE_OPEN)
       break;
     if (!hop->extend_info)
       break;
+    id = hop->extend_info->identity_digest;
     if (verbose_names) {
       elt = tor_malloc(MAX_VERBOSE_NICKNAME_LEN+1);
       if ((ri = router_get_by_digest(id))) {
@@ -2133,6 +2132,8 @@ circuit_all_predicted_ports_handled(time_t now, int *need_uptime,
   smartlist_t *LongLivedServices = get_options()->LongLivedPorts;
   tor_assert(need_uptime);
   tor_assert(need_capacity);
+  // Always predict need_capacity
+  *need_capacity = 1;
   enough = (smartlist_len(sl) == 0);
   for (i = 0; i < smartlist_len(sl); ++i) {
     port = smartlist_get(sl, i);

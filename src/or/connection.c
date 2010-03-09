@@ -1,7 +1,7 @@
 /* Copyright (c) 2001 Matej Pfajfar.
  * Copyright (c) 2001-2004, Roger Dingledine.
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2009, The Tor Project, Inc. */
+ * Copyright (c) 2007-2010, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 /**
@@ -3095,10 +3095,10 @@ alloc_http_authenticator(const char *authenticator)
 static void
 client_check_address_changed(int sock)
 {
-  uint32_t iface_ip, ip_out;
+  uint32_t iface_ip, ip_out; /* host order */
   struct sockaddr_in out_addr;
   socklen_t out_addr_len = (socklen_t) sizeof(out_addr);
-  uint32_t *ip;
+  uint32_t *ip; /* host order */
 
   if (!last_interface_ip)
     get_interface_address(LOG_INFO, &last_interface_ip);

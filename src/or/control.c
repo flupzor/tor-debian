@@ -1,5 +1,5 @@
 /* Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2009, The Tor Project, Inc. */
+ * Copyright (c) 2007-2010, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 /**
@@ -2121,6 +2121,8 @@ handle_control_extendcircuit(control_connection_t *conn, uint32_t len,
   if (!zero_circ && !(circ = get_circ(smartlist_get(args,0)))) {
     connection_printf_to_buf(conn, "552 Unknown circuit \"%s\"\r\n",
                              (char*)smartlist_get(args, 0));
+    SMARTLIST_FOREACH(args, char *, cp, tor_free(cp));
+    smartlist_free(args);
     goto done;
   }
 

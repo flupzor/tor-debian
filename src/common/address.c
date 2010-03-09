@@ -1,6 +1,6 @@
 /* Copyright (c) 2003-2004, Roger Dingledine
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2009, The Tor Project, Inc. */
+ * Copyright (c) 2007-2010, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 /**
@@ -726,7 +726,7 @@ tor_addr_is_loopback(const tor_addr_t *addr)
 }
 
 /** Set <b>dest</b> to equal the IPv4 address in <b>v4addr</b> (given in
- * network order. */
+ * network order). */
 void
 tor_addr_from_ipv4n(tor_addr_t *dest, uint32_t v4addr)
 {

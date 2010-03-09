@@ -1,6 +1,6 @@
 /* Copyright (c) 2003-2004, Roger Dingledine
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2009, The Tor Project, Inc. */
+ * Copyright (c) 2007-2010, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 /**
@@ -1789,7 +1789,6 @@ spawn_exit(void)
    * call _exit, not exit, from child processes. */
   _exit(0);
 #endif
-
 }
 
 /** Set *timeval to the current time of day.  On error, log and terminate.

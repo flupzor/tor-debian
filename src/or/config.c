@@ -1,7 +1,7 @@
 /* Copyright (c) 2001 Matej Pfajfar.
  * Copyright (c) 2001-2004, Roger Dingledine.
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2009, The Tor Project, Inc. */
+ * Copyright (c) 2007-2010, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 /**
@@ -2155,7 +2155,7 @@ print_usage(void)
   printf(
 "Copyright (c) 2001-2004, Roger Dingledine\n"
 "Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson\n"
-"Copyright (c) 2007-2009, The Tor Project, Inc.\n\n"
+"Copyright (c) 2007-2010, The Tor Project, Inc.\n\n"
 "tor -f <torrc> [args]\n"
 "See man page for options, or https://www.torproject.org/ for "
 "documentation.\n");
@@ -2191,7 +2191,7 @@ resolve_my_address(int warn_severity, or_options_t *options,
                    uint32_t *addr_out, char **hostname_out)
 {
   struct in_addr in;
-  uint32_t addr;
+  uint32_t addr; /* host order */
   char hostname[256];
   int explicit_ip=1;
   int explicit_hostname=1;
@@ -2221,8 +2221,8 @@ resolve_my_address(int warn_severity, or_options_t *options,
   if (tor_inet_aton(hostname, &in) == 0) {
     /* then we have to resolve it */
     explicit_ip = 0;
-    if (!tor_lookup_hostname(hostname, &addr)) {
-      uint32_t interface_ip;
+    if (tor_lookup_hostname(hostname, &addr)) { /* failed to resolve */
+      uint32_t interface_ip; /* host order */
 
       if (explicit_hostname) {
         log_fn(warn_severity, LD_CONFIG,
@@ -2243,7 +2243,7 @@ resolve_my_address(int warn_severity, or_options_t *options,
       log_fn(notice_severity, LD_CONFIG, "Learned IP address '%s' for "
              "local interface. Using that.", tmpbuf);
       strlcpy(hostname, "<guessed from interfaces>", sizeof(hostname));
-    } else {
+    } else { /* resolved hostname into addr */
       in.s_addr = htonl(addr);
 
       if (!explicit_hostname &&
@@ -3227,6 +3227,12 @@ options_validate(or_options_t *old_options, or_options_t *options,
     return -1;
   if (ensure_bandwidth_cap(&options->RelayBandwidthBurst,
                            "RelayBandwidthBurst", msg) < 0)
+    return -1;
+  if (ensure_bandwidth_cap(&options->PerConnBWRate,
+                           "PerConnBWRate", msg) < 0)
+    return -1;
+  if (ensure_bandwidth_cap(&options->PerConnBWBurst,
+                           "PerConnBWBurst", msg) < 0)
     return -1;
 
   if (server_mode(options)) {

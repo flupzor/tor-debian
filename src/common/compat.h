@@ -1,6 +1,6 @@
 /* Copyright (c) 2003-2004, Roger Dingledine
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2009, The Tor Project, Inc. */
+ * Copyright (c) 2007-2010, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 #ifndef _TOR_COMPAT_H
@@ -196,18 +196,26 @@ size_t strlcpy(char *dst, const char *src, size_t siz) ATTR_NONNULL((1,2));
 #define U64_SCANF_ARG(a) (a)
 /** Expands to a literal uint64_t-typed constant for the value <b>n</b>. */
 #define U64_LITERAL(n) (n ## ui64)
+#define I64_PRINTF_ARG(a) (a)
+#define I64_SCANF_ARG(a) (a)
+#define I64_LITERAL(n) (n ## i64)
 #else
 #define U64_PRINTF_ARG(a) ((long long unsigned int)(a))
 #define U64_SCANF_ARG(a) ((long long unsigned int*)(a))
 #define U64_LITERAL(n) (n ## llu)
+#define I64_PRINTF_ARG(a) ((long long signed int)(a))
+#define I64_SCANF_ARG(a) ((long long signed int*)(a))
+#define I64_LITERAL(n) (n ## ll)
 #endif
 
 #if defined(_MSC_VER) || defined(__MINGW32__) || defined(__MINGW64__)
 /** The formatting string used to put a uint64_t value in a printf() or
  * scanf() function.  See also U64_PRINTF_ARG and U64_SCANF_ARG. */
 #define U64_FORMAT "%I64u"
+#define I64_FORMAT "%I64d"
 #else
 #define U64_FORMAT "%llu"
+#define I64_FORMAT "%lld"
 #endif
 
 /** Represents an mmaped file. Allocated via tor_mmap_file; freed with
@@ -543,6 +551,19 @@ int tor_cond_wait(tor_cond_t *cond, tor_mutex_t *mutex);
 void tor_cond_signal_one(tor_cond_t *cond);
 void tor_cond_signal_all(tor_cond_t *cond);
 #endif
+#endif
+
+/** Macros for MIN/MAX.  Never use these when the arguments could have
+ * side-effects.
+ * {With GCC extensions we could probably define a safer MIN/MAX.  But
+ * depending on that safety would be dangerous, since not every platform
+ * has it.}
+ **/
+#ifndef MAX
+#define MAX(a,b) ( ((a)<(b)) ? (b) : (a) )
+#endif
+#ifndef MIN
+#define MIN(a,b) ( ((a)>(b)) ? (b) : (a) )
 #endif
 
 /* Platform-specific helpers. */
