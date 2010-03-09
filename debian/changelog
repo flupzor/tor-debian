@@ -1,10 +1,11 @@
-tor (0.2.2.9-alphXXXXXXX) XXXerimental; urgency=low
+tor (0.2.2.10-alpha-1) experimental; urgency=low
 
+  * New upstream version.
   * debian/rules:
     - make manpage building properly depend on patch-stamp,
     - Fix building in the absence of a debian/micro-revision.i file.
 
- -- Peter Palfrader <weasel@debian.org>  Wed, 03 Mar 2010 23:51:35 +0100
+ -- Peter Palfrader <weasel@debian.org>  Tue, 09 Mar 2010 14:06:48 +0100
 
 tor (0.2.2.9-alpha-1) experimental; urgency=low
 
