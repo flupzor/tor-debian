@@ -1,3 +1,13 @@
+tor (0.2.2.10-alpha-2) experimental; urgency=low
+
+  * In /etc/default/tor also source /etc/default/tor.vidalia if it exists
+    and if vidalia is installed.  We do this so that the vidalia package
+    can override some of our settings: People who have vidalia installed might
+    not want to run Tor as a system service. The vidalia .deb can ask them
+    that and then set run-daemon to no.
+
+ -- Peter Palfrader <weasel@debian.org>  Sat, 03 Apr 2010 15:24:11 +0200
+
 tor (0.2.2.10-alpha-1) experimental; urgency=low
 
   * New upstream version.
