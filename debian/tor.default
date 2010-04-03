@@ -37,3 +37,10 @@ RUN_DAEMON="yes"
 # Comment this out if you do not want to get coredumps
 #
 ulimit -c unlimited
+
+# Let the vidalia package override some of our settings.
+# People who have vidalia installed might not want to run Tor as a system
+# service. The vidalia .deb can ask them that and then set run-daemon to no.
+if [ -e /etc/default/tor.vidalia ] && [ -x /usr/bin/vidalia ]; then
+	. /etc/default/tor.vidalia
+fi
