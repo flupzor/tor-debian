@@ -34,6 +34,6 @@ RUN_DAEMON="yes"
 # ARGS=""
 
 #
-# Uncomment this if you want to get coredumps
+# Comment this out if you do not want to get coredumps
 #
 ulimit -c unlimited
