@@ -448,6 +448,11 @@ test_util_threads(void)
   char *s1 = NULL, *s2 = NULL;
   int done = 0, timedout = 0;
   time_t started;
+#ifndef MS_WINDOWS
+  struct timeval tv;
+  tv.tv_sec=0;
+  tv.tv_usec=10;
+#endif
 #ifndef TOR_IS_MULTITHREADED
   /* Skip this test if we aren't threading. We should be threading most
    * everywhere by now. */
@@ -477,13 +482,17 @@ test_util_threads(void)
       timedout = done = 1;
     }
     tor_mutex_release(_thread_test_mutex);
+#ifndef MS_WINDOWS
+    /* Prevent the main thread from starving the worker threads. */
+    select(0, NULL, NULL, NULL, &tv);
+#endif
   }
-  tor_mutex_free(_thread_test_mutex);
-
   tor_mutex_acquire(_thread_test_start1);
   tor_mutex_release(_thread_test_start1);
   tor_mutex_acquire(_thread_test_start2);
   tor_mutex_release(_thread_test_start2);
+
+  tor_mutex_free(_thread_test_mutex);
 
   if (timedout) {
     printf("\nTimed out: %d %d", t1_count, t2_count);
@@ -1050,6 +1059,51 @@ test_util_find_str_at_start_of_line(void *ptr)
   ;
 }
 
+static void
+test_util_asprintf(void *ptr)
+{
+#define LOREMIPSUM                                              \
+  "Lorem ipsum dolor sit amet, consectetur adipisicing elit"
+  char *cp=NULL, *cp2=NULL;
+  int r;
+  (void)ptr;
+
+  /* empty string. */
+  r = tor_asprintf(&cp, "%s", "");
+  tt_assert(cp);
+  tt_int_op(r, ==, strlen(cp));
+  tt_str_op(cp, ==, "");
+
+  /* Short string with some printing in it. */
+  r = tor_asprintf(&cp2, "First=%d, Second=%d", 101, 202);
+  tt_assert(cp2);
+  tt_int_op(r, ==, strlen(cp2));
+  tt_str_op(cp2, ==, "First=101, Second=202");
+  tt_assert(cp != cp2);
+  tor_free(cp);
+  tor_free(cp2);
+
+  /* Glass-box test: a string exactly 128 characters long. */
+  r = tor_asprintf(&cp, "Lorem1: %sLorem2: %s", LOREMIPSUM, LOREMIPSUM);
+  tt_assert(cp);
+  tt_int_op(r, ==, 128);
+  tt_assert(cp[128] == '\0');
+  tt_str_op(cp, ==,
+            "Lorem1: "LOREMIPSUM"Lorem2: "LOREMIPSUM);
+  tor_free(cp);
+
+  /* String longer than 128 characters */
+  r = tor_asprintf(&cp, "1: %s 2: %s 3: %s",
+                   LOREMIPSUM, LOREMIPSUM, LOREMIPSUM);
+  tt_assert(cp);
+  tt_int_op(r, ==, strlen(cp));
+  tt_str_op(cp, ==, "1: "LOREMIPSUM" 2: "LOREMIPSUM" 3: "LOREMIPSUM);
+
+ done:
+  tor_free(cp);
+  tor_free(cp2);
+}
+
 #define UTIL_LEGACY(name)                                               \
   { #name, legacy_test_helper, 0, &legacy_setup, test_util_ ## name }
 
@@ -1071,6 +1125,7 @@ struct testcase_t util_tests[] = {
   UTIL_LEGACY(sscanf),
   UTIL_LEGACY(strtok),
   UTIL_TEST(find_str_at_start_of_line, 0),
+  UTIL_TEST(asprintf, 0),
   END_OF_TESTCASES
 };
 

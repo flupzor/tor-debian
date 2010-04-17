@@ -1,3 +1,9 @@
+tor (0.2.2.11-alpha-1) experimental; urgency=low
+
+  * New upstream version.
+
+ -- Peter Palfrader <weasel@debian.org>  Sat, 17 Apr 2010 21:49:19 +0200
+
 tor (0.2.2.10-alpha-2) experimental; urgency=low
 
   * In /etc/default/tor also source /etc/default/tor.vidalia if it exists
