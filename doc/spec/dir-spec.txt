@@ -10,7 +10,7 @@
 
    Caches and authorities must still support older versions of the
    directory protocols, until the versions of Tor that require them are
-   finally out of commission.  See Section XXXX on backward compatibility.
+   finally out of commission.
 
    This document merges and supersedes the following proposals:
 
@@ -182,7 +182,8 @@
    All directory information is uploaded and downloaded with HTTP.
 
    [Authorities also generate and caches also cache documents produced and
-   used by earlier versions of this protocol; see section XXX for notes.]
+   used by earlier versions of this protocol; see dir-spec-v1.txt and
+   dir-spec-v2.txt for notes on those versions.]
 
 1.1. What's different from version 2?
 
@@ -591,7 +592,7 @@
         with unrecognized items; the protocols line should be preceded with
         an "opt" until these Tors are obsolete.]
 
-   "allow-single-hop-exits"
+   "allow-single-hop-exits" NL
 
        [At most once.]
 
@@ -612,7 +613,7 @@
         Fingerprint is encoded in hex (using upper-case letters), with
         no spaces.
 
-    "published"
+    "published" YYYY-MM-DD HH:MM:SS NL
 
        [Exactly once.]
 
@@ -1015,7 +1016,7 @@
    generate exactly the same consensus given the same set of votes.
 
    The procedure for deciding when to generate vote and consensus status
-   documents are described in section XXX below.
+   documents are described in section 1.4 on the voting timeline.
 
    Status documents contain a preamble, an authority section, a list of
    router status entries, and one or more footer signature, in that order.
@@ -1148,9 +1149,11 @@
         transit in the network at any given time. Obeyed by Tor 0.2.1.20
         and later.
 
-        "CircPriorityHalflifeMsec" -- the halflife parameter used when
+        "CircuitPriorityHalflifeMsec" -- the halflife parameter used when
         weighting which circuit will send the next cell. Obeyed by Tor
-        0.2.2.7-alpha and later.
+        0.2.2.10-alpha and later.  (Versions of Tor between 0.2.2.7-alpha
+        and 0.2.2.10-alpha recognized a "CircPriorityHalflifeMsec" parameter,
+        but mishandled it badly.)
 
    The authority section of a vote contains the following items, followed
    in turn by the authority's current key certificate:
@@ -1367,7 +1370,7 @@
         the signing authority, and "signing-key-digest" is the hex-encoded
         digest of the current authority signing key of the signing authority.
 
-3.3. Deciding how to vote.
+3.3. Assigning flags in a vote
 
    (This section describes how directory authorities choose which status
    flags to apply to routers, as of Tor 0.2.0.0-alpha-dev. Later directory
