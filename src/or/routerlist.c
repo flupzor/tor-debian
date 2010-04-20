@@ -26,8 +26,8 @@ static void mark_all_trusteddirservers_up(void);
 static int router_nickname_matches(routerinfo_t *router, const char *nickname);
 static void trusted_dir_server_free(trusted_dir_server_t *ds);
 static void launch_router_descriptor_downloads(smartlist_t *downloadable,
+                                               routerstatus_t *source,
                                                time_t now);
-static void update_consensus_router_descriptor_downloads(time_t now);
 static int signed_desc_digest_is_recognized(signed_descriptor_t *desc);
 static void update_router_have_minimum_dir_info(void);
 static const char *signed_descriptor_get_body_impl(signed_descriptor_t *desc,
@@ -184,15 +184,15 @@ trusted_dirs_load_certs_from_string(const char *contents, int from_store,
       log_info(LD_DIR, "Skipping %s certificate for %s that we "
                "already have.",
                from_store ? "cached" : "downloaded",
-               ds ? ds->nickname : "??");
+               ds ? ds->nickname : "an old or new authority");
 
       /* a duplicate on a download should be treated as a failure, since it
        * probably means we wanted a different secret key or we are trying to
        * replace an expired cert that has not in fact been updated. */
       if (!from_store) {
-        log_warn(LD_DIR, "Got a certificate for %s that we already have. "
-                 "Maybe they haven't updated it.  Waiting for a while.",
-                 ds ? ds->nickname : "??");
+        log_warn(LD_DIR, "Got a certificate for %s, but we already have it. "
+                 "Maybe they haven't updated it. Waiting for a while.",
+                 ds ? ds->nickname : "an old or new authority");
         authority_cert_dl_failed(cert->cache_info.identity_digest, 404);
       }
 
@@ -973,8 +973,9 @@ router_get_trusteddirserver_by_digest(const char *digest)
   return NULL;
 }
 
-/** Return the trusted_dir_server_t for the directory authority whose identity
- * key hashes to <b>digest</b>, or NULL if no such authority is known.
+/** Return the trusted_dir_server_t for the directory authority whose
+ * v3 identity key hashes to <b>digest</b>, or NULL if no such authority
+ * is known.
  */
 trusted_dir_server_t *
 trusteddirserver_get_by_v3_auth_digest(const char *digest)
@@ -4102,7 +4103,8 @@ client_would_use_router(routerstatus_t *rs, time_t now, or_options_t *options)
  * whether to delay fetching until we have more.  If we don't want to delay,
  * launch one or more requests to the appropriate directory authorities. */
 static void
-launch_router_descriptor_downloads(smartlist_t *downloadable, time_t now)
+launch_router_descriptor_downloads(smartlist_t *downloadable,
+                                   routerstatus_t *source, time_t now)
 {
   int should_delay = 0, n_downloadable;
   or_options_t *options = get_options();
@@ -4172,7 +4174,7 @@ launch_router_descriptor_downloads(smartlist_t *downloadable, time_t now)
              req_plural, n_downloadable, rtr_plural, n_per_request);
     smartlist_sort_digests(downloadable);
     for (i=0; i < n_downloadable; i += n_per_request) {
-      initiate_descriptor_downloads(NULL, DIR_PURPOSE_FETCH_SERVERDESC,
+      initiate_descriptor_downloads(source, DIR_PURPOSE_FETCH_SERVERDESC,
                                     downloadable, i, i+n_per_request,
                                     pds_flags);
     }
@@ -4328,18 +4330,18 @@ update_router_descriptor_cache_downloads_v2(time_t now)
   digestmap_free(map,NULL);
 }
 
-/** For any descriptor that we want that's currently listed in the live
- * consensus, download it as appropriate. */
-static void
-update_consensus_router_descriptor_downloads(time_t now)
+/** For any descriptor that we want that's currently listed in
+ * <b>consensus</b>, download it as appropriate. */
+void
+update_consensus_router_descriptor_downloads(time_t now, int is_vote,
+                                             networkstatus_t *consensus)
 {
   or_options_t *options = get_options();
   digestmap_t *map = NULL;
   smartlist_t *no_longer_old = smartlist_create();
   smartlist_t *downloadable = smartlist_create();
+  routerstatus_t *source = NULL;
   int authdir = authdir_mode(options);
-  networkstatus_t *consensus =
-    networkstatus_get_reasonably_live_consensus(now);
   int n_delayed=0, n_have=0, n_would_reject=0, n_wouldnt_use=0,
     n_inprogress=0, n_in_oldrouters=0;
 
@@ -4348,10 +4350,24 @@ update_consensus_router_descriptor_downloads(time_t now)
   if (!consensus)
     goto done;
 
+  if (is_vote) {
+    /* where's it from, so we know whom to ask for descriptors */
+    trusted_dir_server_t *ds;
+    networkstatus_voter_info_t *voter = smartlist_get(consensus->voters, 0);
+    tor_assert(voter);
+    ds = trusteddirserver_get_by_v3_auth_digest(voter->identity_digest);
+    if (ds)
+      source = &(ds->fake_status);
+    else
+      log_warn(LD_DIR, "couldn't lookup source from vote?");
+  }
+
   map = digestmap_new();
   list_pending_descriptor_downloads(map, 0);
-  SMARTLIST_FOREACH(consensus->routerstatus_list, routerstatus_t *, rs,
+  SMARTLIST_FOREACH(consensus->routerstatus_list, void *, rsp,
     {
+      routerstatus_t *rs =
+        is_vote ? &(((vote_routerstatus_t *)rsp)->status) : rsp;
       signed_descriptor_t *sd;
       if ((sd = router_get_by_descriptor_digest(rs->descriptor_digest))) {
         routerinfo_t *ri;
@@ -4386,6 +4402,14 @@ update_consensus_router_descriptor_downloads(time_t now)
         ++n_wouldnt_use;
         continue; /* We would never use it ourself. */
       }
+      if (is_vote && source) {
+        char time_buf[ISO_TIME_LEN+1];
+        format_iso_time(time_buf, rs->published_on);
+        log_info(LD_DIR, "Learned about %s (%s) from %s's vote (%s)",
+                 rs->nickname, time_buf, source->nickname,
+                 router_get_by_digest(rs->identity_digest) ? "known" :
+                                                             "unknown");
+      }
       smartlist_add(downloadable, rs->descriptor_digest);
     });
 
@@ -4419,7 +4443,7 @@ update_consensus_router_descriptor_downloads(time_t now)
            smartlist_len(downloadable), n_delayed, n_have, n_in_oldrouters,
            n_would_reject, n_wouldnt_use, n_inprogress);
 
-  launch_router_descriptor_downloads(downloadable, now);
+  launch_router_descriptor_downloads(downloadable, source, now);
 
   digestmap_free(map, NULL);
  done:
@@ -4444,7 +4468,8 @@ update_router_descriptor_downloads(time_t now)
   if (directory_fetches_dir_info_early(options)) {
     update_router_descriptor_cache_downloads_v2(now);
   }
-  update_consensus_router_descriptor_downloads(now);
+  update_consensus_router_descriptor_downloads(now, 0,
+    networkstatus_get_reasonably_live_consensus(now));
 
   /* XXXX021 we could be smarter here; see notes on bug 652. */
   /* If we're a server that doesn't have a configured address, we rely on

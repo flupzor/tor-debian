@@ -2685,6 +2685,9 @@ dirvote_add_vote(const char *vote_body, const char **msg_out, int *status_out)
     goto err;
   }
 
+  /* Fetch any new router descriptors we just learned about */
+  update_consensus_router_descriptor_downloads(time(NULL), 1, vote);
+
   /* Now see whether we already have a vote from this authority. */
   SMARTLIST_FOREACH(pending_vote_list, pending_vote_t *, v, {
       if (! memcmp(v->vote->cert->cache_info.identity_digest,
@@ -2720,7 +2723,7 @@ dirvote_add_vote(const char *vote_body, const char **msg_out, int *status_out)
           goto err;
         }
       }
-    });
+  });
 
   pending_vote = tor_malloc_zero(sizeof(pending_vote_t));
   pending_vote->vote_body = new_cached_dir(tor_strndup(vote_body,
