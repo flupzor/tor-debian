@@ -4493,9 +4493,6 @@ const char *circuit_end_reason_to_control_string(int reason);
 const char *socks4_response_code_to_string(uint8_t code);
 const char *socks5_response_code_to_string(uint8_t code);
 
-enum bandwidth_weight_rule_t;
-const char *bandwidth_weight_rule_to_string(enum bandwidth_weight_rule_t rule);
-
 /********************************* relay.c ***************************/
 
 extern uint64_t stats_n_relay_cells_relayed;
@@ -4975,6 +4972,9 @@ routerinfo_t *routerlist_sl_choose_by_bandwidth(smartlist_t *sl,
 routerstatus_t *routerstatus_sl_choose_by_bandwidth(smartlist_t *sl,
                                                 bandwidth_weight_rule_t rule);
 
+/* XXXX actually declared in reasons.c */
+const char *bandwidth_weight_rule_to_string(enum bandwidth_weight_rule_t rule);
+
 /** Flags to be passed to control router_choose_random_node() to indicate what
  * kind of nodes to pick according to what algorithm. */
 typedef enum {
@@ -5086,6 +5086,8 @@ trusted_dir_server_t *add_trusted_dir_server(const char *nickname,
 void authority_cert_free(authority_cert_t *cert);
 void clear_trusted_dir_servers(void);
 int any_trusted_dir_is_v1_authority(void);
+void update_consensus_router_descriptor_downloads(time_t now, int is_vote,
+                                                  networkstatus_t *consensus);
 void update_router_descriptor_downloads(time_t now);
 void update_extrainfo_downloads(time_t now);
 int router_have_minimum_dir_info(void);
