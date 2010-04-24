@@ -3204,7 +3204,7 @@ router_add_to_routerlist(routerinfo_t *router, const char **msg,
     if (!in_consensus && (router->cache_info.published_on <=
                           old_router->cache_info.published_on)) {
       /* Same key, but old.  This one is not listed in the consensus. */
-      log_debug(LD_DIR, "Skipping not-new descriptor for router '%s'",
+      log_debug(LD_DIR, "Not-new descriptor for router '%s'",
                 router->nickname);
       /* Only journal this desc if we'll be serving it. */
       if (!from_cache && should_cache_old_descriptors())
@@ -3247,9 +3247,15 @@ router_add_to_routerlist(routerinfo_t *router, const char **msg,
   /* We haven't seen a router with this identity before. Add it to the end of
    * the list. */
   routerlist_insert(routerlist, router);
-  if (!from_cache)
+  if (!from_cache) {
+    if (authdir) {
+      /* launch an immediate reachability test, so we will have an opinion
+       * soon in case we're generating a consensus soon */
+      dirserv_single_reachability_test(time(NULL), router);
+    }
     signed_desc_append_to_journal(&router->cache_info,
                                   &routerlist->desc_store);
+  }
   directory_set_dirty();
   return ROUTER_ADDED_SUCCESSFULLY;
 }
@@ -4403,12 +4409,16 @@ update_consensus_router_descriptor_downloads(time_t now, int is_vote,
         continue; /* We would never use it ourself. */
       }
       if (is_vote && source) {
-        char time_buf[ISO_TIME_LEN+1];
-        format_iso_time(time_buf, rs->published_on);
-        log_info(LD_DIR, "Learned about %s (%s) from %s's vote (%s)",
-                 rs->nickname, time_buf, source->nickname,
-                 router_get_by_digest(rs->identity_digest) ? "known" :
-                                                             "unknown");
+        char time_bufnew[ISO_TIME_LEN+1];
+        char time_bufold[ISO_TIME_LEN+1];
+        routerinfo_t *oldrouter = router_get_by_digest(rs->identity_digest);
+        format_iso_time(time_bufnew, rs->published_on);
+        if (oldrouter)
+          format_iso_time(time_bufold, oldrouter->cache_info.published_on);
+        log_info(LD_DIR, "Learned about %s (%s vs %s) from %s's vote (%s)",
+                 rs->nickname, time_bufnew,
+                 oldrouter ? time_bufold : "none",
+                 source->nickname, oldrouter ? "known" : "unknown");
       }
       smartlist_add(downloadable, rs->descriptor_digest);
     });
