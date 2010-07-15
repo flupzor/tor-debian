@@ -79,7 +79,7 @@ SocksListenAddress 127.0.0.1 # accept connections only from localhost
 ## See https://www.torproject.org/docs/tor-doc-relay for details.
 
 ## Required: what port to advertise for incoming Tor connections.
-#ORPort 9001
+ORPort 9001
 ## If you want to listen on a port other than the one advertised
 ## in ORPort (e.g. to advertise 443 but bind to 9090), uncomment the
 ## line below too. You'll need to do ipchains or other port forwarding
@@ -87,7 +87,7 @@ SocksListenAddress 127.0.0.1 # accept connections only from localhost
 #ORListenAddress 0.0.0.0:9090
 
 ## A handle for your relay, so people don't have to refer to it by key.
-#Nickname ididnteditheconfig
+Nickname Unnamed
 
 ## The IP address or full DNS name for your relay. Leave commented out
 ## and Tor will guess.
@@ -98,6 +98,8 @@ SocksListenAddress 127.0.0.1 # accept connections only from localhost
 ## be at least 20 KB.
 #RelayBandwidthRate 100 KB  # Throttle traffic to 100KB/s (800Kbps)
 #RelayBandwidthBurst 200 KB # But allow bursts up to 200KB/s (1600Kbps)
+RelayBandwidthBurst 10485760
+RelayBandwidthRate 5242880
 
 ## Use these to restrict the maximum traffic per day, week, or month.
 ## Note that this threshold applies to sent _and_ to received bytes,
@@ -121,7 +123,7 @@ SocksListenAddress 127.0.0.1 # accept connections only from localhost
 
 ## Uncomment this to mirror directory information for others. Please do
 ## if you have enough bandwidth.
-#DirPort 9030 # what port to advertise for directory connections
+DirPort 9030 # what port to advertise for directory connections
 ## If you want to listen on a port other than the one advertised
 ## in DirPort (e.g. to advertise 80 but bind to 9091), uncomment the line
 ## below too. You'll need to do ipchains or other port forwarding yourself
@@ -165,6 +167,5 @@ SocksListenAddress 127.0.0.1 # accept connections only from localhost
 ## won't be able to block all the bridges. Also, websites won't treat you
 ## differently because they won't know you're running Tor. If you can
 ## be a real relay, please do; but if not, be a bridge!
-#BridgeRelay 1
-#ExitPolicy reject *:*
-
+BridgeRelay 1
+ExitPolicy reject *:*

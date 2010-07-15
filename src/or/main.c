@@ -33,7 +33,7 @@ static void dumpstats(int severity); /* log stats */
 static void conn_read_callback(int fd, short event, void *_conn);
 static void conn_write_callback(int fd, short event, void *_conn);
 static void signal_callback(int fd, short events, void *arg);
-static void second_elapsed_callback(int fd, short event, void *args);
+static void second_elapsed_callback(periodic_timer_t *timer, void *args);
 static int conn_close_if_marked(int i);
 static void connection_start_reading_from_linked_conn(connection_t *conn);
 static int connection_should_read_from_linked_conn(connection_t *conn);
@@ -1205,39 +1205,30 @@ run_scheduled_events(time_t now)
   }
 }
 
-/** Libevent timer: used to invoke second_elapsed_callback() once per
- * second. */
-static struct event *timeout_event = NULL;
+/** Timer: used to invoke second_elapsed_callback() once per second. */
+static periodic_timer_t *second_timer = NULL;
 /** Number of libevent errors in the last second: we die if we get too many. */
 static int n_libevent_errors = 0;
 
 /** Libevent callback: invoked once every second. */
 static void
-second_elapsed_callback(int fd, short event, void *args)
+second_elapsed_callback(periodic_timer_t *timer, void *arg)
 {
   /* XXXX This could be sensibly refactored into multiple callbacks, and we
    * could use Libevent's timers for this rather than checking the current
    * time against a bunch of timeouts every second. */
-  static struct timeval one_second;
   static time_t current_second = 0;
   time_t now;
   size_t bytes_written;
   size_t bytes_read;
   int seconds_elapsed;
   or_options_t *options = get_options();
-  (void)fd;
-  (void)event;
-  (void)args;
-  if (!timeout_event) {
-    timeout_event = tor_evtimer_new(tor_libevent_get_base(),
-                                    second_elapsed_callback, NULL);
-    one_second.tv_sec = 1;
-    one_second.tv_usec = 0;
-  }
+  (void)timer;
+  (void)arg;
 
   n_libevent_errors = 0;
 
-  /* log_fn(LOG_NOTICE, "Tick."); */
+  /* log_notice(LD_GENERAL, "Tick."); */
   now = time(NULL);
   update_approx_time(now);
 
@@ -1302,10 +1293,6 @@ second_elapsed_callback(int fd, short event, void *args)
   run_scheduled_events(now);
 
   current_second = now; /* remember which second it is, for next time */
-
-  if (event_add(timeout_event, &one_second))
-    log_err(LD_NET,
-            "Error from libevent when setting one-second timeout event");
 }
 
 #ifndef MS_WINDOWS
@@ -1492,7 +1479,17 @@ do_main_loop(void)
   }
 
   /* set up once-a-second callback. */
-  second_elapsed_callback(0,0,NULL);
+  if (! second_timer) {
+    struct timeval one_second;
+    one_second.tv_sec = 1;
+    one_second.tv_usec = 0;
+
+    second_timer = periodic_timer_new(tor_libevent_get_base(),
+                                      &one_second,
+                                      second_elapsed_callback,
+                                      NULL);
+    tor_assert(second_timer);
+  }
 
   for (;;) {
     if (nt_service_is_stopping())
@@ -2013,7 +2010,7 @@ tor_free_all(int postfork)
   smartlist_free(connection_array);
   smartlist_free(closeable_connection_lst);
   smartlist_free(active_linked_connection_lst);
-  tor_free(timeout_event);
+  periodic_timer_free(second_timer);
   if (!postfork) {
     release_lockfile();
   }
@@ -2104,6 +2101,31 @@ do_hash_password(void)
   printf("16:%s\n",output);
 }
 
+#if defined (WINCE)
+int
+find_flashcard_path(PWCHAR path, size_t size)
+{
+  WIN32_FIND_DATA d = {0};
+  HANDLE h = NULL;
+
+  if (!path)
+    return -1;
+
+  h = FindFirstFlashCard(&d);
+  if (h == INVALID_HANDLE_VALUE)
+    return -1;
+
+  if (wcslen(d.cFileName) == 0) {
+    FindClose(h);
+    return -1;
+  }
+
+  wcsncpy(path,d.cFileName,size);
+  FindClose(h);
+  return 0;
+}
+#endif
+
 /** Main entry point for the Tor process.  Called from main(). */
 /* This function is distinct from main() only so we can link main.c into
  * the unittest binary without conflicting with the unittests' main. */
@@ -2111,6 +2133,33 @@ int
 tor_main(int argc, char *argv[])
 {
   int result = 0;
+#if defined (WINCE)
+  WCHAR path [MAX_PATH] = {0};
+  WCHAR fullpath [MAX_PATH] = {0};
+  PWCHAR p = NULL;
+  FILE* redir = NULL;
+  FILE* redirdbg = NULL;
+
+  // this is to facilitate debugging by opening
+  // a file on a folder shared by the wm emulator.
+  // if no flashcard (real or emulated) is present,
+  // log files will be written in the root folder
+  if (find_flashcard_path(path,MAX_PATH) == -1)
+  {
+    redir = _wfreopen( L"\\stdout.log", L"w", stdout );
+    redirdbg = _wfreopen( L"\\stderr.log", L"w", stderr );
+  } else {
+    swprintf(fullpath,L"\\%s\\tor",path);
+    CreateDirectory(fullpath,NULL);
+
+    swprintf(fullpath,L"\\%s\\tor\\stdout.log",path);
+    redir = _wfreopen( fullpath, L"w", stdout );
+
+    swprintf(fullpath,L"\\%s\\tor\\stderr.log",path);
+    redirdbg = _wfreopen( fullpath, L"w", stderr );
+  }
+#endif
+
   update_approx_time(time(NULL));
   tor_threads_init();
   init_logging();

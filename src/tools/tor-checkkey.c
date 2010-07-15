@@ -6,13 +6,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "crypto.h"
-#include "log.h"
+#include "torlog.h"
 #include "../common/util.h"
 #include "compat.h"
 #include <openssl/bn.h>
 #include <openssl/rsa.h>
 
-int main(int c, char **v)
+int
+main(int c, char **v)
 {
   crypto_pk_env_t *env;
   char *str;

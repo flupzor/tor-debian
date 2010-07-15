@@ -15,7 +15,7 @@
 
 #include "orconfig.h"
 #include "util.h"
-#include "log.h"
+#include "torlog.h"
 #undef log
 #include "crypto.h"
 #include "torint.h"
@@ -940,6 +940,9 @@ esc_for_log(const char *s)
       case '\\':
       case '\"':
       case '\'':
+      case '\r':
+      case '\n':
+      case '\t':
         len += 2;
         break;
       default:
@@ -1707,7 +1710,7 @@ check_private_dir(const char *dirname, cpd_check_t check)
       return -1;
     } else if (check == CPD_CREATE) {
       log_info(LD_GENERAL, "Creating directory %s", dirname);
-#ifdef MS_WINDOWS
+#if defined (MS_WINDOWS) && !defined (WINCE)
       r = mkdir(dirname);
 #else
       r = mkdir(dirname, 0700);
@@ -1843,7 +1846,8 @@ start_writing_to_file(const char *fname, int open_flags, int mode,
   if (open_flags & O_BINARY)
     new_file->binary = 1;
 
-  if ((new_file->fd = open(open_name, open_flags, mode)) < 0) {
+  new_file->fd = open(open_name, open_flags, mode);
+  if (new_file->fd < 0) {
     log_warn(LD_FS, "Couldn't open \"%s\" (%s) for writing: %s",
         open_name, fname, strerror(errno));
     goto err;
@@ -2316,18 +2320,18 @@ expand_filename(const char *filename)
   return tor_strdup(filename);
 #else
   if (*filename == '~') {
-    size_t len;
-    char *home, *result;
+    char *home, *result=NULL;
     const char *rest;
 
     if (filename[1] == '/' || filename[1] == '\0') {
       home = getenv("HOME");
       if (!home) {
         log_warn(LD_CONFIG, "Couldn't find $HOME environment variable while "
-                 "expanding \"%s\"", filename);
-        return NULL;
+                 "expanding \"%s\"; defaulting to \"\".", filename);
+        home = tor_strdup("");
+      } else {
+        home = tor_strdup(home);
       }
-      home = tor_strdup(home);
       rest = strlen(filename)>=2?(filename+2):"";
     } else {
 #ifdef HAVE_PWD_H
@@ -2354,11 +2358,7 @@ expand_filename(const char *filename)
     if (strlen(home)>1 && !strcmpend(home,PATH_SEPARATOR)) {
       home[strlen(home)-1] = '\0';
     }
-    /* Plus one for /, plus one for NUL.
-     * Round up to 16 in case we can't do math. */
-    len = strlen(home)+strlen(rest)+16;
-    result = tor_malloc(len);
-    tor_snprintf(result,len,"%s"PATH_SEPARATOR"%s",home,rest);
+    tor_asprintf(&result,"%s"PATH_SEPARATOR"%s",home,rest);
     tor_free(home);
     return result;
   } else {
@@ -2526,22 +2526,26 @@ tor_listdir(const char *dirname)
   smartlist_t *result;
 #ifdef MS_WINDOWS
   char *pattern;
+  WCHAR wpattern[MAX_PATH] = {0};
+  char name[MAX_PATH] = {0};
   HANDLE handle;
-  WIN32_FIND_DATA findData;
+  WIN32_FIND_DATAW findData;
   size_t pattern_len = strlen(dirname)+16;
   pattern = tor_malloc(pattern_len);
   tor_snprintf(pattern, pattern_len, "%s\\*", dirname);
-  if (INVALID_HANDLE_VALUE == (handle = FindFirstFile(pattern, &findData))) {
+  mbstowcs(wpattern,pattern,MAX_PATH);
+  if (INVALID_HANDLE_VALUE == (handle = FindFirstFileW(wpattern, &findData))) {
     tor_free(pattern);
     return NULL;
   }
+  wcstombs(name,findData.cFileName,MAX_PATH);
   result = smartlist_create();
   while (1) {
-    if (strcmp(findData.cFileName, ".") &&
-        strcmp(findData.cFileName, "..")) {
-      smartlist_add(result, tor_strdup(findData.cFileName));
+    if (strcmp(name, ".") &&
+        strcmp(name, "..")) {
+      smartlist_add(result, tor_strdup(name));
     }
-    if (!FindNextFile(handle, &findData)) {
+    if (!FindNextFileW(handle, &findData)) {
       DWORD err;
       if ((err = GetLastError()) != ERROR_NO_MORE_FILES) {
         char *errstr = format_win32_error(err);
