@@ -419,9 +419,16 @@ The following options are useful only for clients (that is, if
     fingerprint to look up the bridge descriptor at the bridge authority, if
     it's provided and if UpdateBridgesFromAuthority is set too.
 
+**LearnCircuitBuildTimeout** **0**|**1**::
+    If 0, CircuitBuildTimeout adaptive learning is disabled. (Default: 1)
+
 **CircuitBuildTimeout** __NUM__::
+
     Try for at most NUM seconds when building circuits. If the circuit isn't
-    open in that time, give up on it. (Default: 1 minute.)
+    open in that time, give up on it. If LearnCircuitBuildTimeout is 1, this
+    value serves as the initial value to use before a timeout is learned. If
+    LearnCircuitBuildTimeout is 0, this value is the only value used.
+    (Default: 60 seconds.)
 
 **CircuitIdleTimeout** __NUM__::
     If we have kept a clean (never used) circuit around for NUM seconds, then
@@ -632,6 +639,12 @@ The following options are useful only for clients (that is, if
     helps to determine whether an application using Tor is possibly leaking
     DNS requests. (Default: 0)
 
+**WarnUnsafeSocks** **0**|**1**::
+    When this option is enabled, Tor will warn whenever a request is
+    received that only contains an IP address instead of a hostname. Allowing
+    applications to do DNS resolves themselves is usually a bad idea and
+    can leak your location to attackers. (Default: 1)
+
 **VirtualAddrNetwork** __Address__/__bits__::
     When a controller asks for a virtual (unused) address with the MAPADDRESS
     command, Tor picks an unassigned address from this range. (Default:
@@ -741,7 +754,10 @@ is non-zero):
 **Address** __address__::
     The IP address or fully qualified domain name of this server (e.g.
     moria.mit.edu). You can leave this unset, and Tor will guess your IP
-    address.
+    address.  This IP address is the one used to tell clients and other
+    servers where to find your Tor server; it doesn't affect the IP that your
+    Tor client binds to.  To bind to a different address, use the
+    *ListenAddress and OutboundBindAddress options.
 
 **AllowSingleHopExits** **0**|**1**::
     This option controls whether clients can use this server as a single hop
