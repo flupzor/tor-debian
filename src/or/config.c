@@ -12,6 +12,28 @@
 #define CONFIG_PRIVATE
 
 #include "or.h"
+#include "circuitbuild.h"
+#include "circuitlist.h"
+#include "config.h"
+#include "connection.h"
+#include "connection_edge.h"
+#include "connection_or.h"
+#include "control.h"
+#include "cpuworker.h"
+#include "dirserv.h"
+#include "dirvote.h"
+#include "dns.h"
+#include "geoip.h"
+#include "hibernate.h"
+#include "main.h"
+#include "networkstatus.h"
+#include "policies.h"
+#include "relay.h"
+#include "rendclient.h"
+#include "rendservice.h"
+#include "rephist.h"
+#include "router.h"
+#include "routerlist.h"
 #ifdef MS_WINDOWS
 #include <shlobj.h>
 #endif
@@ -419,6 +441,12 @@ static config_var_t _state_vars[] = {
   V(BWHistoryWriteEnds,               ISOTIME,  NULL),
   V(BWHistoryWriteInterval,           UINT,     "900"),
   V(BWHistoryWriteValues,             CSV,      ""),
+  V(BWHistoryDirReadEnds,             ISOTIME,  NULL),
+  V(BWHistoryDirReadInterval,         UINT,     "900"),
+  V(BWHistoryDirReadValues,           CSV,      ""),
+  V(BWHistoryDirWriteEnds,            ISOTIME,  NULL),
+  V(BWHistoryDirWriteInterval,        UINT,     "900"),
+  V(BWHistoryDirWriteValues,          CSV,      ""),
 
   V(TorVersion,                       STRING,   NULL),
 
@@ -426,7 +454,7 @@ static config_var_t _state_vars[] = {
   V(LastWritten,                      ISOTIME,  NULL),
 
   V(TotalBuildTimes,                  UINT,     NULL),
-  V(CircuitBuildAbandonedCount,         UINT,     "0"),
+  V(CircuitBuildAbandonedCount,       UINT,     "0"),
   VAR("CircuitBuildTimeBin",          LINELIST_S, BuildtimeHistogram, NULL),
   VAR("BuildtimeHistogram",           LINELIST_V, BuildtimeHistogram, NULL),
 
@@ -929,10 +957,12 @@ options_act_reversible(or_options_t *old_options, char **msg)
     }
 
     /* Launch the listeners.  (We do this before we setuid, so we can bind to
-     * ports under 1024.) */
-    if (retry_all_listeners(replaced_listeners, new_listeners) < 0) {
-      *msg = tor_strdup("Failed to bind one of the listener ports.");
-      goto rollback;
+     * ports under 1024.)  We don't want to rebind if we're hibernating. */
+    if (!we_are_hibernating()) {
+      if (retry_all_listeners(replaced_listeners, new_listeners) < 0) {
+        *msg = tor_strdup("Failed to bind one of the listener ports.");
+        goto rollback;
+      }
     }
   }
 
@@ -1222,9 +1252,30 @@ options_act(or_options_t *old_options)
       circuit_expire_all_dirty_circs();
     }
 
+/* How long should we delay counting bridge stats after becoming a bridge?
+ * We use this so we don't count people who used our bridge thinking it is
+ * a relay. If you change this, don't forget to change the log message
+ * below. It's 4 hours (the time it takes to stop being used by clients)
+ * plus some extra time for clock skew. */
+#define RELAY_BRIDGE_STATS_DELAY (6 * 60 * 60)
+
     if (! bool_eq(options->BridgeRelay, old_options->BridgeRelay)) {
-      log_info(LD_GENERAL, "Bridge status changed.  Forgetting GeoIP stats.");
-      geoip_remove_old_clients(time(NULL)+(2*60*60));
+      int was_relay = 0;
+      if (options->BridgeRelay) {
+        time_t int_start = time(NULL);
+        if (old_options->ORPort == options->ORPort) {
+          int_start += RELAY_BRIDGE_STATS_DELAY;
+          was_relay = 1;
+        }
+        geoip_bridge_stats_init(int_start);
+        log_info(LD_CONFIG, "We are acting as a bridge now.  Starting new "
+                 "GeoIP stats interval%s.", was_relay ? " in 6 "
+                 "hours from now" : "");
+      } else {
+        geoip_bridge_stats_term();
+        log_info(LD_GENERAL, "We are no longer acting as a bridge.  "
+                 "Forgetting GeoIP stats.");
+      }
     }
 
     if (options_transition_affects_workers(old_options, options)) {
@@ -1249,6 +1300,10 @@ options_act(or_options_t *old_options)
 
     if (options->V3AuthoritativeDir && !old_options->V3AuthoritativeDir)
       init_keys();
+
+    if (options->PerConnBWRate != old_options->PerConnBWRate ||
+        options->PerConnBWBurst != old_options->PerConnBWBurst)
+      connection_or_update_token_buckets(get_connection_array(), options);
   }
 
   /* Maybe load geoip file */
@@ -1293,6 +1348,40 @@ options_act(or_options_t *old_options)
       return -1;
     }
   }
+
+  if (options->CellStatistics || options->DirReqStatistics ||
+      options->EntryStatistics || options->ExitPortStatistics) {
+    time_t now = time(NULL);
+    if ((!old_options || !old_options->CellStatistics) &&
+        options->CellStatistics)
+      rep_hist_buffer_stats_init(now);
+    if ((!old_options || !old_options->DirReqStatistics) &&
+        options->DirReqStatistics)
+      geoip_dirreq_stats_init(now);
+    if ((!old_options || !old_options->EntryStatistics) &&
+        options->EntryStatistics)
+      geoip_entry_stats_init(now);
+    if ((!old_options || !old_options->ExitPortStatistics) &&
+        options->ExitPortStatistics)
+      rep_hist_exit_stats_init(now);
+    if (!old_options)
+      log_notice(LD_CONFIG, "Configured to measure statistics. Look for "
+                 "the *-stats files that will first be written to the "
+                 "data directory in 24 hours from now.");
+  }
+
+  if (old_options && old_options->CellStatistics &&
+      !options->CellStatistics)
+    rep_hist_buffer_stats_term();
+  if (old_options && old_options->DirReqStatistics &&
+      !options->DirReqStatistics)
+    geoip_dirreq_stats_term();
+  if (old_options && old_options->EntryStatistics &&
+      !options->EntryStatistics)
+    geoip_entry_stats_term();
+  if (old_options && old_options->ExitPortStatistics &&
+      !options->ExitPortStatistics)
+    rep_hist_exit_stats_term();
 
   /* Check if we need to parse and add the EntryNodes config option. */
   if (options->EntryNodes &&
@@ -1539,6 +1628,16 @@ config_find_option(config_format_t *fmt, const char *key)
   return NULL;
 }
 
+/** Return the number of option entries in <b>fmt</b>. */
+static int
+config_count_options(config_format_t *fmt)
+{
+  int i;
+  for (i=0; fmt->vars[i].name; ++i)
+    ;
+  return i;
+}
+
 /*
  * Functions to assign config options.
  */
@@ -1683,7 +1782,7 @@ config_assign_value(config_format_t *fmt, or_options_t *options,
 static int
 config_assign_line(config_format_t *fmt, or_options_t *options,
                    config_line_t *c, int use_defaults,
-                   int clear_first, char **msg)
+                   int clear_first, bitarray_t *options_seen, char **msg)
 {
   config_var_t *var;
 
@@ -1703,6 +1802,7 @@ config_assign_line(config_format_t *fmt, or_options_t *options,
       return -1;
     }
   }
+
   /* Put keyword into canonical case. */
   if (strcmp(var->name, c->key)) {
     tor_free(c->key);
@@ -1723,6 +1823,18 @@ config_assign_line(config_format_t *fmt, or_options_t *options,
       }
     }
     return 0;
+  }
+
+  if (options_seen && (var->type != CONFIG_TYPE_LINELIST &&
+                       var->type != CONFIG_TYPE_LINELIST_S)) {
+    /* We're tracking which options we've seen, and this option is not
+     * supposed to occur more than once. */
+    int var_index = (int)(var - fmt->vars);
+    if (bitarray_is_set(options_seen, var_index)) {
+      log_warn(LD_CONFIG, "Option '%s' used more than once; all but the last "
+               "value will be ignored.", var->name);
+    }
+    bitarray_set(options_seen, var_index);
   }
 
   if (config_assign_value(fmt, options, c, msg) < 0)
@@ -1993,6 +2105,8 @@ config_assign(config_format_t *fmt, void *options, config_line_t *list,
               int use_defaults, int clear_first, char **msg)
 {
   config_line_t *p;
+  bitarray_t *options_seen;
+  const int n_options = config_count_options(fmt);
 
   CHECK(fmt, options);
 
@@ -2012,14 +2126,18 @@ config_assign(config_format_t *fmt, void *options, config_line_t *list,
       config_reset_line(fmt, options, p->key, use_defaults);
   }
 
+  options_seen = bitarray_init_zero(n_options);
   /* pass 3: assign. */
   while (list) {
     int r;
     if ((r=config_assign_line(fmt, options, list, use_defaults,
-                              clear_first, msg)))
+                              clear_first, options_seen, msg))) {
+      bitarray_free(options_seen);
       return r;
+    }
     list = list->next;
   }
+  bitarray_free(options_seen);
   return 0;
 }
 
@@ -3557,6 +3675,21 @@ options_validate(or_options_t *old_options, or_options_t *options,
   if (options->AccelDir && !options->AccelName)
     REJECT("Can't use hardware crypto accelerator dir without engine name.");
 
+  if (options->PublishServerDescriptor)
+    SMARTLIST_FOREACH(options->PublishServerDescriptor, const char *, pubdes, {
+      if (!strcmp(pubdes, "1") || !strcmp(pubdes, "0"))
+        if (smartlist_len(options->PublishServerDescriptor) > 1) {
+          COMPLAIN("You have passed a list of multiple arguments to the "
+                   "PublishServerDescriptor option that includes 0 or 1. "
+                   "0 or 1 should only be used as the sole argument. "
+                   "This configuration will be rejected in a future release.");
+          break;
+        }
+    });
+
+  if (options->BridgeRelay == 1 && options->ORPort == 0)
+      REJECT("BridgeRelay is 1, ORPort is 0. This is an invalid combination.");
+
   return 0;
 #undef REJECT
 #undef COMPLAIN
@@ -3618,16 +3751,6 @@ options_transition_allowed(or_options_t *old, or_options_t *new_val,
   if (old->TestingTorNetwork != new_val->TestingTorNetwork) {
     *msg = tor_strdup("While Tor is running, changing TestingTorNetwork "
                       "is not allowed.");
-    return -1;
-  }
-
-  if (old->CellStatistics != new_val->CellStatistics ||
-      old->DirReqStatistics != new_val->DirReqStatistics ||
-      old->EntryStatistics != new_val->EntryStatistics ||
-      old->ExitPortStatistics != new_val->ExitPortStatistics) {
-    *msg = tor_strdup("While Tor is running, changing either "
-                      "CellStatistics, DirReqStatistics, EntryStatistics, "
-                      "or ExitPortStatistics is not allowed.");
     return -1;
   }
 
@@ -4855,9 +4978,7 @@ or_state_set(or_state_t *new_state)
     tor_free(err);
     ret = -1;
   }
-  if (circuit_build_times_parse_state(&circ_times, global_state, &err) < 0) {
-    log_warn(LD_GENERAL,"%s",err);
-    tor_free(err);
+  if (circuit_build_times_parse_state(&circ_times, global_state) < 0) {
     ret = -1;
   }
   return ret;
@@ -5060,9 +5181,11 @@ remove_file_if_very_old(const char *fname, time_t now)
  * types. */
 int
 getinfo_helper_config(control_connection_t *conn,
-                      const char *question, char **answer)
+                      const char *question, char **answer,
+                      const char **errmsg)
 {
   (void) conn;
+  (void) errmsg;
   if (!strcmp(question, "config/names")) {
     smartlist_t *sl = smartlist_create();
     int i;

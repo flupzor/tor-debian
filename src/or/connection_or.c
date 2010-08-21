@@ -11,6 +11,22 @@
  **/
 
 #include "or.h"
+#include "buffers.h"
+#include "circuitbuild.h"
+#include "command.h"
+#include "config.h"
+#include "connection.h"
+#include "connection_or.h"
+#include "control.h"
+#include "dirserv.h"
+#include "geoip.h"
+#include "main.h"
+#include "networkstatus.h"
+#include "reasons.h"
+#include "relay.h"
+#include "rephist.h"
+#include "router.h"
+#include "routerlist.h"
 
 static int connection_tls_finish_handshake(or_connection_t *conn);
 static int connection_or_process_cells_from_inbuf(or_connection_t *conn);
@@ -333,21 +349,18 @@ connection_or_digest_is_known_relay(const char *id_digest)
   return 0;
 }
 
-/** If we don't necessarily know the router we're connecting to, but we
- * have an addr/port/id_digest, then fill in as much as we can. Start
- * by checking to see if this describes a router we know. */
+/** Set the per-conn read and write limits for <b>conn</b>. If it's a known
+ * relay, we will rely on the global read and write buckets, so give it
+ * per-conn limits that are big enough they'll never matter. But if it's
+ * not a known relay, first check if we set PerConnBwRate/Burst, then
+ * check if the consensus sets them, else default to 'big enough'.
+ */
 static void
-connection_or_init_conn_from_address(or_connection_t *conn,
-                                     const tor_addr_t *addr, uint16_t port,
-                                     const char *id_digest,
-                                     int started_here)
+connection_or_update_token_buckets_helper(or_connection_t *conn, int reset,
+                                          or_options_t *options)
 {
-  or_options_t *options = get_options();
   int rate, burst; /* per-connection rate limiting params */
-  routerinfo_t *r = router_get_by_digest(id_digest);
-  connection_or_set_identity_digest(conn, id_digest);
-
-  if (connection_or_digest_is_known_relay(id_digest)) {
+  if (connection_or_digest_is_known_relay(conn->identity_digest)) {
     /* It's in the consensus, or we have a descriptor for it meaning it
      * was probably in a recent consensus. It's a recognized relay:
      * give it full bandwidth. */
@@ -366,7 +379,43 @@ connection_or_init_conn_from_address(or_connection_t *conn,
   }
 
   conn->bandwidthrate = rate;
-  conn->read_bucket = conn->write_bucket = conn->bandwidthburst = burst;
+  conn->bandwidthburst = burst;
+  if (reset) { /* set up the token buckets to be full */
+    conn->read_bucket = conn->write_bucket = burst;
+    return;
+  }
+  /* If the new token bucket is smaller, take out the extra tokens.
+   * (If it's larger, don't -- the buckets can grow to reach the cap.) */
+  if (conn->read_bucket > burst)
+    conn->read_bucket = burst;
+  if (conn->write_bucket > burst)
+    conn->write_bucket = burst;
+}
+
+/** Either our set of relays or our per-conn rate limits have changed.
+ * Go through all the OR connections and update their token buckets. */
+void
+connection_or_update_token_buckets(smartlist_t *conns, or_options_t *options)
+{
+  SMARTLIST_FOREACH(conns, connection_t *, conn,
+  {
+    if (connection_speaks_cells(conn))
+      connection_or_update_token_buckets_helper(TO_OR_CONN(conn), 0, options);
+  });
+}
+
+/** If we don't necessarily know the router we're connecting to, but we
+ * have an addr/port/id_digest, then fill in as much as we can. Start
+ * by checking to see if this describes a router we know. */
+static void
+connection_or_init_conn_from_address(or_connection_t *conn,
+                                     const tor_addr_t *addr, uint16_t port,
+                                     const char *id_digest,
+                                     int started_here)
+{
+  routerinfo_t *r = router_get_by_digest(id_digest);
+  connection_or_set_identity_digest(conn, id_digest);
+  connection_or_update_token_buckets_helper(conn, 1, get_options());
 
   conn->_base.port = port;
   tor_addr_copy(&conn->_base.addr, addr);

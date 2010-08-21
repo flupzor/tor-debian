@@ -11,6 +11,20 @@
  */
 
 #include "or.h"
+#include "circuitbuild.h"
+#include "config.h"
+#include "connection.h"
+#include "connection_or.h"
+#include "control.h"
+#include "directory.h"
+#include "dirserv.h"
+#include "dirvote.h"
+#include "main.h"
+#include "networkstatus.h"
+#include "relay.h"
+#include "router.h"
+#include "routerlist.h"
+#include "routerparse.h"
 
 /* For tracking v2 networkstatus documents.  Only caches do this now. */
 
@@ -338,6 +352,10 @@ networkstatus_vote_free(networkstatus_t *ns)
   if (ns->known_flags) {
     SMARTLIST_FOREACH(ns->known_flags, char *, c, tor_free(c));
     smartlist_free(ns->known_flags);
+  }
+  if (ns->weight_params) {
+    SMARTLIST_FOREACH(ns->weight_params, char *, c, tor_free(c));
+    smartlist_free(ns->weight_params);
   }
   if (ns->net_params) {
     SMARTLIST_FOREACH(ns->net_params, char *, c, tor_free(c));
@@ -1212,14 +1230,26 @@ update_consensus_networkstatus_fetch_time(time_t now)
   if (c) {
     long dl_interval;
     long interval = c->fresh_until - c->valid_after;
+    long min_sec_before_caching = CONSENSUS_MIN_SECONDS_BEFORE_CACHING;
     time_t start;
+
+    if (min_sec_before_caching > interval/16) {
+      /* Usually we allow 2-minutes slop factor in case clocks get
+         desynchronized a little.  If we're on a private network with
+         a crazy-fast voting interval, though, 2 minutes may be too
+         much. */
+      min_sec_before_caching = interval/16;
+    }
+
     if (directory_fetches_dir_info_early(options)) {
       /* We want to cache the next one at some point after this one
        * is no longer fresh... */
-      start = c->fresh_until + CONSENSUS_MIN_SECONDS_BEFORE_CACHING;
+      start = c->fresh_until + min_sec_before_caching;
       /* Some clients may need the consensus sooner than others. */
       if (options->FetchDirInfoExtraEarly) {
         dl_interval = 60;
+        if (min_sec_before_caching + dl_interval > interval)
+          dl_interval = interval/2;
       } else {
         /* But only in the first half-interval after that. */
         dl_interval = interval/2;
@@ -1235,10 +1265,9 @@ update_consensus_networkstatus_fetch_time(time_t now)
        * to choose the rest of the interval *after* them. */
       if (directory_fetches_dir_info_later(options)) {
         /* Give all the *clients* enough time to download the consensus. */
-        start = start + dl_interval + CONSENSUS_MIN_SECONDS_BEFORE_CACHING;
+        start = start + dl_interval + min_sec_before_caching;
         /* But try to get it before ours actually expires. */
-        dl_interval = (c->valid_until - start) -
-                      CONSENSUS_MIN_SECONDS_BEFORE_CACHING;
+        dl_interval = (c->valid_until - start) - min_sec_before_caching;
       }
     }
     if (dl_interval < 1)
@@ -1490,6 +1519,7 @@ networkstatus_set_current_consensus(const char *consensus,
   networkstatus_t *c=NULL;
   int r, result = -1;
   time_t now = time(NULL);
+  or_options_t *options = get_options();
   char *unverified_fname = NULL, *consensus_fname = NULL;
   int flav = networkstatus_parse_flavor_name(flavor);
   const unsigned from_cache = flags & NSSET_FROM_CACHE;
@@ -1527,7 +1557,7 @@ networkstatus_set_current_consensus(const char *consensus,
   }
 
   if (flav != USABLE_CONSENSUS_FLAVOR &&
-      !directory_caches_dir_info(get_options())) {
+      !directory_caches_dir_info(options)) {
     /* This consensus is totally boring to us: we won't use it, and we won't
      * serve it.  Drop it. */
     goto done;
@@ -1662,7 +1692,7 @@ networkstatus_set_current_consensus(const char *consensus,
       download_status_failed(&consensus_dl_status[flav], 0);
   }
 
-  if (directory_caches_dir_info(get_options())) {
+  if (directory_caches_dir_info(options)) {
     dirserv_set_cached_consensus_networkstatus(consensus,
                                                flavor,
                                                &c->digests,
@@ -1675,9 +1705,13 @@ networkstatus_set_current_consensus(const char *consensus,
 
     /* XXXXNM Microdescs: needs a non-ns variant. */
     update_consensus_networkstatus_fetch_time(now);
-    dirvote_recalculate_timing(get_options(), now);
+    dirvote_recalculate_timing(options, now);
     routerstatus_list_update_named_server_map();
-    cell_ewma_set_scale_factor(get_options(), current_consensus);
+    cell_ewma_set_scale_factor(options, current_consensus);
+
+    /* XXX022 where is the right place to put this call? */
+    connection_or_update_token_buckets(get_connection_array(), options);
+
     circuit_build_times_new_consensus_params(&circ_times, current_consensus);
   }
 
@@ -2011,7 +2045,7 @@ networkstatus_getinfo_by_purpose(const char *purpose_string, time_t now)
     if (bridge_auth && ri->purpose == ROUTER_PURPOSE_BRIDGE)
       dirserv_set_router_is_running(ri, now);
     /* then generate and write out status lines for each of them */
-    set_routerstatus_from_routerinfo(&rs, ri, now, 0, 0, 0, 0);
+    set_routerstatus_from_routerinfo(&rs, ri, now, 0, 0, 0);
     smartlist_add(statuses, networkstatus_getinfo_helper_single(&rs));
   });
 
@@ -2124,7 +2158,8 @@ networkstatus_parse_flavor_name(const char *flavname)
  * ORs.  Return 0 on success, -1 on unrecognized question format. */
 int
 getinfo_helper_networkstatus(control_connection_t *conn,
-                             const char *question, char **answer)
+                             const char *question, char **answer,
+                             const char **errmsg)
 {
   routerstatus_t *status;
   (void) conn;
@@ -2148,8 +2183,10 @@ getinfo_helper_networkstatus(control_connection_t *conn,
   } else if (!strcmpstart(question, "ns/id/")) {
     char d[DIGEST_LEN];
 
-    if (base16_decode(d, DIGEST_LEN, question+6, strlen(question+6)))
+    if (base16_decode(d, DIGEST_LEN, question+6, strlen(question+6))) {
+      *errmsg = "Data not decodeable as hex";
       return -1;
+    }
     status = router_get_consensus_status_by_id(d);
   } else if (!strcmpstart(question, "ns/name/")) {
     status = router_get_consensus_status_by_nickname(question+8, 0);
@@ -2157,7 +2194,7 @@ getinfo_helper_networkstatus(control_connection_t *conn,
     *answer = networkstatus_getinfo_by_purpose(question+11, time(NULL));
     return *answer ? 0 : -1;
   } else {
-    return -1;
+    return 0;
   }
 
   if (status)

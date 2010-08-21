@@ -10,6 +10,28 @@
  **/
 
 #include "or.h"
+#include "buffers.h"
+#include "circuitlist.h"
+#include "circuituse.h"
+#include "config.h"
+#include "connection.h"
+#include "connection_edge.h"
+#include "connection_or.h"
+#include "control.h"
+#include "dns.h"
+#include "dnsserv.h"
+#include "dirserv.h"
+#include "hibernate.h"
+#include "main.h"
+#include "policies.h"
+#include "reasons.h"
+#include "relay.h"
+#include "rendclient.h"
+#include "rendcommon.h"
+#include "rendservice.h"
+#include "rephist.h"
+#include "router.h"
+#include "routerlist.h"
 
 #ifdef HAVE_LINUX_TYPES_H
 #include <linux/types.h>
@@ -2028,7 +2050,7 @@ get_unique_stream_id_by_circ(origin_circuit_t *circ)
   streamid_t test_stream_id;
   uint32_t attempts=0;
 
-again:
+ again:
   test_stream_id = circ->next_stream_id++;
   if (++attempts > 1<<16) {
     /* Make sure we don't loop forever if all stream_id's are used. */
@@ -2592,7 +2614,7 @@ connection_exit_begin_conn(cell_t *cell, circuit_t *circ)
     log_debug(LD_REND,"Finished assigning addr/port");
     n_stream->cpath_layer = origin_circ->cpath->prev; /* link it */
 
-    /* add it into the linked list of n_streams on this circuit */
+    /* add it into the linked list of p_streams on this circuit */
     n_stream->next_stream = origin_circ->p_streams;
     n_stream->on_circuit = circ;
     origin_circ->p_streams = n_stream;
@@ -2966,7 +2988,7 @@ parse_extended_hostname(char *address, int allowdotexit)
     if (rend_valid_service_id(query)) {
       return ONION_HOSTNAME; /* success */
     }
-failed:
+ failed:
     /* otherwise, return to previous state and return 0 */
     *s = '.';
     return BAD_HOSTNAME;

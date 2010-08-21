@@ -12,7 +12,24 @@
 
 #include <math.h>
 #include "or.h"
+#include "buffers.h"
+#include "circuitbuild.h"
+#include "circuitlist.h"
+#include "config.h"
+#include "connection.h"
+#include "connection_edge.h"
+#include "connection_or.h"
+#include "control.h"
+#include "geoip.h"
+#include "main.h"
 #include "mempool.h"
+#include "networkstatus.h"
+#include "policies.h"
+#include "reasons.h"
+#include "relay.h"
+#include "rendcommon.h"
+#include "routerlist.h"
+#include "routerparse.h"
 
 static int relay_crypt(circuit_t *circ, cell_t *cell,
                        cell_direction_t cell_direction,
@@ -675,7 +692,8 @@ edge_reason_is_retriable(int reason)
          reason == END_STREAM_REASON_RESOURCELIMIT ||
          reason == END_STREAM_REASON_EXITPOLICY ||
          reason == END_STREAM_REASON_RESOLVEFAILED ||
-         reason == END_STREAM_REASON_MISC;
+         reason == END_STREAM_REASON_MISC ||
+         reason == END_STREAM_REASON_NOROUTE;
 }
 
 /** Called when we receive an END cell on a stream that isn't open yet,
@@ -770,6 +788,7 @@ connection_ap_process_end_not_open(
       case END_STREAM_REASON_RESOLVEFAILED:
       case END_STREAM_REASON_TIMEOUT:
       case END_STREAM_REASON_MISC:
+      case END_STREAM_REASON_NOROUTE:
         if (client_dns_incr_failures(conn->socks_request->address)
             < MAX_RESOLVE_FAILURES) {
           /* We haven't retried too many times; reattach the connection. */
@@ -1309,7 +1328,7 @@ connection_edge_package_raw_inbuf(edge_connection_t *conn, int package_partial)
     return 0;
   }
 
-repeat_connection_edge_package_raw_inbuf:
+ repeat_connection_edge_package_raw_inbuf:
 
   circ = circuit_get_by_edge_conn(conn);
   if (!circ) {

@@ -64,12 +64,15 @@ OPTIONS
 Other options can be specified either on the command-line (--option
     value), or in the configuration file (option value or option "value").
     Options are case-insensitive. C-style escaped characters are allowed inside
-    quoted values.
+    quoted values.   Options on the command line take precedence over
+    options found in the configuration file.
 
 **BandwidthRate** __N__ **bytes**|**KB**|**MB**|**GB**::
     A token bucket limits the average incoming bandwidth usage on this node to
     the specified number of bytes per second, and the average outgoing
-    bandwidth usage to that same value. (Default: 5 MB)
+    bandwidth usage to that same value.  If you want to run a relay in the
+    public network, this needs to be _at the very least_ 20 KB (that is,
+    20480 bytes). (Default: 5 MB)
 
 **BandwidthBurst** __N__ **bytes**|**KB**|**MB**|**GB**::
     Limit the maximum token bucket size (also known as the burst) to the given
@@ -962,23 +965,20 @@ is non-zero):
 
 **CellStatistics** **0**|**1**::
     When this option is enabled, Tor writes statistics on the mean time that
-    cells spend in circuit queues to disk every 24 hours. Cannot be changed
-    while Tor is running. (Default: 0)
+    cells spend in circuit queues to disk every 24 hours. (Default: 0)
 
 **DirReqStatistics** **0**|**1**::
     When this option is enabled, Tor writes statistics on the number and
-    response time of network status requests to disk every 24 hours. Cannot be
-    changed while Tor is running. (Default: 0)
+    response time of network status requests to disk every 24 hours.
+    (Default: 0)
 
 **EntryStatistics** **0**|**1**::
     When this option is enabled, Tor writes statistics on the number of
-    directly connecting clients to disk every 24 hours. Cannot be changed while
-    Tor is running. (Default: 0)
+    directly connecting clients to disk every 24 hours. (Default: 0)
 
 **ExitPortStatistics** **0**|**1**::
     When this option is enabled, Tor writes statistics on the number of relayed
-    bytes and opened stream per exit port to disk every 24 hours. Cannot be
-    changed while Tor is running. (Default: 0)
+    bytes and opened stream per exit port to disk every 24 hours. (Default: 0)
 
 **ExtraInfoStatistics** **0**|**1**::
     When this option is enabled, Tor includes previously gathered statistics in
@@ -1290,10 +1290,9 @@ Tor catches the following signals:
     slow shutdown, closing listeners and waiting 30 seconds before exiting.
     (The delay can be configured with the ShutdownWaitLength config option.)
 
-**SIGHUP**:: 
+**SIGHUP**::
     The signal instructs Tor to reload its configuration (including closing and
-    reopening logs), fetch a new directory, and kill and restart its helper
-    processes if applicable.
+    reopening logs), and kill and restart its helper processes if applicable.
 
 **SIGUSR1**::
     Log statistics about current connections, past connections, and throughput.

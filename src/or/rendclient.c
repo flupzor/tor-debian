@@ -8,6 +8,19 @@
  **/
 
 #include "or.h"
+#include "circuitbuild.h"
+#include "circuitlist.h"
+#include "circuituse.h"
+#include "config.h"
+#include "connection.h"
+#include "connection_edge.h"
+#include "directory.h"
+#include "main.h"
+#include "relay.h"
+#include "rendclient.h"
+#include "rendcommon.h"
+#include "rephist.h"
+#include "routerlist.h"
 
 /** Called when we've established a circuit to an introduction point:
  * send the introduction request. */
@@ -196,7 +209,7 @@ rend_client_send_introduction(origin_circuit_t *introcirc,
   introcirc->_base.purpose = CIRCUIT_PURPOSE_C_INTRODUCE_ACK_WAIT;
 
   return 0;
-err:
+ err:
   circuit_mark_for_close(TO_CIRCUIT(introcirc), END_CIRC_REASON_INTERNAL);
   circuit_mark_for_close(TO_CIRCUIT(rendcirc), END_CIRC_REASON_INTERNAL);
   return -1;

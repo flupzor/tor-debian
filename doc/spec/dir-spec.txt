@@ -779,6 +779,17 @@
            had a smaller bandwidth than md, the other half had a larger
            bandwidth than md.
 
+    "dirreq-read-history" YYYY-MM-DD HH:MM:SS (NSEC s) NUM,NUM,NUM... NL
+        [At most once]
+    "dirreq-write-history" YYYY-MM-DD HH:MM:SS (NSEC s) NUM,NUM,NUM... NL
+        [At most once]
+
+        Declare how much bandwidth the OR has spent on answering directory
+        requests.  Usage is divided into intervals of NSEC seconds.  The
+        YYYY-MM-DD HH:MM:SS field defines the end of the most recent
+        interval.  The numbers are the number of bytes used in the most
+        recent intervals, ordered from oldest to newest.
+
     "entry-stats-end" YYYY-MM-DD HH:MM:SS (NSEC s) NL
         [At most once.]
 
@@ -1351,9 +1362,9 @@
          Web - Weight for BEGIN_DIR-supporting Exit-flagged nodes
          Wdb - Weight for BEGIN_DIR-supporting Guard+Exit-flagged nodes
 
-         Wbg - Weight for Guard+Exit-flagged nodes for BEGIN_DIR requests
-         Wbm - Weight for Guard+Exit-flagged nodes for BEGIN_DIR requests
-         Wbe - Weight for Guard+Exit-flagged nodes for BEGIN_DIR requests
+         Wbg - Weight for Guard flagged nodes for BEGIN_DIR requests
+         Wbm - Weight for non-flagged nodes for BEGIN_DIR requests
+         Wbe - Weight for Exit-flagged nodes for BEGIN_DIR requests
          Wbd - Weight for Guard+Exit-flagged nodes for BEGIN_DIR requests
 
        These values are calculated as specified in Section 3.4.3.
@@ -1440,9 +1451,6 @@
    "Guard" -- A router is a possible 'Guard' if its Weighted Fractional
    Uptime is at least the median for "familiar" active routers, and if
    its bandwidth is at least median or at least 250KB/s.
-   If the total bandwidth of active non-BadExit Exit servers is less
-   than one third of the total bandwidth of all active servers, no Exit is
-   listed as a Guard.
 
         To calculate weighted fractional uptime, compute the fraction
         of time that the router is up in any given day, weighting so that

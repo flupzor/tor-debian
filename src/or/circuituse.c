@@ -10,6 +10,20 @@
  **/
 
 #include "or.h"
+#include "circuitbuild.h"
+#include "circuitlist.h"
+#include "circuituse.h"
+#include "config.h"
+#include "connection.h"
+#include "connection_edge.h"
+#include "control.h"
+#include "policies.h"
+#include "rendclient.h"
+#include "rendcommon.h"
+#include "rendservice.h"
+#include "rephist.h"
+#include "router.h"
+#include "routerlist.h"
 
 /********* START VARIABLES **********/
 
@@ -705,7 +719,7 @@ circuit_expire_old_circuits_clientside(time_t now)
   }
 
   for (circ = global_circuitlist; circ; circ = circ->next) {
-    if (circ->marked_for_close || ! CIRCUIT_IS_ORIGIN(circ))
+    if (circ->marked_for_close || !CIRCUIT_IS_ORIGIN(circ))
       continue;
     /* If the circuit has been dirty for too long, and there are no streams
      * on it, mark it for close.
@@ -732,13 +746,23 @@ circuit_expire_old_circuits_clientside(time_t now)
                     (long)(now - circ->timestamp_created));
           circuit_mark_for_close(circ, END_CIRC_REASON_FINISHED);
         } else if (!TO_ORIGIN_CIRCUIT(circ)->is_ancient) {
-          log_notice(LD_CIRC,
-                     "Ancient non-dirty circuit %d is still around after "
-                     "%ld seconds. Purpose: %d",
-                     TO_ORIGIN_CIRCUIT(circ)->global_identifier,
-                     (long)(now - circ->timestamp_created),
-                     circ->purpose);
-          TO_ORIGIN_CIRCUIT(circ)->is_ancient = 1;
+          /* Server-side rend joined circuits can end up really old, because
+           * they are reused by clients for longer than normal. The client
+           * controls their lifespan. (They never become dirty, because
+           * connection_exit_begin_conn() never marks anything as dirty.)
+           * Similarly, server-side intro circuits last a long time. */
+          if (circ->purpose != CIRCUIT_PURPOSE_S_REND_JOINED &&
+              circ->purpose != CIRCUIT_PURPOSE_S_INTRO) {
+            log_notice(LD_CIRC,
+                       "Ancient non-dirty circuit %d is still around after "
+                       "%ld seconds. Purpose: %d",
+                       TO_ORIGIN_CIRCUIT(circ)->global_identifier,
+                       (long)(now - circ->timestamp_created),
+                       circ->purpose);
+            /* FFFF implement a new circuit_purpose_to_string() so we don't
+             * just print out a number for circ->purpose */
+            TO_ORIGIN_CIRCUIT(circ)->is_ancient = 1;
+          }
         }
       }
     }
@@ -1170,13 +1194,13 @@ circuit_get_open_circ_or_launch(edge_connection_t *conn,
        * as loudly. the user doesn't even know it's happening. */
       if (options->UseBridges && bridges_known_but_down()) {
         log_fn(severity, LD_APP|LD_DIR,
-               "Application request when we're believed to be "
-               "offline. Optimistically trying known bridges again.");
+               "Application request when we haven't used client functionality "
+               "lately. Optimistically trying known bridges again.");
         bridges_retry_all();
       } else if (!options->UseBridges || any_bridge_descriptors_known()) {
         log_fn(severity, LD_APP|LD_DIR,
-               "Application request when we're believed to be "
-               "offline. Optimistically trying directory fetches again.");
+               "Application request when we haven't used client functionality "
+               "lately. Optimistically trying directory fetches again.");
         routerlist_retry_directory_downloads(time(NULL));
       }
     }

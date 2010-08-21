@@ -43,14 +43,25 @@ long int lround(double x);
 double fabs(double x);
 
 #include "or.h"
+#include "buffers.h"
+#include "circuitbuild.h"
+#include "config.h"
+#include "connection_edge.h"
+#include "geoip.h"
+#include "rendcommon.h"
 #include "test.h"
 #include "torgzip.h"
 #include "mempool.h"
 #include "memarea.h"
+#include "onion.h"
+#include "policies.h"
+#include "rephist.h"
+#include "routerparse.h"
 
 #ifdef USE_DMALLOC
 #include <dmalloc.h>
 #include <openssl/crypto.h>
+#include "main.h"
 #endif
 
 /** Set to true if any unit test has failed.  Mostly, this is set by the macros
@@ -60,6 +71,7 @@ int have_failed = 0;
 /** Temporary directory (set up by setup_directory) under which we store all
  * our files during testing. */
 static char temp_dir[256];
+static pid_t temp_dir_setup_in_pid = 0;
 
 /** Select and create the temporary directory we'll use to run our unit tests.
  * Store it in <b>temp_dir</b>.  Exit immediately if we can't create it.
@@ -86,6 +98,7 @@ setup_directory(void)
     exit(1);
   }
   is_setup = 1;
+  temp_dir_setup_in_pid = getpid();
 }
 
 /** Return a filename relative to our testing temporary directory */
@@ -99,11 +112,16 @@ get_fname(const char *name)
 }
 
 /** Remove all files stored under the temporary directory, and the directory
- * itself. */
+ * itself.  Called by atexit(). */
 static void
 remove_directory(void)
 {
-  smartlist_t *elements = tor_listdir(temp_dir);
+  smartlist_t *elements;
+  if (getpid() != temp_dir_setup_in_pid) {
+    /* Only clean out the tempdir when the main process is exiting. */
+    return;
+  }
+  elements = tor_listdir(temp_dir);
   if (elements) {
     SMARTLIST_FOREACH(elements, const char *, cp,
        {
@@ -327,76 +345,6 @@ test_buffers(void)
   buf_free(buf);
   buf = NULL;
 
-#if 0
-  {
-  int s;
-  int eof;
-  int i;
-  buf_t *buf2;
-  /****
-   * read_to_buf
-   ****/
-  s = open(get_fname("data"), O_WRONLY|O_CREAT|O_TRUNC, 0600);
-  write(s, str, 256);
-  close(s);
-
-  s = open(get_fname("data"), O_RDONLY, 0);
-  eof = 0;
-  errno = 0; /* XXXX */
-  i = read_to_buf(s, 10, buf, &eof);
-  printf("%s\n", strerror(errno));
-  test_eq(i, 10);
-  test_eq(eof, 0);
-  //test_eq(buf_capacity(buf), 4096);
-  test_eq(buf_datalen(buf), 10);
-
-  test_memeq(str, (char*)_buf_peek_raw_buffer(buf), 10);
-
-  /* Test reading 0 bytes. */
-  i = read_to_buf(s, 0, buf, &eof);
-  //test_eq(buf_capacity(buf), 512*1024);
-  test_eq(buf_datalen(buf), 10);
-  test_eq(eof, 0);
-  test_eq(i, 0);
-
-  /* Now test when buffer is filled exactly. */
-  buf2 = buf_new_with_capacity(6);
-  i = read_to_buf(s, 6, buf2, &eof);
-  //test_eq(buf_capacity(buf2), 6);
-  test_eq(buf_datalen(buf2), 6);
-  test_eq(eof, 0);
-  test_eq(i, 6);
-  test_memeq(str+10, (char*)_buf_peek_raw_buffer(buf2), 6);
-  buf_free(buf2);
-  buf2 = NULL;
-
-  /* Now test when buffer is filled with more data to read. */
-  buf2 = buf_new_with_capacity(32);
-  i = read_to_buf(s, 128, buf2, &eof);
-  //test_eq(buf_capacity(buf2), 128);
-  test_eq(buf_datalen(buf2), 32);
-  test_eq(eof, 0);
-  test_eq(i, 32);
-  buf_free(buf2);
-  buf2 = NULL;
-
-  /* Now read to eof. */
-  test_assert(buf_capacity(buf) > 256);
-  i = read_to_buf(s, 1024, buf, &eof);
-  test_eq(i, (256-32-10-6));
-  test_eq(buf_capacity(buf), MAX_BUF_SIZE);
-  test_eq(buf_datalen(buf), 256-6-32);
-  test_memeq(str, (char*)_buf_peek_raw_buffer(buf), 10); /* XXX Check rest. */
-  test_eq(eof, 0);
-
-  i = read_to_buf(s, 1024, buf, &eof);
-  test_eq(i, 0);
-  test_eq(buf_capacity(buf), MAX_BUF_SIZE);
-  test_eq(buf_datalen(buf), 256-6-32);
-  test_eq(eof, 1);
-  }
-#endif
-
  done:
   if (buf)
     buf_free(buf);
@@ -468,7 +416,6 @@ test_circuit_timeout(void)
   circuit_build_times_t final;
   double timeout1, timeout2;
   or_state_t state;
-  char *msg;
   int i, runs;
   double close_ms;
   circuit_build_times_init(&initial);
@@ -508,7 +455,7 @@ test_circuit_timeout(void)
   test_assert(estimate.total_build_times <= CBT_NCIRCUITS_TO_OBSERVE);
 
   circuit_build_times_update_state(&estimate, &state);
-  test_assert(circuit_build_times_parse_state(&final, &state, &msg) == 0);
+  test_assert(circuit_build_times_parse_state(&final, &state) == 0);
 
   circuit_build_times_update_alpha(&final);
   timeout2 = circuit_build_times_calculate_timeout(&final,
@@ -610,7 +557,7 @@ test_circuit_timeout(void)
     circuit_build_times_count_timeout(&final, 1);
   }
 
-done:
+ done:
   return;
 }
 
@@ -1019,7 +966,7 @@ test_rend_fns(void)
                   intro->extend_info->identity_digest, DIGEST_LEN);
     /* Does not cover all IP addresses. */
     tor_addr_from_ipv4h(&intro->extend_info->addr, crypto_rand_int(65536));
-    intro->extend_info->port = crypto_rand_int(65536);
+    intro->extend_info->port = 1 + crypto_rand_int(65535);
     intro->intro_key = crypto_pk_dup_key(pk2);
     smartlist_add(generated->intro_nodes, intro);
   }
@@ -1098,10 +1045,12 @@ test_geoip(void)
   test_eq(0, geoip_parse_entry("\"150\",\"190\",\"XY\""));
   test_eq(0, geoip_parse_entry("\"200\",\"250\",\"AB\""));
 
-  /* We should have 3 countries: ab, xy, zz. */
-  test_eq(3, geoip_get_n_countries());
+  /* We should have 4 countries: ??, ab, xy, zz. */
+  test_eq(4, geoip_get_n_countries());
   /* Make sure that country ID actually works. */
 #define NAMEFOR(x) geoip_get_country_name(geoip_get_country_by_ip(x))
+  test_streq("??", NAMEFOR(3));
+  test_eq(0, geoip_get_country_by_ip(3));
   test_streq("ab", NAMEFOR(32));
   test_streq("??", NAMEFOR(5));
   test_streq("??", NAMEFOR(51));
@@ -1123,18 +1072,67 @@ test_geoip(void)
   /* and 17 observations in ZZ... */
   for (i=110; i < 127; ++i)
     geoip_note_client_seen(GEOIP_CLIENT_CONNECT, i, now);
-  s = geoip_get_client_history_bridge(now+5*24*60*60,
-                                      GEOIP_CLIENT_CONNECT);
+  s = geoip_get_client_history(GEOIP_CLIENT_CONNECT);
   test_assert(s);
   test_streq("zz=24,ab=16,xy=8", s);
   tor_free(s);
 
   /* Now clear out all the AB observations. */
   geoip_remove_old_clients(now-6000);
-  s = geoip_get_client_history_bridge(now+5*24*60*60,
-                                      GEOIP_CLIENT_CONNECT);
+  s = geoip_get_client_history(GEOIP_CLIENT_CONNECT);
   test_assert(s);
   test_streq("zz=24,xy=8", s);
+
+ done:
+  tor_free(s);
+}
+
+/** Run unit tests for stats code. */
+static void
+test_stats(void)
+{
+  time_t now = 1281533250; /* 2010-08-11 13:27:30 UTC */
+  char *s = NULL;
+
+  /* We shouldn't collect exit stats without initializing them. */
+  rep_hist_note_exit_stream_opened(80);
+  rep_hist_note_exit_bytes(80, 100, 10000);
+  s = rep_hist_format_exit_stats(now + 86400);
+  test_assert(!s);
+
+  /* Initialize stats, note some streams and bytes, and generate history
+   * string. */
+  rep_hist_exit_stats_init(now);
+  rep_hist_note_exit_stream_opened(80);
+  rep_hist_note_exit_bytes(80, 100, 10000);
+  rep_hist_note_exit_stream_opened(443);
+  rep_hist_note_exit_bytes(443, 100, 10000);
+  rep_hist_note_exit_bytes(443, 100, 10000);
+  s = rep_hist_format_exit_stats(now + 86400);
+  test_streq("exit-stats-end 2010-08-12 13:27:30 (86400 s)\n"
+             "exit-kibibytes-written 80=1,443=1,other=0\n"
+             "exit-kibibytes-read 80=10,443=20,other=0\n"
+             "exit-streams-opened 80=4,443=4,other=0\n", s);
+  tor_free(s);
+
+  /* Stop collecting stats, add some bytes, and ensure we don't generate
+   * a history string. */
+  rep_hist_exit_stats_term();
+  rep_hist_note_exit_bytes(80, 100, 10000);
+  s = rep_hist_format_exit_stats(now + 86400);
+  test_assert(!s);
+
+  /* Re-start stats, add some bytes, reset stats, and see what history we
+   *  get when observing no streams or bytes at all. */
+  rep_hist_exit_stats_init(now);
+  rep_hist_note_exit_stream_opened(80);
+  rep_hist_note_exit_bytes(80, 100, 10000);
+  rep_hist_reset_exit_stats(now);
+  s = rep_hist_format_exit_stats(now + 86400);
+  test_streq("exit-stats-end 2010-08-12 13:27:30 (86400 s)\n"
+             "exit-kibibytes-written other=0\n"
+             "exit-kibibytes-read other=0\n"
+             "exit-streams-opened other=0\n", s);
 
  done:
   tor_free(s);
@@ -1172,6 +1170,8 @@ const struct testcase_setup_t legacy_setup = {
       test_ ## group ## _ ## name }
 #define DISABLED(name)                                                  \
   { #name, legacy_test_helper, TT_SKIP, &legacy_setup, name }
+#define FORK(name)                                                      \
+  { #name, legacy_test_helper, TT_FORK, &legacy_setup, test_ ## name }
 
 static struct testcase_t test_array[] = {
   ENT(buffers),
@@ -1180,6 +1180,7 @@ static struct testcase_t test_array[] = {
   ENT(policies),
   ENT(rend_fns),
   ENT(geoip),
+  FORK(stats),
 
   DISABLED(bench_aes),
   DISABLED(bench_dmap),

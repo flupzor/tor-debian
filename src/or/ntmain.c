@@ -5,6 +5,9 @@
 
 #define MAIN_PRIVATE
 #include "or.h"
+#include "config.h"
+#include "main.h"
+#include "ntmain.h"
 
 #ifdef HAVE_EVENT2_EVENT_H
 #include <event2/event.h>

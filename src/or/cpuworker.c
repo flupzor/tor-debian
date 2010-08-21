@@ -13,6 +13,15 @@
  **/
 
 #include "or.h"
+#include "buffers.h"
+#include "circuitbuild.h"
+#include "circuitlist.h"
+#include "config.h"
+#include "connection.h"
+#include "cpuworker.h"
+#include "main.h"
+#include "onion.h"
+#include "router.h"
 
 /** The maximum number of cpuworker processes we will keep around. */
 #define MAX_CPUWORKERS 16
@@ -183,7 +192,7 @@ connection_cpu_process_inbuf(connection_t *conn)
     tor_assert(0); /* don't ask me to do handshakes yet */
   }
 
-done_processing:
+ done_processing:
   conn->state = CPUWORKER_STATE_IDLE;
   num_cpuworkers_busy--;
   if (conn->timestamp_created < last_rotation_time) {

@@ -12,6 +12,24 @@
 #define CIRCUIT_PRIVATE
 
 #include "or.h"
+#include "circuitbuild.h"
+#include "circuitlist.h"
+#include "circuituse.h"
+#include "config.h"
+#include "connection.h"
+#include "connection_edge.h"
+#include "connection_or.h"
+#include "control.h"
+#include "directory.h"
+#include "main.h"
+#include "networkstatus.h"
+#include "onion.h"
+#include "policies.h"
+#include "relay.h"
+#include "rephist.h"
+#include "router.h"
+#include "routerlist.h"
+#include "routerparse.h"
 #include "crypto.h"
 #undef log
 #include <math.h>
@@ -587,19 +605,19 @@ circuit_build_times_filter_timeouts(circuit_build_times_t *cbt)
  * after we do so. Use this result to estimate parameters and
  * calculate the timeout.
  *
- * Returns -1 and sets msg on error. Msg must be freed by the caller.
+ * Return -1 on error.
  */
 int
 circuit_build_times_parse_state(circuit_build_times_t *cbt,
-                                or_state_t *state, char **msg)
+                                or_state_t *state)
 {
   int tot_values = 0;
   uint32_t loaded_cnt = 0, N = 0;
   config_line_t *line;
   unsigned int i;
   build_time_t *loaded_times;
+  int err = 0;
   circuit_build_times_init(cbt);
-  *msg = NULL;
 
   if (circuit_build_times_disabled()) {
     return 0;
@@ -613,8 +631,9 @@ circuit_build_times_parse_state(circuit_build_times_t *cbt,
     smartlist_split_string(args, line->value, " ",
                            SPLIT_SKIP_SPACE|SPLIT_IGNORE_BLANK, 0);
     if (smartlist_len(args) < 2) {
-      *msg = tor_strdup("Unable to parse circuit build times: "
-                        "Too few arguments to CircuitBuildTime");
+      log_warn(LD_GENERAL, "Unable to parse circuit build times: "
+                           "Too few arguments to CircuitBuildTime");
+      err = 1;
       SMARTLIST_FOREACH(args, char*, cp, tor_free(cp));
       smartlist_free(args);
       break;
@@ -627,8 +646,9 @@ circuit_build_times_parse_state(circuit_build_times_t *cbt,
       ms = (build_time_t)tor_parse_ulong(ms_str, 0, 0,
                                          CBT_BUILD_TIME_MAX, &ok, NULL);
       if (!ok) {
-        *msg = tor_strdup("Unable to parse circuit build times: "
-                          "Unparsable bin number");
+        log_warn(LD_GENERAL, "Unable to parse circuit build times: "
+                             "Unparsable bin number");
+        err = 1;
         SMARTLIST_FOREACH(args, char*, cp, tor_free(cp));
         smartlist_free(args);
         break;
@@ -636,8 +656,9 @@ circuit_build_times_parse_state(circuit_build_times_t *cbt,
       count = (uint32_t)tor_parse_ulong(count_str, 0, 0,
                                         UINT32_MAX, &ok, NULL);
       if (!ok) {
-        *msg = tor_strdup("Unable to parse circuit build times: "
-                          "Unparsable bin count");
+        log_warn(LD_GENERAL, "Unable to parse circuit build times: "
+                             "Unparsable bin count");
+        err = 1;
         SMARTLIST_FOREACH(args, char*, cp, tor_free(cp));
         smartlist_free(args);
         break;
@@ -674,10 +695,9 @@ circuit_build_times_parse_state(circuit_build_times_t *cbt,
             "Corrupt state file? Build times count mismatch. "
             "Read %d times, but file says %d", loaded_cnt,
             state->TotalBuildTimes);
-    *msg = tor_strdup("Build times count mismatch.");
+    err = 1;
     circuit_build_times_reset(cbt);
-    tor_free(loaded_times);
-    return -1;
+    goto done;
   }
 
   circuit_build_times_shuffle_and_store_array(cbt, loaded_times, loaded_cnt);
@@ -698,10 +718,9 @@ circuit_build_times_parse_state(circuit_build_times_t *cbt,
             "Corrupt state file? Shuffled build times mismatch. "
             "Read %d times, but file says %d", tot_values,
             state->TotalBuildTimes);
-    *msg = tor_strdup("Build times count mismatch.");
+    err = 1;
     circuit_build_times_reset(cbt);
-    tor_free(loaded_times);
-    return -1;
+    goto done;
   }
 
   circuit_build_times_set_timeout(cbt);
@@ -710,8 +729,9 @@ circuit_build_times_parse_state(circuit_build_times_t *cbt,
     circuit_build_times_filter_timeouts(cbt);
   }
 
+ done:
   tor_free(loaded_times);
-  return *msg ? -1 : 0;
+  return err ? -1 : 0;
 }
 
 /**
@@ -1494,7 +1514,7 @@ static int
 onion_populate_cpath(origin_circuit_t *circ)
 {
   int r;
-again:
+ again:
   r = onion_extend_cpath(circ);
   if (r < 0) {
     log_info(LD_CIRC,"Generating cpath hop failed.");
@@ -2338,7 +2358,7 @@ new_route_len(uint8_t purpose, extend_info_t *exit,
 
   tor_assert(routers);
 
-  routelen = 3;
+  routelen = DEFAULT_ROUTE_LEN;
   if (exit &&
       purpose != CIRCUIT_PURPOSE_TESTING &&
       purpose != CIRCUIT_PURPOSE_S_ESTABLISH_INTRO)
@@ -4240,9 +4260,12 @@ entry_guards_update_state(or_state_t *state)
  * */
 int
 getinfo_helper_entry_guards(control_connection_t *conn,
-                            const char *question, char **answer)
+                            const char *question, char **answer,
+                            const char **errmsg)
 {
   (void) conn;
+  (void) errmsg;
+
   if (!strcmp(question,"entry-guards") ||
       !strcmp(question,"helper-nodes")) {
     smartlist_t *sl = smartlist_create();
