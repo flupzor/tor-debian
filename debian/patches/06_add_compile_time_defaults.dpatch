@@ -31,9 +31,9 @@ diff -urNad tor~/src/or/config.c tor/src/or/config.c
  
  #include "or.h"
 +#include <pwd.h>
- #ifdef MS_WINDOWS
- #include <shlobj.h>
- #endif
+ #include "circuitbuild.h"
+ #include "circuitlist.h"
+ #include "config.h"
 @@ -717,6 +718,9 @@
  static void init_libevent(void);
  static int opt_streq(const char *s1, const char *s2);

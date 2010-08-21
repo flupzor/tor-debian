@@ -1,8 +1,9 @@
 tor (0.2.2.15-alpha-1) experimental; urgency=low
 
   * New upstream version.
+  * Forward port 06_add_compile_time_defaults.
 
- -- Peter Palfrader <weasel@debian.org>  Sat, 21 Aug 2010 10:37:19 +0200
+ -- Peter Palfrader <weasel@debian.org>  Sat, 21 Aug 2010 10:39:41 +0200
 
 tor (0.2.2.14-alpha-1) experimental; urgency=low
 
