@@ -50,7 +50,7 @@
 
 #define CRYPTO_PRIVATE
 #include "crypto.h"
-#include "../common/log.h"
+#include "../common/torlog.h"
 #include "aes.h"
 #include "../common/util.h"
 #include "container.h"
@@ -779,13 +779,24 @@ crypto_pk_env_t *
 crypto_pk_copy_full(crypto_pk_env_t *env)
 {
   RSA *new_key;
+  int privatekey = 0;
   tor_assert(env);
   tor_assert(env->key);
 
   if (PRIVATE_KEY_OK(env)) {
     new_key = RSAPrivateKey_dup(env->key);
+    privatekey = 1;
   } else {
     new_key = RSAPublicKey_dup(env->key);
+  }
+  if (!new_key) {
+    log_err(LD_CRYPTO, "Unable to duplicate a %s key: openssl failed.",
+            privatekey?"private":"public");
+    crypto_log_errors(LOG_ERR,
+                      privatekey ? "Duplicating a private key" :
+                      "Duplicating a public key");
+    tor_fragile_assert();
+    return NULL;
   }
 
   return _crypto_new_pk_env_rsa(new_key);
@@ -2054,6 +2065,26 @@ crypto_rand_uint64(uint64_t max)
     if (val < cutoff)
       return val % max;
   }
+}
+
+/** Return a pseudorandom double d, chosen uniformly from the range
+ * 0.0 <= d < 1.0.
+ */
+double
+crypto_rand_double(void)
+{
+  /* We just use an unsigned int here; we don't really care about getting
+   * more than 32 bits of resolution */
+  unsigned int uint;
+  crypto_rand((char*)&uint, sizeof(uint));
+#if SIZEOF_INT == 4
+#define UINT_MAX_AS_DOUBLE 4294967296.0
+#elif SIZEOF_INT == 8
+#define UINT_MAX_AS_DOUBLE 1.8446744073709552e+19
+#else
+#error SIZEOF_INT is neither 4 nor 8
+#endif
+  return ((double)uint) / UINT_MAX_AS_DOUBLE;
 }
 
 /** Generate and return a new random hostname starting with <b>prefix</b>,

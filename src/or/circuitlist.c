@@ -10,6 +10,21 @@
  **/
 
 #include "or.h"
+#include "circuitbuild.h"
+#include "circuitlist.h"
+#include "circuituse.h"
+#include "connection.h"
+#include "config.h"
+#include "connection_edge.h"
+#include "connection_or.h"
+#include "control.h"
+#include "networkstatus.h"
+#include "onion.h"
+#include "relay.h"
+#include "rendclient.h"
+#include "rendcommon.h"
+#include "rephist.h"
+#include "routerlist.h"
 #include "ht.h"
 
 /********* START VARIABLES **********/
@@ -352,6 +367,8 @@ circuit_purpose_to_controller_string(uint8_t purpose)
 
     case CIRCUIT_PURPOSE_TESTING:
       return "TESTING";
+    case CIRCUIT_PURPOSE_C_MEASURE_TIMEOUT:
+      return "EXPIRED";
     case CIRCUIT_PURPOSE_CONTROLLER:
       return "CONTROLLER";
 
@@ -905,6 +922,10 @@ circuit_find_to_cannibalize(uint8_t purpose, extend_info_t *info,
   int need_capacity = (flags & CIRCLAUNCH_NEED_CAPACITY) != 0;
   int internal = (flags & CIRCLAUNCH_IS_INTERNAL) != 0;
 
+  /* Make sure we're not trying to create a onehop circ by
+   * cannibalization. */
+  tor_assert(!(flags & CIRCLAUNCH_ONEHOP_TUNNEL));
+
   log_debug(LD_CIRC,
             "Hunting for a circ to cannibalize: purpose %d, uptime %d, "
             "capacity %d, internal %d",
@@ -920,7 +941,8 @@ circuit_find_to_cannibalize(uint8_t purpose, extend_info_t *info,
       if ((!need_uptime || circ->build_state->need_uptime) &&
           (!need_capacity || circ->build_state->need_capacity) &&
           (internal == circ->build_state->is_internal) &&
-          circ->remaining_relay_early_cells) {
+          circ->remaining_relay_early_cells &&
+          !circ->build_state->onehop_tunnel) {
         if (info) {
           /* need to make sure we don't duplicate hops */
           crypt_path_t *hop = circ->cpath;

@@ -12,6 +12,25 @@
  **/
 
 #include "or.h"
+#include "circuitbuild.h"
+#include "config.h"
+#include "connection.h"
+#include "control.h"
+#include "directory.h"
+#include "dirserv.h"
+#include "dirvote.h"
+#include "geoip.h"
+#include "hibernate.h"
+#include "main.h"
+#include "networkstatus.h"
+#include "policies.h"
+#include "reasons.h"
+#include "rendcommon.h"
+#include "rendservice.h"
+#include "rephist.h"
+#include "router.h"
+#include "routerlist.h"
+#include "routerparse.h"
 
 // #define DEBUG_ROUTERLIST
 
@@ -1652,7 +1671,7 @@ smartlist_choose_by_bandwidth_weights(smartlist_t *sl,
 
   // Cycle through smartlist and total the bandwidth.
   for (i = 0; i < (unsigned)smartlist_len(sl); ++i) {
-    int is_exit = 0, is_guard = 0, is_dir = 0, this_bw = 0;
+    int is_exit = 0, is_guard = 0, is_dir = 0, this_bw = 0, is_me = 0;
     double weight = 1;
     if (statuses) {
       routerstatus_t *status = smartlist_get(sl, i);
@@ -1669,6 +1688,8 @@ smartlist_choose_by_bandwidth_weights(smartlist_t *sl,
         return NULL;
       }
       this_bw = kb_to_bytes(status->bandwidth);
+      if (router_digest_is_me(status->identity_digest))
+        is_me = 1;
     } else {
       routerstatus_t *rs;
       routerinfo_t *router = smartlist_get(sl, i);
@@ -1682,6 +1703,8 @@ smartlist_choose_by_bandwidth_weights(smartlist_t *sl,
       } else { /* bridge or other descriptor not in our consensus */
         this_bw = router_get_advertised_bandwidth_capped(router);
       }
+      if (router_digest_is_me(router->cache_info.identity_digest))
+        is_me = 1;
     }
     if (is_guard && is_exit) {
       weight = (is_dir ? Wdb*Wd : Wd);
@@ -1695,7 +1718,12 @@ smartlist_choose_by_bandwidth_weights(smartlist_t *sl,
 
     bandwidths[i] = weight*this_bw;
     weighted_bw += weight*this_bw;
+    if (is_me)
+      sl_last_weighted_bw_of_me = weight*this_bw;
   }
+
+  /* XXXX022 this is a kludge to expose these values. */
+  sl_last_total_weighted_bw = weighted_bw;
 
   log_debug(LD_CIRC, "Choosing node for rule %s based on weights "
             "Wg=%lf Wm=%lf We=%lf Wd=%lf with total bw %lf",
@@ -3123,15 +3151,23 @@ router_add_to_routerlist(routerinfo_t *router, const char **msg,
 
   id_digest = router->cache_info.identity_digest;
 
+  old_router = router_get_by_digest(id_digest);
+
   /* Make sure that we haven't already got this exact descriptor. */
   if (sdmap_get(routerlist->desc_digest_map,
                 router->cache_info.signed_descriptor_digest)) {
-    log_info(LD_DIR,
-             "Dropping descriptor that we already have for router '%s'",
-             router->nickname);
-    *msg = "Router descriptor was not new.";
-    routerinfo_free(router);
-    return ROUTER_WAS_NOT_NEW;
+    /* If we have this descriptor already and the new descriptor is a bridge
+     * descriptor, replace it. If we had a bridge descriptor before and the
+     * new one is not a bridge descriptor, don't replace it. */
+    if (old_router && (!routerinfo_is_a_configured_bridge(router) ||
+                routerinfo_is_a_configured_bridge(old_router))) {
+      log_info(LD_DIR,
+               "Dropping descriptor that we already have for router '%s'",
+               router->nickname);
+      *msg = "Router descriptor was not new.";
+      routerinfo_free(router);
+      return ROUTER_WAS_NOT_NEW;
+    }
   }
 
   if (authdir) {
@@ -3168,15 +3204,14 @@ router_add_to_routerlist(routerinfo_t *router, const char **msg,
   SMARTLIST_FOREACH(networkstatus_v2_list, networkstatus_v2_t *, ns,
   {
     routerstatus_t *rs =
-      networkstatus_v2_find_entry(ns, router->cache_info.identity_digest);
+      networkstatus_v2_find_entry(ns, id_digest);
     if (rs && !memcmp(rs->descriptor_digest,
                       router->cache_info.signed_descriptor_digest,
                       DIGEST_LEN))
       rs->need_to_mirror = 0;
   });
   if (consensus) {
-    routerstatus_t *rs = networkstatus_vote_find_entry(consensus,
-                                        router->cache_info.identity_digest);
+    routerstatus_t *rs = networkstatus_vote_find_entry(consensus, id_digest);
     if (rs && !memcmp(rs->descriptor_digest,
                       router->cache_info.signed_descriptor_digest,
                       DIGEST_LEN)) {
@@ -3198,13 +3233,11 @@ router_add_to_routerlist(routerinfo_t *router, const char **msg,
   }
 
   /* If we have a router with the same identity key, choose the newer one. */
-  old_router = rimap_get(routerlist->identity_map,
-                         router->cache_info.identity_digest);
   if (old_router) {
     if (!in_consensus && (router->cache_info.published_on <=
                           old_router->cache_info.published_on)) {
       /* Same key, but old.  This one is not listed in the consensus. */
-      log_debug(LD_DIR, "Skipping not-new descriptor for router '%s'",
+      log_debug(LD_DIR, "Not-new descriptor for router '%s'",
                 router->nickname);
       /* Only journal this desc if we'll be serving it. */
       if (!from_cache && should_cache_old_descriptors())
@@ -3247,9 +3280,15 @@ router_add_to_routerlist(routerinfo_t *router, const char **msg,
   /* We haven't seen a router with this identity before. Add it to the end of
    * the list. */
   routerlist_insert(routerlist, router);
-  if (!from_cache)
+  if (!from_cache) {
+    if (authdir) {
+      /* launch an immediate reachability test, so we will have an opinion
+       * soon in case we're generating a consensus soon */
+      dirserv_single_reachability_test(time(NULL), router);
+    }
     signed_desc_append_to_journal(&router->cache_info,
                                   &routerlist->desc_store);
+  }
   directory_set_dirty();
   return ROUTER_ADDED_SUCCESSFULLY;
 }
@@ -4403,12 +4442,16 @@ update_consensus_router_descriptor_downloads(time_t now, int is_vote,
         continue; /* We would never use it ourself. */
       }
       if (is_vote && source) {
-        char time_buf[ISO_TIME_LEN+1];
-        format_iso_time(time_buf, rs->published_on);
-        log_info(LD_DIR, "Learned about %s (%s) from %s's vote (%s)",
-                 rs->nickname, time_buf, source->nickname,
-                 router_get_by_digest(rs->identity_digest) ? "known" :
-                                                             "unknown");
+        char time_bufnew[ISO_TIME_LEN+1];
+        char time_bufold[ISO_TIME_LEN+1];
+        routerinfo_t *oldrouter = router_get_by_digest(rs->identity_digest);
+        format_iso_time(time_bufnew, rs->published_on);
+        if (oldrouter)
+          format_iso_time(time_bufold, oldrouter->cache_info.published_on);
+        log_info(LD_DIR, "Learned about %s (%s vs %s) from %s's vote (%s)",
+                 rs->nickname, time_bufnew,
+                 oldrouter ? time_bufold : "none",
+                 source->nickname, oldrouter ? "known" : "unknown");
       }
       smartlist_add(downloadable, rs->descriptor_digest);
     });

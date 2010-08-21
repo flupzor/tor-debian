@@ -11,6 +11,22 @@
  **/
 
 #include "or.h"
+#include "buffers.h"
+#include "circuitbuild.h"
+#include "command.h"
+#include "config.h"
+#include "connection.h"
+#include "connection_or.h"
+#include "control.h"
+#include "dirserv.h"
+#include "geoip.h"
+#include "main.h"
+#include "networkstatus.h"
+#include "reasons.h"
+#include "relay.h"
+#include "rephist.h"
+#include "router.h"
+#include "routerlist.h"
 
 static int connection_tls_finish_handshake(or_connection_t *conn);
 static int connection_or_process_cells_from_inbuf(or_connection_t *conn);
@@ -333,21 +349,18 @@ connection_or_digest_is_known_relay(const char *id_digest)
   return 0;
 }
 
-/** If we don't necessarily know the router we're connecting to, but we
- * have an addr/port/id_digest, then fill in as much as we can. Start
- * by checking to see if this describes a router we know. */
+/** Set the per-conn read and write limits for <b>conn</b>. If it's a known
+ * relay, we will rely on the global read and write buckets, so give it
+ * per-conn limits that are big enough they'll never matter. But if it's
+ * not a known relay, first check if we set PerConnBwRate/Burst, then
+ * check if the consensus sets them, else default to 'big enough'.
+ */
 static void
-connection_or_init_conn_from_address(or_connection_t *conn,
-                                     const tor_addr_t *addr, uint16_t port,
-                                     const char *id_digest,
-                                     int started_here)
+connection_or_update_token_buckets_helper(or_connection_t *conn, int reset,
+                                          or_options_t *options)
 {
-  or_options_t *options = get_options();
   int rate, burst; /* per-connection rate limiting params */
-  routerinfo_t *r = router_get_by_digest(id_digest);
-  connection_or_set_identity_digest(conn, id_digest);
-
-  if (connection_or_digest_is_known_relay(id_digest)) {
+  if (connection_or_digest_is_known_relay(conn->identity_digest)) {
     /* It's in the consensus, or we have a descriptor for it meaning it
      * was probably in a recent consensus. It's a recognized relay:
      * give it full bandwidth. */
@@ -366,7 +379,43 @@ connection_or_init_conn_from_address(or_connection_t *conn,
   }
 
   conn->bandwidthrate = rate;
-  conn->read_bucket = conn->write_bucket = conn->bandwidthburst = burst;
+  conn->bandwidthburst = burst;
+  if (reset) { /* set up the token buckets to be full */
+    conn->read_bucket = conn->write_bucket = burst;
+    return;
+  }
+  /* If the new token bucket is smaller, take out the extra tokens.
+   * (If it's larger, don't -- the buckets can grow to reach the cap.) */
+  if (conn->read_bucket > burst)
+    conn->read_bucket = burst;
+  if (conn->write_bucket > burst)
+    conn->write_bucket = burst;
+}
+
+/** Either our set of relays or our per-conn rate limits have changed.
+ * Go through all the OR connections and update their token buckets. */
+void
+connection_or_update_token_buckets(smartlist_t *conns, or_options_t *options)
+{
+  SMARTLIST_FOREACH(conns, connection_t *, conn,
+  {
+    if (connection_speaks_cells(conn))
+      connection_or_update_token_buckets_helper(TO_OR_CONN(conn), 0, options);
+  });
+}
+
+/** If we don't necessarily know the router we're connecting to, but we
+ * have an addr/port/id_digest, then fill in as much as we can. Start
+ * by checking to see if this describes a router we know. */
+static void
+connection_or_init_conn_from_address(or_connection_t *conn,
+                                     const tor_addr_t *addr, uint16_t port,
+                                     const char *id_digest,
+                                     int started_here)
+{
+  routerinfo_t *r = router_get_by_digest(id_digest);
+  connection_or_set_identity_digest(conn, id_digest);
+  connection_or_update_token_buckets_helper(conn, 1, get_options());
 
   conn->_base.port = port;
   tor_addr_copy(&conn->_base.addr, addr);
@@ -608,7 +657,7 @@ connection_or_group_set_badness(or_connection_t *head)
       /* We have at least one open canonical connection to this router,
        * and this one is open but not canonical.  Mark it bad. */
       log_info(LD_OR,
-               "Marking OR conn to %s:%d as too old for new circuits: "
+               "Marking OR conn to %s:%d as unsuitable for new circuits: "
                "(fd %d, %d secs old).  It is not canonical, and we have "
                "another connection to that OR that is.",
                or_conn->_base.address, or_conn->_base.port, or_conn->_base.s,
@@ -648,7 +697,7 @@ connection_or_group_set_badness(or_connection_t *head)
          even when we're being forgiving. */
       if (best->is_canonical) {
         log_info(LD_OR,
-                 "Marking OR conn to %s:%d as too old for new circuits: "
+                 "Marking OR conn to %s:%d as unsuitable for new circuits: "
                  "(fd %d, %d secs old).  We have a better canonical one "
                  "(fd %d; %d secs old).",
                  or_conn->_base.address, or_conn->_base.port, or_conn->_base.s,
@@ -658,9 +707,9 @@ connection_or_group_set_badness(or_connection_t *head)
       } else if (!tor_addr_compare(&or_conn->real_addr,
                                    &best->real_addr, CMP_EXACT)) {
         log_info(LD_OR,
-                 "Marking OR conn to %s:%d as too old for new circuits: "
-                 "(fd %d, %d secs old).  We have a better one "
-                 "(fd %d; %d secs old).",
+                 "Marking OR conn to %s:%d as unsuitable for new circuits: "
+                 "(fd %d, %d secs old).  We have a better one with the "
+                 "same address (fd %d; %d secs old).",
                  or_conn->_base.address, or_conn->_base.port, or_conn->_base.s,
                  (int)(now - or_conn->_base.timestamp_created),
                  best->_base.s, (int)(now - best->_base.timestamp_created));
@@ -926,16 +975,19 @@ connection_or_nonopen_was_started_here(or_connection_t *conn)
  * the certificate to be weird or absent.
  *
  * If we return 0, and the certificate is as expected, write a hash of the
- * identity key into digest_rcvd, which must have DIGEST_LEN space in it. (If
- * we return -1 this buffer is undefined.)  If the certificate is invalid
- * or missing on an incoming connection, we return 0 and set digest_rcvd to
- * DIGEST_LEN 0 bytes.
+ * identity key into <b>digest_rcvd_out</b>, which must have DIGEST_LEN
+ * space in it.
+ * If the certificate is invalid or missing on an incoming connection,
+ * we return 0 and set <b>digest_rcvd_out</b> to DIGEST_LEN NUL bytes.
+ * (If we return -1, the contents of this buffer are undefined.)
  *
  * As side effects,
  * 1) Set conn->circ_id_type according to tor-spec.txt.
  * 2) If we're an authdirserver and we initiated the connection: drop all
  *    descriptors that claim to be on that IP/port but that aren't
  *    this guy; and note that this guy is reachable.
+ * 3) If this is a bridge and we didn't configure its identity
+ *    fingerprint, remember the keyid we just learned.
  */
 static int
 connection_or_check_valid_tls_handshake(or_connection_t *conn,
@@ -1007,6 +1059,10 @@ connection_or_check_valid_tls_handshake(or_connection_t *conn,
     log_info(LD_HANDSHAKE, "Connected to router %s at %s:%d without knowing "
                     "its key. Hoping for the best.",
                     conn->nickname, conn->_base.address, conn->_base.port);
+    /* if it's a bridge and we didn't know its identity fingerprint, now
+     * we do -- remember it for future attempts. */
+    learned_router_identity(&conn->_base.addr, conn->_base.port,
+                            digest_rcvd_out);
   }
 
   if (started_here) {

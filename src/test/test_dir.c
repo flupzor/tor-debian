@@ -8,6 +8,13 @@
 #define DIRVOTE_PRIVATE
 #define ROUTER_PRIVATE
 #include "or.h"
+#include "directory.h"
+#include "dirserv.h"
+#include "dirvote.h"
+#include "networkstatus.h"
+#include "router.h"
+#include "routerlist.h"
+#include "routerparse.h"
 #include "test.h"
 
 static void
@@ -573,7 +580,7 @@ test_dir_measured_bw(void)
                 "557365204145532d32353620696e73746561642e") == 0);
   }
 
-done:
+ done:
   return;
 }
 

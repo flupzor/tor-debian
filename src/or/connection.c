@@ -11,6 +11,30 @@
  **/
 
 #include "or.h"
+#include "buffers.h"
+#include "circuitbuild.h"
+#include "circuitlist.h"
+#include "circuituse.h"
+#include "config.h"
+#include "connection.h"
+#include "connection_edge.h"
+#include "connection_or.h"
+#include "control.h"
+#include "cpuworker.h"
+#include "directory.h"
+#include "dirserv.h"
+#include "dns.h"
+#include "dnsserv.h"
+#include "geoip.h"
+#include "main.h"
+#include "policies.h"
+#include "reasons.h"
+#include "relay.h"
+#include "rendclient.h"
+#include "rendcommon.h"
+#include "rephist.h"
+#include "router.h"
+#include "routerparse.h"
 
 static connection_t *connection_create_listener(
                                struct sockaddr *listensockaddr,
@@ -2058,8 +2082,6 @@ static void
 connection_buckets_decrement(connection_t *conn, time_t now,
                              size_t num_read, size_t num_written)
 {
-  if (!connection_is_rate_limited(conn))
-    return; /* local IPs are free */
   if (num_written >= INT_MAX || num_read >= INT_MAX) {
     log_err(LD_BUG, "Value out of range. num_read=%lu, num_written=%lu, "
              "connection type=%s, state=%s",
@@ -2071,16 +2093,24 @@ connection_buckets_decrement(connection_t *conn, time_t now,
     tor_fragile_assert();
   }
 
+  /* Count bytes of answering direct and tunneled directory requests */
+  if (conn->type == CONN_TYPE_DIR && conn->purpose == DIR_PURPOSE_SERVER) {
+    if (num_read > 0)
+      rep_hist_note_dir_bytes_read(num_read, now);
+    if (num_written > 0)
+      rep_hist_note_dir_bytes_written(num_written, now);
+  }
+
+  if (!connection_is_rate_limited(conn))
+    return; /* local IPs are free */
   if (num_read > 0) {
-    if (conn->type == CONN_TYPE_EXIT)
-      rep_hist_note_exit_bytes_read(conn->port, num_read);
     rep_hist_note_bytes_read(num_read, now);
   }
   if (num_written > 0) {
-    if (conn->type == CONN_TYPE_EXIT)
-      rep_hist_note_exit_bytes_written(conn->port, num_written);
     rep_hist_note_bytes_written(num_written, now);
   }
+  if (conn->type == CONN_TYPE_EXIT)
+    rep_hist_note_exit_bytes(conn->port, num_written, num_read);
 
   if (connection_counts_as_relayed_traffic(conn, now)) {
     global_relayed_read_bucket -= (int)num_read;
@@ -2331,7 +2361,7 @@ connection_handle_read_impl(connection_t *conn)
       return 0;
   }
 
-loop_again:
+ loop_again:
   try_to_read = max_to_read;
   tor_assert(!conn->marked_for_close);
 
@@ -2377,8 +2407,12 @@ loop_again:
     connection_t *linked = conn->linked_conn;
 
     if (n_read) {
-      /* Probably a no-op, but hey. */
-      connection_buckets_decrement(linked, approx_time(), n_read, 0);
+      /* Probably a no-op, since linked conns typically don't count for
+       * bandwidth rate limiting. But do it anyway so we can keep stats
+       * accurately. Note that since we read the bytes from conn, and
+       * we're writing the bytes onto the linked connection, we count
+       * these as <i>written</i> bytes. */
+      connection_buckets_decrement(linked, approx_time(), 0, n_read);
 
       if (connection_flushed_some(linked) < 0)
         connection_mark_for_close(linked);

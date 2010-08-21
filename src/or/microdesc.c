@@ -2,6 +2,9 @@
 /* See LICENSE for licensing information */
 
 #include "or.h"
+#include "config.h"
+#include "microdesc.h"
+#include "routerparse.h"
 
 /** A data structure to hold a bunch of cached microdescriptors.  There are
  * two active files in the cache: a "cache file" that we mmap, and a "journal
@@ -50,7 +53,7 @@ HT_PROTOTYPE(microdesc_map, microdesc_t, node,
              _microdesc_hash, _microdesc_eq);
 HT_GENERATE(microdesc_map, microdesc_t, node,
              _microdesc_hash, _microdesc_eq, 0.6,
-             _tor_malloc, _tor_realloc, _tor_free);
+             malloc, realloc, free);
 
 /** Write the body of <b>md</b> into <b>f</b>, with appropriate annotations.
  * On success, return the total number of bytes written, and set

@@ -12,8 +12,14 @@
  **/
 #define BUFFERS_PRIVATE
 #include "or.h"
+#include "buffers.h"
+#include "config.h"
+#include "connection_edge.h"
+#include "connection_or.h"
+#include "control.h"
+#include "reasons.h"
 #include "../common/util.h"
-#include "../common/log.h"
+#include "../common/torlog.h"
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>
 #endif
@@ -264,14 +270,25 @@ buf_shrink_freelists(int free_all)
         (freelists[i].lowest_length - slack);
       int n_to_skip = freelists[i].cur_length - n_to_free;
       int orig_n_to_free = n_to_free, n_freed=0;
+      int orig_n_to_skip = n_to_skip;
       int new_length = n_to_skip;
       chunk_t **chp = &freelists[i].head;
       chunk_t *chunk;
-      log_info(LD_MM, "Cleaning freelist for %d-byte chunks: keeping %d, "
-               "dropping %d.",
-               (int)freelists[i].alloc_size, n_to_skip, n_to_free);
+      log_info(LD_MM, "Cleaning freelist for %d-byte chunks: length %d, "
+               "keeping %d, dropping %d.",
+               (int)freelists[i].alloc_size, freelists[i].cur_length,
+               n_to_skip, n_to_free);
+      tor_assert(n_to_skip + n_to_free == freelists[i].cur_length);
       while (n_to_skip) {
-        tor_assert((*chp)->next);
+        if (! (*chp)->next) {
+          log_warn(LD_BUG, "I wanted to skip %d chunks in the freelist for "
+                   "%d-byte chunks, but only found %d. (Length %d)",
+                   orig_n_to_skip, (int)freelists[i].alloc_size,
+                   orig_n_to_skip-n_to_skip, freelists[i].cur_length);
+          assert_freelist_ok(&freelists[i]);
+          return;
+        }
+        // tor_assert((*chp)->next);
         chp = &(*chp)->next;
         --n_to_skip;
       }
@@ -1402,19 +1419,21 @@ fetch_from_buf_socks(buf_t *buf, socks_request_t *req,
           if (req->command != SOCKS_COMMAND_RESOLVE_PTR &&
               !addressmap_have_mapping(req->address,0) &&
               !have_warned_about_unsafe_socks) {
-            log_warn(LD_APP,
-                "Your application (using socks5 to port %d) is giving "
-                "Tor only an IP address. Applications that do DNS resolves "
-                "themselves may leak information. Consider using Socks4A "
-                "(e.g. via privoxy or socat) instead. For more information, "
-                "please see https://wiki.torproject.org/TheOnionRouter/"
-                "TorFAQ#SOCKSAndDNS.%s", req->port,
-                safe_socks ? " Rejecting." : "");
-            /*have_warned_about_unsafe_socks = 1;*/
+            if (get_options()->WarnUnsafeSocks) {
+              log_warn(LD_APP,
+                  "Your application (using socks5 to port %d) is giving "
+                  "Tor only an IP address. Applications that do DNS resolves "
+                  "themselves may leak information. Consider using Socks4A "
+                  "(e.g. via privoxy or socat) instead. For more information, "
+                  "please see https://wiki.torproject.org/TheOnionRouter/"
+                  "TorFAQ#SOCKSAndDNS.%s", req->port,
+                  safe_socks ? " Rejecting." : "");
+              /*have_warned_about_unsafe_socks = 1;*/
                                       /*(for now, warn every time)*/
             control_event_client_status(LOG_WARN,
                           "DANGEROUS_SOCKS PROTOCOL=SOCKS5 ADDRESS=%s:%d",
                           req->address, req->port);
+            }
             if (safe_socks)
               return -1;
           }
@@ -1516,7 +1535,8 @@ fetch_from_buf_socks(buf_t *buf, socks_request_t *req,
       if (socks4_prot != socks4a &&
           !addressmap_have_mapping(tmpbuf,0) &&
           !have_warned_about_unsafe_socks) {
-        log_warn(LD_APP,
+        if (get_options()->WarnUnsafeSocks) {
+          log_warn(LD_APP,
                  "Your application (using socks4 to port %d) is giving Tor "
                  "only an IP address. Applications that do DNS resolves "
                  "themselves may leak information. Consider using Socks4A "
@@ -1524,10 +1544,12 @@ fetch_from_buf_socks(buf_t *buf, socks_request_t *req,
                  "please see https://wiki.torproject.org/TheOnionRouter/"
                  "TorFAQ#SOCKSAndDNS.%s", req->port,
                  safe_socks ? " Rejecting." : "");
-        /*have_warned_about_unsafe_socks = 1;*/  /*(for now, warn every time)*/
-        control_event_client_status(LOG_WARN,
+          /*have_warned_about_unsafe_socks = 1;*/
+          /*(for now, warn every time)*/
+          control_event_client_status(LOG_WARN,
                         "DANGEROUS_SOCKS PROTOCOL=SOCKS4 ADDRESS=%s:%d",
                         tmpbuf, req->port);
+        }
         if (safe_socks)
           return -1;
       }

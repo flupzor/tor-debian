@@ -5,6 +5,22 @@
 
 #define DIRSERV_PRIVATE
 #include "or.h"
+#include "buffers.h"
+#include "config.h"
+#include "connection.h"
+#include "connection_or.h"
+#include "control.h"
+#include "directory.h"
+#include "dirserv.h"
+#include "dirvote.h"
+#include "hibernate.h"
+#include "microdesc.h"
+#include "networkstatus.h"
+#include "policies.h"
+#include "rephist.h"
+#include "router.h"
+#include "routerlist.h"
+#include "routerparse.h"
 
 /**
  * \file dirserv.c
@@ -1597,6 +1613,8 @@ dirserv_get_runningrouters(void)
 cached_dir_t *
 dirserv_get_consensus(const char *flavor_name)
 {
+  if (!cached_consensuses)
+    return NULL;
   return strmap_get(cached_consensuses, flavor_name);
 }
 
@@ -1635,7 +1653,7 @@ should_generate_v2_networkstatus(void)
 #define TIME_KNOWN_TO_GUARANTEE_FAMILIAR (8*24*60*60)
 /** Similarly, every node with sufficient WFU is around enough to be a guard.
  */
-#define WFU_TO_GUARANTEE_GUARD (0.995)
+#define WFU_TO_GUARANTEE_GUARD (0.98)
 
 /* Thresholds for server performance: set by
  * dirserv_compute_performance_thresholds, and used by
@@ -1715,7 +1733,7 @@ dirserv_thinks_router_is_unreliable(time_t now,
 
 /** Return true iff <b>router</b> should be assigned the "HSDir" flag.
  * Right now this means it advertises support for it, it has a high
- * uptime, and it's currently considered Running.
+ * uptime, it has a DirPort open, and it's currently considered Running.
  *
  * This function needs to be called after router-\>is_running has
  * been set.
@@ -1725,7 +1743,11 @@ dirserv_thinks_router_is_hs_dir(routerinfo_t *router, time_t now)
 {
   long uptime = real_uptime(router, now);
 
-  return (router->wants_to_be_hs_dir &&
+  /* XXX We shouldn't need to check dir_port, but we do because of
+   * bug 1693. In the future, once relays set wants_to_be_hs_dir
+   * correctly, we can revert to only checking dir_port if router's
+   * version is too old. */
+  return (router->wants_to_be_hs_dir && router->dir_port &&
           uptime > get_options()->MinUptimeHidServDirectoryV2 &&
           router->is_running);
 }
@@ -2158,9 +2180,7 @@ get_possible_sybil_list(const smartlist_t *routers)
 
 /** Extract status information from <b>ri</b> and from other authority
  * functions and store it in <b>rs</b>>.  If <b>naming</b>, consider setting
- * the named flag in <b>rs</b>. If not <b>exits_can_be_guards</b>, never mark
- * an exit as a guard.  If <b>listbadexits</b>, consider setting the badexit
- * flag.
+ * the named flag in <b>rs</b>.
  *
  * We assume that ri-\>is_running has already been set, e.g. by
  *   dirserv_set_router_is_running(ri, now);
@@ -2168,8 +2188,8 @@ get_possible_sybil_list(const smartlist_t *routers)
 void
 set_routerstatus_from_routerinfo(routerstatus_t *rs,
                                  routerinfo_t *ri, time_t now,
-                                 int naming, int exits_can_be_guards,
-                                 int listbadexits, int listbaddirs)
+                                 int naming, int listbadexits,
+                                 int listbaddirs)
 {
   int unstable_version =
     !tor_version_as_new_as(ri->platform,"0.1.1.16-rc-cvs");
@@ -2198,11 +2218,10 @@ set_routerstatus_from_routerinfo(routerstatus_t *rs,
   rs->is_valid = ri->is_valid;
 
   if (rs->is_fast &&
-      (!rs->is_exit || exits_can_be_guards) &&
       (router_get_advertised_bandwidth(ri) >= BANDWIDTH_TO_GUARANTEE_GUARD ||
        router_get_advertised_bandwidth(ri) >=
-       (exits_can_be_guards ? guard_bandwidth_including_exits :
-        guard_bandwidth_excluding_exits))) {
+                              MIN(guard_bandwidth_including_exits,
+                                  guard_bandwidth_excluding_exits))) {
     long tk = rep_hist_get_weighted_time_known(
                                       ri->cache_info.identity_digest, now);
     double wfu = rep_hist_get_weighted_fractional_uptime(
@@ -2446,7 +2465,6 @@ dirserv_generate_networkstatus_vote_obj(crypto_pk_env_t *private_key,
   int naming = options->NamingAuthoritativeDir;
   int listbadexits = options->AuthDirListBadExits;
   int listbaddirs = options->AuthDirListBadDirs;
-  int exits_can_be_guards;
   routerlist_t *rl = router_get_routerlist();
   time_t now = time(NULL);
   time_t cutoff = now - ROUTER_MAX_AGE_TO_PUBLISH;
@@ -2493,10 +2511,6 @@ dirserv_generate_networkstatus_vote_obj(crypto_pk_env_t *private_key,
 
   dirserv_compute_performance_thresholds(rl);
 
-  /* XXXX We should take steps to keep this from oscillating if
-   * total_exit_bandwidth is close to total_bandwidth/3. */
-  exits_can_be_guards = total_exit_bandwidth >= (total_bandwidth / 3);
-
   routers = smartlist_create();
   smartlist_add_all(routers, rl->routers);
   routers_sort_by_identity(routers);
@@ -2514,8 +2528,7 @@ dirserv_generate_networkstatus_vote_obj(crypto_pk_env_t *private_key,
       vrs = tor_malloc_zero(sizeof(vote_routerstatus_t));
       rs = &vrs->status;
       set_routerstatus_from_routerinfo(rs, ri, now,
-                                       naming, exits_can_be_guards,
-                                       listbadexits, listbaddirs);
+                                       naming, listbadexits, listbaddirs);
 
       if (digestmap_get(omit_as_sybil, ri->cache_info.identity_digest))
         clear_status_flags_on_sybil(rs);
@@ -2665,7 +2678,6 @@ generate_v2_networkstatus_opinion(void)
   int versioning = options->VersioningAuthoritativeDir;
   int listbaddirs = options->AuthDirListBadDirs;
   int listbadexits = options->AuthDirListBadExits;
-  int exits_can_be_guards;
   const char *contact;
   char *version_lines = NULL;
   smartlist_t *routers = NULL;
@@ -2745,10 +2757,6 @@ generate_v2_networkstatus_opinion(void)
 
   dirserv_compute_performance_thresholds(rl);
 
-  /* XXXX We should take steps to keep this from oscillating if
-   * total_exit_bandwidth is close to total_bandwidth/3. */
-  exits_can_be_guards = total_exit_bandwidth >= (total_bandwidth / 3);
-
   routers = smartlist_create();
   smartlist_add_all(routers, rl->routers);
   routers_sort_by_identity(routers);
@@ -2761,8 +2769,7 @@ generate_v2_networkstatus_opinion(void)
       char *version = version_from_platform(ri->platform);
 
       set_routerstatus_from_routerinfo(&rs, ri, now,
-                                       naming, exits_can_be_guards,
-                                       listbadexits, listbaddirs);
+                                       naming, listbadexits, listbaddirs);
 
       if (digestmap_get(omit_as_sybil, ri->cache_info.identity_digest))
         clear_status_flags_on_sybil(&rs);
@@ -3091,8 +3098,24 @@ dirserv_orconn_tls_done(const char *address,
    * skip testing. */
 }
 
-/** Auth dir server only: if <b>try_all</b> is 1, launch connections to
- * all known routers; else we want to load balance such that we only
+/** Helper function for dirserv_test_reachability(). Start a TLS
+ * connection to <b>router</b>, and annotate it with when we started
+ * the test. */
+void
+dirserv_single_reachability_test(time_t now, routerinfo_t *router)
+{
+  tor_addr_t router_addr;
+  log_debug(LD_OR,"Testing reachability of %s at %s:%u.",
+            router->nickname, router->address, router->or_port);
+  /* Remember when we started trying to determine reachability */
+  if (!router->testing_since)
+    router->testing_since = now;
+  tor_addr_from_ipv4h(&router_addr, router->addr);
+  connection_or_connect(&router_addr, router->or_port,
+                        router->cache_info.identity_digest);
+}
+
+/** Auth dir server only: load balance such that we only
  * try a few connections per call.
  *
  * The load balancing is such that if we get called once every ten
@@ -3100,7 +3123,7 @@ dirserv_orconn_tls_done(const char *address,
  * bit over 20 minutes).
  */
 void
-dirserv_test_reachability(time_t now, int try_all)
+dirserv_test_reachability(time_t now)
 {
   /* XXX decide what to do here; see or-talk thread "purging old router
    * information, revocation." -NM
@@ -3117,25 +3140,17 @@ dirserv_test_reachability(time_t now, int try_all)
 
   SMARTLIST_FOREACH_BEGIN(rl->routers, routerinfo_t *, router) {
     const char *id_digest = router->cache_info.identity_digest;
-    tor_addr_t router_addr;
     if (router_is_me(router))
       continue;
     if (bridge_auth && router->purpose != ROUTER_PURPOSE_BRIDGE)
       continue; /* bridge authorities only test reachability on bridges */
 //    if (router->cache_info.published_on > cutoff)
 //      continue;
-    if (try_all || (((uint8_t)id_digest[0]) % 128) == ctr) {
-      log_debug(LD_OR,"Testing reachability of %s at %s:%u.",
-                router->nickname, router->address, router->or_port);
-      /* Remember when we started trying to determine reachability */
-      if (!router->testing_since)
-        router->testing_since = now;
-      tor_addr_from_ipv4h(&router_addr, router->addr);
-      connection_or_connect(&router_addr, router->or_port, id_digest);
+    if ((((uint8_t)id_digest[0]) % 128) == ctr) {
+      dirserv_single_reachability_test(now, router);
     }
   } SMARTLIST_FOREACH_END(router);
-  if (!try_all) /* increment ctr */
-    ctr = (ctr + 1) % 128;
+  ctr = (ctr + 1) % 128; /* increment ctr */
 }
 
 /** Given a fingerprint <b>fp</b> which is either set if we're looking for a

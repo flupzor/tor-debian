@@ -12,6 +12,38 @@
 
 #define MAIN_PRIVATE
 #include "or.h"
+#include "buffers.h"
+#include "circuitbuild.h"
+#include "circuitlist.h"
+#include "circuituse.h"
+#include "command.h"
+#include "config.h"
+#include "connection.h"
+#include "connection_edge.h"
+#include "connection_or.h"
+#include "control.h"
+#include "cpuworker.h"
+#include "directory.h"
+#include "dirserv.h"
+#include "dirvote.h"
+#include "dns.h"
+#include "dnsserv.h"
+#include "geoip.h"
+#include "hibernate.h"
+#include "main.h"
+#include "microdesc.h"
+#include "networkstatus.h"
+#include "ntmain.h"
+#include "onion.h"
+#include "policies.h"
+#include "relay.h"
+#include "rendclient.h"
+#include "rendcommon.h"
+#include "rendservice.h"
+#include "rephist.h"
+#include "router.h"
+#include "routerlist.h"
+#include "routerparse.h"
 #ifdef USE_DMALLOC
 #include <dmalloc.h>
 #include <openssl/crypto.h>
@@ -33,7 +65,7 @@ static void dumpstats(int severity); /* log stats */
 static void conn_read_callback(int fd, short event, void *_conn);
 static void conn_write_callback(int fd, short event, void *_conn);
 static void signal_callback(int fd, short events, void *arg);
-static void second_elapsed_callback(int fd, short event, void *args);
+static void second_elapsed_callback(periodic_timer_t *timer, void *args);
 static int conn_close_if_marked(int i);
 static void connection_start_reading_from_linked_conn(connection_t *conn);
 static int connection_should_read_from_linked_conn(connection_t *conn);
@@ -686,6 +718,15 @@ directory_info_has_arrived(time_t now, int from_cache)
     consider_testing_reachability(1, 1);
 }
 
+/** How long do we wait before killing OR connections with no circuits?
+ * In Tor versions up to 0.2.1.25 and 0.2.2.12-alpha, we waited 15 minutes
+ * before cancelling these connections, which caused fast relays to accrue
+ * many many idle connections. Hopefully 3 minutes is low enough that
+ * it kills most idle connections, without being so low that we cause
+ * clients to bounce on and off.
+ */
+#define IDLE_OR_CONN_TIMEOUT 180
+
 /** Perform regular maintenance tasks for a single connection.  This
  * function gets run once per second per connection by run_scheduled_events.
  */
@@ -696,6 +737,8 @@ run_connection_housekeeping(int i, time_t now)
   connection_t *conn = smartlist_get(connection_array, i);
   or_options_t *options = get_options();
   or_connection_t *or_conn;
+  int past_keepalive =
+    now >= conn->timestamp_lastwritten + options->KeepalivePeriod;
 
   if (conn->outbuf && !buf_datalen(conn->outbuf) && conn->type == CONN_TYPE_OR)
     TO_OR_CONN(conn)->timestamp_lastempty = now;
@@ -730,6 +773,9 @@ run_connection_housekeeping(int i, time_t now)
   if (!connection_speaks_cells(conn))
     return; /* we're all done here, the rest is just for OR conns */
 
+  /* If we haven't written to an OR connection for a while, then either nuke
+     the connection or send a keepalive, depending. */
+
   or_conn = TO_OR_CONN(conn);
   tor_assert(conn->outbuf);
 
@@ -745,56 +791,45 @@ run_connection_housekeeping(int i, time_t now)
                                    "Tor gave up on the connection");
     connection_mark_for_close(conn);
     conn->hold_open_until_flushed = 1;
-    return;
-  }
-
-  /* If we haven't written to an OR connection for a while, then either nuke
-     the connection or send a keepalive, depending. */
-  if (now >= conn->timestamp_lastwritten + options->KeepalivePeriod) {
-    routerinfo_t *router = router_get_by_digest(or_conn->identity_digest);
-    int maxCircuitlessPeriod = options->MaxCircuitDirtiness*3/2;
-    if (!connection_state_is_open(conn)) {
-      /* We never managed to actually get this connection open and happy. */
-      log_info(LD_OR,"Expiring non-open OR connection to fd %d (%s:%d).",
-               conn->s,conn->address, conn->port);
-      connection_mark_for_close(conn);
-      conn->hold_open_until_flushed = 1;
-    } else if (we_are_hibernating() && !or_conn->n_circuits &&
-               !buf_datalen(conn->outbuf)) {
-      /* We're hibernating, there's no circuits, and nothing to flush.*/
-      log_info(LD_OR,"Expiring non-used OR connection to fd %d (%s:%d) "
-               "[Hibernating or exiting].",
-               conn->s,conn->address, conn->port);
-      connection_mark_for_close(conn);
-      conn->hold_open_until_flushed = 1;
-    } else if (!clique_mode(options) && !or_conn->n_circuits &&
-               now >= or_conn->timestamp_last_added_nonpadding +
-                                           maxCircuitlessPeriod &&
-               (!router || !server_mode(options) ||
-                !router_is_clique_mode(router))) {
-      log_info(LD_OR,"Expiring non-used OR connection to fd %d (%s:%d) "
-               "[Not in clique mode].",
-               conn->s,conn->address, conn->port);
-      connection_mark_for_close(conn);
-      conn->hold_open_until_flushed = 1;
-    } else if (
-         now >= or_conn->timestamp_lastempty + options->KeepalivePeriod*10 &&
-         now >= conn->timestamp_lastwritten + options->KeepalivePeriod*10) {
-      log_fn(LOG_PROTOCOL_WARN,LD_PROTOCOL,
-             "Expiring stuck OR connection to fd %d (%s:%d). (%d bytes to "
-             "flush; %d seconds since last write)",
-             conn->s, conn->address, conn->port,
-             (int)buf_datalen(conn->outbuf),
-             (int)(now-conn->timestamp_lastwritten));
-      connection_mark_for_close(conn);
-    } else if (!buf_datalen(conn->outbuf)) {
-      /* either in clique mode, or we've got a circuit. send a padding cell. */
-      log_fn(LOG_DEBUG,LD_OR,"Sending keepalive to (%s:%d)",
-             conn->address, conn->port);
-      memset(&cell,0,sizeof(cell_t));
-      cell.command = CELL_PADDING;
-      connection_or_write_cell_to_buf(&cell, or_conn);
-    }
+  } else if (past_keepalive && !connection_state_is_open(conn)) {
+    /* We never managed to actually get this connection open and happy. */
+    log_info(LD_OR,"Expiring non-open OR connection to fd %d (%s:%d).",
+             conn->s,conn->address, conn->port);
+    connection_mark_for_close(conn);
+    conn->hold_open_until_flushed = 1;
+  } else if (we_are_hibernating() && !or_conn->n_circuits &&
+             !buf_datalen(conn->outbuf)) {
+    /* We're hibernating, there's no circuits, and nothing to flush.*/
+    log_info(LD_OR,"Expiring non-used OR connection to fd %d (%s:%d) "
+             "[Hibernating or exiting].",
+             conn->s,conn->address, conn->port);
+    connection_mark_for_close(conn);
+    conn->hold_open_until_flushed = 1;
+  } else if (!or_conn->n_circuits &&
+             now >= or_conn->timestamp_last_added_nonpadding +
+                                         IDLE_OR_CONN_TIMEOUT) {
+    log_info(LD_OR,"Expiring non-used OR connection to fd %d (%s:%d) "
+             "[idle %d].", conn->s,conn->address, conn->port,
+             (int)(now - or_conn->timestamp_last_added_nonpadding));
+    connection_mark_for_close(conn);
+    conn->hold_open_until_flushed = 1;
+  } else if (
+      now >= or_conn->timestamp_lastempty + options->KeepalivePeriod*10 &&
+      now >= conn->timestamp_lastwritten + options->KeepalivePeriod*10) {
+    log_fn(LOG_PROTOCOL_WARN,LD_PROTOCOL,
+           "Expiring stuck OR connection to fd %d (%s:%d). (%d bytes to "
+           "flush; %d seconds since last write)",
+           conn->s, conn->address, conn->port,
+           (int)buf_datalen(conn->outbuf),
+           (int)(now-conn->timestamp_lastwritten));
+    connection_mark_for_close(conn);
+  } else if (past_keepalive && !buf_datalen(conn->outbuf)) {
+    /* send a padding cell */
+    log_fn(LOG_DEBUG,LD_OR,"Sending keepalive to (%s:%d)",
+           conn->address, conn->port);
+    memset(&cell,0,sizeof(cell_t));
+    cell.command = CELL_PADDING;
+    connection_or_write_cell_to_buf(&cell, or_conn);
   }
 }
 
@@ -918,7 +953,7 @@ run_scheduled_events(time_t now)
   if (now % 10 == 0 && (authdir_mode_tests_reachability(options)) &&
       !we_are_hibernating()) {
     /* try to determine reachability of the other Tor relays */
-    dirserv_test_reachability(now, 0);
+    dirserv_test_reachability(now);
   }
 
   /** 1d. Periodically, we discount older stability information so that new
@@ -962,42 +997,32 @@ run_scheduled_events(time_t now)
 
   /* 1g. Check whether we should write statistics to disk.
    */
-  if (time_to_write_stats_files >= 0 && time_to_write_stats_files < now) {
-#define WRITE_STATS_INTERVAL (24*60*60)
-    if (options->CellStatistics || options->DirReqStatistics ||
-        options->EntryStatistics || options->ExitPortStatistics) {
-      if (!time_to_write_stats_files) {
-        /* Initialize stats. We're doing this here and not in options_act,
-         * so that we know exactly when the 24 hours interval ends. */
-        if (options->CellStatistics)
-          rep_hist_buffer_stats_init(now);
-        if (options->DirReqStatistics)
-          geoip_dirreq_stats_init(now);
-        if (options->EntryStatistics)
-          geoip_entry_stats_init(now);
-        if (options->ExitPortStatistics)
-          rep_hist_exit_stats_init(now);
-        log_notice(LD_CONFIG, "Configured to measure statistics. Look for "
-                   "the *-stats files that will first be written to the "
-                   "data directory in %d hours from now.",
-                   WRITE_STATS_INTERVAL / (60 * 60));
-        time_to_write_stats_files = now + WRITE_STATS_INTERVAL;
-      } else {
-        /* Write stats to disk. */
-        if (options->CellStatistics)
+  if (time_to_write_stats_files < now) {
+#define CHECK_WRITE_STATS_INTERVAL (60*60)
+    time_t next_time_to_write_stats_files = (time_to_write_stats_files > 0 ?
+           time_to_write_stats_files : now) + CHECK_WRITE_STATS_INTERVAL;
+    if (options->CellStatistics) {
+      time_t next_write =
           rep_hist_buffer_stats_write(time_to_write_stats_files);
-        if (options->DirReqStatistics)
-          geoip_dirreq_stats_write(time_to_write_stats_files);
-        if (options->EntryStatistics)
-          geoip_entry_stats_write(time_to_write_stats_files);
-        if (options->ExitPortStatistics)
-          rep_hist_exit_stats_write(time_to_write_stats_files);
-        time_to_write_stats_files += WRITE_STATS_INTERVAL;
-      }
-    } else {
-      /* Never write stats to disk */
-      time_to_write_stats_files = -1;
+      if (next_write && next_write < next_time_to_write_stats_files)
+        next_time_to_write_stats_files = next_write;
     }
+    if (options->DirReqStatistics) {
+      time_t next_write = geoip_dirreq_stats_write(time_to_write_stats_files);
+      if (next_write && next_write < next_time_to_write_stats_files)
+        next_time_to_write_stats_files = next_write;
+    }
+    if (options->EntryStatistics) {
+      time_t next_write = geoip_entry_stats_write(time_to_write_stats_files);
+      if (next_write && next_write < next_time_to_write_stats_files)
+        next_time_to_write_stats_files = next_write;
+    }
+    if (options->ExitPortStatistics) {
+      time_t next_write = rep_hist_exit_stats_write(time_to_write_stats_files);
+      if (next_write && next_write < next_time_to_write_stats_files)
+        next_time_to_write_stats_files = next_write;
+    }
+    time_to_write_stats_files = next_time_to_write_stats_files;
   }
 
   /* 1h. Check whether we should write bridge statistics to disk.
@@ -1138,6 +1163,10 @@ run_scheduled_events(time_t now)
   if (have_dir_info && !we_are_hibernating())
     circuit_build_needed_circs(now);
 
+  /* every 10 seconds, but not at the same second as other such events */
+  if (now % 10 == 5)
+    circuit_expire_old_circuits_serverside(now);
+
   /** 5. We do housekeeping for each connection... */
   connection_or_set_bad_connections();
   for (i=0;i<smartlist_len(connection_array);i++) {
@@ -1198,39 +1227,30 @@ run_scheduled_events(time_t now)
   }
 }
 
-/** Libevent timer: used to invoke second_elapsed_callback() once per
- * second. */
-static struct event *timeout_event = NULL;
+/** Timer: used to invoke second_elapsed_callback() once per second. */
+static periodic_timer_t *second_timer = NULL;
 /** Number of libevent errors in the last second: we die if we get too many. */
 static int n_libevent_errors = 0;
 
 /** Libevent callback: invoked once every second. */
 static void
-second_elapsed_callback(int fd, short event, void *args)
+second_elapsed_callback(periodic_timer_t *timer, void *arg)
 {
   /* XXXX This could be sensibly refactored into multiple callbacks, and we
    * could use Libevent's timers for this rather than checking the current
    * time against a bunch of timeouts every second. */
-  static struct timeval one_second;
   static time_t current_second = 0;
   time_t now;
   size_t bytes_written;
   size_t bytes_read;
   int seconds_elapsed;
   or_options_t *options = get_options();
-  (void)fd;
-  (void)event;
-  (void)args;
-  if (!timeout_event) {
-    timeout_event = tor_evtimer_new(tor_libevent_get_base(),
-                                    second_elapsed_callback, NULL);
-    one_second.tv_sec = 1;
-    one_second.tv_usec = 0;
-  }
+  (void)timer;
+  (void)arg;
 
   n_libevent_errors = 0;
 
-  /* log_fn(LOG_NOTICE, "Tick."); */
+  /* log_notice(LD_GENERAL, "Tick."); */
   now = time(NULL);
   update_approx_time(now);
 
@@ -1295,10 +1315,6 @@ second_elapsed_callback(int fd, short event, void *args)
   run_scheduled_events(now);
 
   current_second = now; /* remember which second it is, for next time */
-
-  if (event_add(timeout_event, &one_second))
-    log_err(LD_NET,
-            "Error from libevent when setting one-second timeout event");
 }
 
 #ifndef MS_WINDOWS
@@ -1479,18 +1495,23 @@ do_main_loop(void)
   now = time(NULL);
   directory_info_has_arrived(now, 1);
 
-  if (authdir_mode_tests_reachability(get_options())) {
-    /* the directory is already here, run startup things */
-    dirserv_test_reachability(now, 1);
-  }
-
   if (server_mode(get_options())) {
     /* launch cpuworkers. Need to do this *after* we've read the onion key. */
     cpu_init();
   }
 
   /* set up once-a-second callback. */
-  second_elapsed_callback(0,0,NULL);
+  if (! second_timer) {
+    struct timeval one_second;
+    one_second.tv_sec = 1;
+    one_second.tv_usec = 0;
+
+    second_timer = periodic_timer_new(tor_libevent_get_base(),
+                                      &one_second,
+                                      second_elapsed_callback,
+                                      NULL);
+    tor_assert(second_timer);
+  }
 
   for (;;) {
     if (nt_service_is_stopping())
@@ -1666,7 +1687,7 @@ dumpmemusage(int severity)
   tor_log_mallinfo(severity);
 }
 
-/** Write all statistics to the log, with log level 'severity'.  Called
+/** Write all statistics to the log, with log level <b>severity</b>. Called
  * in response to a SIGUSR1. */
 static void
 dumpstats(int severity)
@@ -2011,7 +2032,7 @@ tor_free_all(int postfork)
   smartlist_free(connection_array);
   smartlist_free(closeable_connection_lst);
   smartlist_free(active_linked_connection_lst);
-  tor_free(timeout_event);
+  periodic_timer_free(second_timer);
   if (!postfork) {
     release_lockfile();
   }
@@ -2102,6 +2123,31 @@ do_hash_password(void)
   printf("16:%s\n",output);
 }
 
+#if defined (WINCE)
+int
+find_flashcard_path(PWCHAR path, size_t size)
+{
+  WIN32_FIND_DATA d = {0};
+  HANDLE h = NULL;
+
+  if (!path)
+    return -1;
+
+  h = FindFirstFlashCard(&d);
+  if (h == INVALID_HANDLE_VALUE)
+    return -1;
+
+  if (wcslen(d.cFileName) == 0) {
+    FindClose(h);
+    return -1;
+  }
+
+  wcsncpy(path,d.cFileName,size);
+  FindClose(h);
+  return 0;
+}
+#endif
+
 /** Main entry point for the Tor process.  Called from main(). */
 /* This function is distinct from main() only so we can link main.c into
  * the unittest binary without conflicting with the unittests' main. */
@@ -2109,6 +2155,33 @@ int
 tor_main(int argc, char *argv[])
 {
   int result = 0;
+#if defined (WINCE)
+  WCHAR path [MAX_PATH] = {0};
+  WCHAR fullpath [MAX_PATH] = {0};
+  PWCHAR p = NULL;
+  FILE* redir = NULL;
+  FILE* redirdbg = NULL;
+
+  // this is to facilitate debugging by opening
+  // a file on a folder shared by the wm emulator.
+  // if no flashcard (real or emulated) is present,
+  // log files will be written in the root folder
+  if (find_flashcard_path(path,MAX_PATH) == -1)
+  {
+    redir = _wfreopen( L"\\stdout.log", L"w", stdout );
+    redirdbg = _wfreopen( L"\\stderr.log", L"w", stderr );
+  } else {
+    swprintf(fullpath,L"\\%s\\tor",path);
+    CreateDirectory(fullpath,NULL);
+
+    swprintf(fullpath,L"\\%s\\tor\\stdout.log",path);
+    redir = _wfreopen( fullpath, L"w", stdout );
+
+    swprintf(fullpath,L"\\%s\\tor\\stderr.log",path);
+    redirdbg = _wfreopen( fullpath, L"w", stderr );
+  }
+#endif
+
   update_approx_time(time(NULL));
   tor_threads_init();
   init_logging();

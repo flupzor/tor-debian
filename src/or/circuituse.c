@@ -10,6 +10,20 @@
  **/
 
 #include "or.h"
+#include "circuitbuild.h"
+#include "circuitlist.h"
+#include "circuituse.h"
+#include "config.h"
+#include "connection.h"
+#include "connection_edge.h"
+#include "control.h"
+#include "policies.h"
+#include "rendclient.h"
+#include "rendcommon.h"
+#include "rendservice.h"
+#include "rephist.h"
+#include "router.h"
+#include "routerlist.h"
 
 /********* START VARIABLES **********/
 
@@ -17,7 +31,7 @@ extern circuit_t *global_circuitlist; /* from circuitlist.c */
 
 /********* END VARIABLES ************/
 
-static void circuit_expire_old_circuits(time_t now);
+static void circuit_expire_old_circuits_clientside(time_t now);
 static void circuit_increment_failure_count(void);
 
 long int lround(double x);
@@ -270,6 +284,7 @@ circuit_expire_building(time_t now)
    * decided on a customized one yet */
   time_t general_cutoff = now - lround(circ_times.timeout_ms/1000);
   time_t begindir_cutoff = now - lround(circ_times.timeout_ms/2000);
+  time_t close_cutoff = now - lround(circ_times.close_ms/1000);
   time_t introcirc_cutoff = begindir_cutoff;
   cpath_build_state_t *build_state;
 
@@ -286,8 +301,11 @@ circuit_expire_building(time_t now)
       cutoff = begindir_cutoff;
     else if (victim->purpose == CIRCUIT_PURPOSE_C_INTRODUCING)
       cutoff = introcirc_cutoff;
+    else if (victim->purpose == CIRCUIT_PURPOSE_C_MEASURE_TIMEOUT)
+      cutoff = close_cutoff;
     else
       cutoff = general_cutoff;
+
     if (victim->timestamp_created > cutoff)
       continue; /* it's still young, leave it alone */
 
@@ -350,9 +368,40 @@ circuit_expire_building(time_t now)
     } else { /* circuit not open, consider recording failure as timeout */
       int first_hop_succeeded = TO_ORIGIN_CIRCUIT(victim)->cpath &&
             TO_ORIGIN_CIRCUIT(victim)->cpath->state == CPATH_STATE_OPEN;
-      if (circuit_build_times_add_timeout(&circ_times, first_hop_succeeded,
-                                          victim->timestamp_created))
+
+      if (TO_ORIGIN_CIRCUIT(victim)->p_streams != NULL) {
+        log_warn(LD_BUG, "Circuit %d (purpose %d) has timed out, "
+                 "yet has attached streams!",
+                 TO_ORIGIN_CIRCUIT(victim)->global_identifier,
+                 victim->purpose);
+        tor_fragile_assert();
+        continue;
+      }
+
+      /* circuits are allowed to last longer for measurement.
+       * Switch their purpose and wait. */
+      if (victim->purpose != CIRCUIT_PURPOSE_C_MEASURE_TIMEOUT) {
+        victim->purpose = CIRCUIT_PURPOSE_C_MEASURE_TIMEOUT;
+        circuit_build_times_count_timeout(&circ_times,
+                                          first_hop_succeeded);
+        continue;
+      }
+
+      /*
+       * If the circuit build time is much greater than we would have cut
+       * it off at, we probably had a suspend event along this codepath,
+       * and we should discard the value.
+       */
+      if (now - victim->timestamp_created > 2*circ_times.close_ms/1000+1) {
+        log_notice(LD_CIRC,
+                   "Extremely large value for circuit build timeout: %lds. "
+                   "Assuming clock jump.",
+                   (long)(now - victim->timestamp_created));
+      } else if (circuit_build_times_count_close(&circ_times,
+                                          first_hop_succeeded,
+                                          victim->timestamp_created)) {
         circuit_build_times_set_timeout(&circ_times);
+      }
     }
 
     if (victim->n_conn)
@@ -567,7 +616,7 @@ circuit_build_needed_circs(time_t now)
     time_to_new_circuit = now + options->NewCircuitPeriod;
     if (proxy_mode(get_options()))
       addressmap_clean(now);
-    circuit_expire_old_circuits(now);
+    circuit_expire_old_circuits_clientside(now);
 
 #if 0 /* disable for now, until predict-and-launch-new can cull leftovers */
     circ = circuit_get_youngest_clean_open(CIRCUIT_PURPOSE_C_GENERAL);
@@ -656,7 +705,7 @@ circuit_detach_stream(circuit_t *circ, edge_connection_t *conn)
  * for too long and has no streams on it: mark it for close.
  */
 static void
-circuit_expire_old_circuits(time_t now)
+circuit_expire_old_circuits_clientside(time_t now)
 {
   circuit_t *circ;
   time_t cutoff;
@@ -670,7 +719,7 @@ circuit_expire_old_circuits(time_t now)
   }
 
   for (circ = global_circuitlist; circ; circ = circ->next) {
-    if (circ->marked_for_close || ! CIRCUIT_IS_ORIGIN(circ))
+    if (circ->marked_for_close || !CIRCUIT_IS_ORIGIN(circ))
       continue;
     /* If the circuit has been dirty for too long, and there are no streams
      * on it, mark it for close.
@@ -683,15 +732,86 @@ circuit_expire_old_circuits(time_t now)
                 circ->n_circ_id, (int)(now - circ->timestamp_dirty),
                 circ->purpose);
       circuit_mark_for_close(circ, END_CIRC_REASON_FINISHED);
-    } else if (!circ->timestamp_dirty &&
-               circ->state == CIRCUIT_STATE_OPEN &&
-               circ->purpose == CIRCUIT_PURPOSE_C_GENERAL) {
+    } else if (!circ->timestamp_dirty && circ->state == CIRCUIT_STATE_OPEN) {
       if (circ->timestamp_created < cutoff) {
-        log_debug(LD_CIRC,
-                  "Closing circuit that has been unused for %d seconds.",
-                  (int)(now - circ->timestamp_created));
-        circuit_mark_for_close(circ, END_CIRC_REASON_FINISHED);
+        if (circ->purpose == CIRCUIT_PURPOSE_C_GENERAL ||
+                circ->purpose == CIRCUIT_PURPOSE_C_MEASURE_TIMEOUT ||
+                circ->purpose == CIRCUIT_PURPOSE_S_ESTABLISH_INTRO ||
+                circ->purpose == CIRCUIT_PURPOSE_TESTING ||
+                (circ->purpose >= CIRCUIT_PURPOSE_C_INTRODUCING &&
+                circ->purpose <= CIRCUIT_PURPOSE_C_REND_READY_INTRO_ACKED) ||
+                circ->purpose == CIRCUIT_PURPOSE_S_CONNECT_REND) {
+          log_debug(LD_CIRC,
+                    "Closing circuit that has been unused for %ld seconds.",
+                    (long)(now - circ->timestamp_created));
+          circuit_mark_for_close(circ, END_CIRC_REASON_FINISHED);
+        } else if (!TO_ORIGIN_CIRCUIT(circ)->is_ancient) {
+          /* Server-side rend joined circuits can end up really old, because
+           * they are reused by clients for longer than normal. The client
+           * controls their lifespan. (They never become dirty, because
+           * connection_exit_begin_conn() never marks anything as dirty.)
+           * Similarly, server-side intro circuits last a long time. */
+          if (circ->purpose != CIRCUIT_PURPOSE_S_REND_JOINED &&
+              circ->purpose != CIRCUIT_PURPOSE_S_INTRO) {
+            log_notice(LD_CIRC,
+                       "Ancient non-dirty circuit %d is still around after "
+                       "%ld seconds. Purpose: %d",
+                       TO_ORIGIN_CIRCUIT(circ)->global_identifier,
+                       (long)(now - circ->timestamp_created),
+                       circ->purpose);
+            /* FFFF implement a new circuit_purpose_to_string() so we don't
+             * just print out a number for circ->purpose */
+            TO_ORIGIN_CIRCUIT(circ)->is_ancient = 1;
+          }
+        }
       }
+    }
+  }
+}
+
+/** How long do we wait before killing circuits with the properties
+ * described below?
+ *
+ * Probably we could choose a number here as low as 5 to 10 seconds,
+ * since these circs are used for begindir, and a) generally you either
+ * ask another begindir question right after or you don't for a long time,
+ * b) clients at least through 0.2.1.x choose from the whole set of
+ * directory mirrors at each choice, and c) re-establishing a one-hop
+ * circuit via create-fast is a light operation assuming the TLS conn is
+ * still there.
+ *
+ * I expect "b" to go away one day when we move to using directory
+ * guards, but I think "a" and "c" are good enough reasons that a low
+ * number is safe even then.
+ */
+#define IDLE_ONE_HOP_CIRC_TIMEOUT 60
+
+/** Find each non-origin circuit that has been unused for too long,
+ * has no streams on it, used a create_fast, and ends here: mark it
+ * for close.
+ */
+void
+circuit_expire_old_circuits_serverside(time_t now)
+{
+  circuit_t *circ;
+  or_circuit_t *or_circ;
+  time_t cutoff = now - IDLE_ONE_HOP_CIRC_TIMEOUT;
+
+  for (circ = global_circuitlist; circ; circ = circ->next) {
+    if (circ->marked_for_close || CIRCUIT_IS_ORIGIN(circ))
+      continue;
+    or_circ = TO_OR_CIRCUIT(circ);
+    /* If the circuit has been idle for too long, and there are no streams
+     * on it, and it ends here, and it used a create_fast, mark it for close.
+     */
+    if (or_circ->is_first_hop && !circ->n_conn &&
+        !or_circ->n_streams && !or_circ->resolving_streams &&
+        or_circ->p_conn &&
+        or_circ->p_conn->timestamp_last_added_nonpadding <= cutoff) {
+      log_info(LD_CIRC, "Closing circ_id %d (empty %d secs ago)",
+               or_circ->p_circ_id,
+               (int)(now - or_circ->p_conn->timestamp_last_added_nonpadding));
+      circuit_mark_for_close(circ, END_CIRC_REASON_FINISHED);
     }
   }
 }
@@ -1074,13 +1194,13 @@ circuit_get_open_circ_or_launch(edge_connection_t *conn,
        * as loudly. the user doesn't even know it's happening. */
       if (options->UseBridges && bridges_known_but_down()) {
         log_fn(severity, LD_APP|LD_DIR,
-               "Application request when we're believed to be "
-               "offline. Optimistically trying known bridges again.");
+               "Application request when we haven't used client functionality "
+               "lately. Optimistically trying known bridges again.");
         bridges_retry_all();
       } else if (!options->UseBridges || any_bridge_descriptors_known()) {
         log_fn(severity, LD_APP|LD_DIR,
-               "Application request when we're believed to be "
-               "offline. Optimistically trying directory fetches again.");
+               "Application request when we haven't used client functionality "
+               "lately. Optimistically trying directory fetches again.");
         routerlist_retry_directory_downloads(time(NULL));
       }
     }

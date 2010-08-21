@@ -12,6 +12,17 @@
  **/
 
 #include "or.h"
+#include "circuitlist.h"
+#include "circuituse.h"
+#include "config.h"
+#include "connection.h"
+#include "connection_edge.h"
+#include "control.h"
+#include "dns.h"
+#include "main.h"
+#include "policies.h"
+#include "relay.h"
+#include "router.h"
 #include "ht.h"
 #ifdef HAVE_EVENT2_DNS_H
 #include <event2/event.h>
@@ -453,7 +464,7 @@ purge_expired_resolves(time_t now)
         log_err(LD_BUG, "The expired resolve we purged didn't match any in"
                 " the cache. Tried to purge %s (%p); instead got %s (%p).",
                 resolve->address, (void*)resolve,
-                removed ? removed->address : "NULL", (void*)remove);
+                removed ? removed->address : "NULL", (void*)removed);
       }
       tor_assert(removed == resolve);
     } else {
