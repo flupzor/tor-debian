@@ -464,7 +464,7 @@ networkstatus_check_consensus_signature(networkstatus_t *consensus,
                                         int warn)
 {
   int n_good = 0;
-  int n_missing_key = 0;
+  int n_missing_key = 0, n_dl_failed_key = 0;
   int n_bad = 0;
   int n_unknown = 0;
   int n_no_signature = 0;
@@ -482,7 +482,7 @@ networkstatus_check_consensus_signature(networkstatus_t *consensus,
                           voter) {
     int good_here = 0;
     int bad_here = 0;
-    int missing_key_here = 0;
+    int missing_key_here = 0, dl_failed_key_here = 0;
     SMARTLIST_FOREACH_BEGIN(voter->sigs, document_signature_t *, sig) {
       if (!sig->good_signature && !sig->bad_signature &&
           sig->signature) {
@@ -502,11 +502,15 @@ networkstatus_check_consensus_signature(networkstatus_t *consensus,
         } else if (!cert || cert->expires < now) {
           smartlist_add(need_certs_from, voter);
           ++missing_key_here;
+          if (authority_cert_dl_looks_uncertain(sig->identity_digest))
+            ++dl_failed_key_here;
           continue;
         }
         if (networkstatus_check_document_signature(consensus, sig, cert) < 0) {
           smartlist_add(need_certs_from, voter);
           ++missing_key_here;
+          if (authority_cert_dl_looks_uncertain(sig->identity_digest))
+            ++dl_failed_key_here;
           continue;
         }
       }
@@ -519,9 +523,11 @@ networkstatus_check_consensus_signature(networkstatus_t *consensus,
       ++n_good;
     else if (bad_here)
       ++n_bad;
-    else if (missing_key_here)
+    else if (missing_key_here) {
       ++n_missing_key;
-    else
+      if (dl_failed_key_here)
+        ++n_dl_failed_key;
+    } else
       ++n_no_signature;
   } SMARTLIST_FOREACH_END(voter);
 
@@ -534,39 +540,71 @@ networkstatus_check_consensus_signature(networkstatus_t *consensus,
         smartlist_add(missing_authorities, ds);
     });
 
-  if (warn > 1 || (warn >= 0 && n_good < n_required))
+  if (warn > 1 || (warn >= 0 &&
+                   (n_good + n_missing_key - n_dl_failed_key < n_required))) {
     severity = LOG_WARN;
-  else
+  } else {
     severity = LOG_INFO;
+  }
 
   if (warn >= 0) {
     SMARTLIST_FOREACH(unrecognized, networkstatus_voter_info_t *, voter,
       {
-        log_info(LD_DIR, "Consensus includes unrecognized authority '%s' "
-                 "at %s:%d (contact %s; identity %s)",
+        log(severity, LD_DIR, "Consensus includes unrecognized authority "
+                 "'%s' at %s:%d (contact %s; identity %s)",
                  voter->nickname, voter->address, (int)voter->dir_port,
                  voter->contact?voter->contact:"n/a",
                  hex_str(voter->identity_digest, DIGEST_LEN));
       });
     SMARTLIST_FOREACH(need_certs_from, networkstatus_voter_info_t *, voter,
       {
-        log_info(LD_DIR, "Looks like we need to download a new certificate "
-                 "from authority '%s' at %s:%d (contact %s; identity %s)",
+        log(severity, LD_DIR, "Looks like we need to download a new "
+                 "certificate from authority '%s' at %s:%d (contact %s; "
+                 "identity %s)",
                  voter->nickname, voter->address, (int)voter->dir_port,
                  voter->contact?voter->contact:"n/a",
                  hex_str(voter->identity_digest, DIGEST_LEN));
       });
     SMARTLIST_FOREACH(missing_authorities, trusted_dir_server_t *, ds,
       {
-        log_info(LD_DIR, "Consensus does not include configured "
+        log(severity, LD_DIR, "Consensus does not include configured "
                  "authority '%s' at %s:%d (identity %s)",
                  ds->nickname, ds->address, (int)ds->dir_port,
                  hex_str(ds->v3_identity_digest, DIGEST_LEN));
       });
-    log(severity, LD_DIR,
-        "%d unknown, %d missing key, %d good, %d bad, %d no signature, "
-        "%d required", n_unknown, n_missing_key, n_good, n_bad,
-        n_no_signature, n_required);
+    {
+      smartlist_t *sl = smartlist_create();
+      char *cp;
+      tor_asprintf(&cp, "A consensus needs %d good signatures from recognized "
+                   "authorities for us to accept it. This one has %d.",
+                   n_required, n_good);
+      smartlist_add(sl,cp);
+      if (n_no_signature) {
+        tor_asprintf(&cp, "%d of the authorities we know didn't sign it.",
+                     n_no_signature);
+        smartlist_add(sl,cp);
+      }
+      if (n_unknown) {
+        tor_asprintf(&cp, "It has %d signatures from authorities we don't "
+                      "recognize.", n_unknown);
+        smartlist_add(sl,cp);
+      }
+      if (n_bad) {
+        tor_asprintf(&cp, "%d of the signatures on it didn't verify "
+                      "correctly.", n_bad);
+        smartlist_add(sl,cp);
+      }
+      if (n_missing_key) {
+        tor_asprintf(&cp, "We were unable to check %d of the signatures, "
+                      "because we were missing the keys.", n_missing_key);
+        smartlist_add(sl,cp);
+      }
+      cp = smartlist_join_strings(sl, " ", 0, NULL);
+      log(severity, LD_DIR, "%s", cp);
+      tor_free(cp);
+      SMARTLIST_FOREACH(sl, char *, c, tor_free(c));
+      smartlist_free(sl);
+    }
   }
 
   smartlist_free(unrecognized);
@@ -1168,14 +1206,11 @@ update_v2_networkstatus_cache_downloads(time_t now)
 static void
 update_consensus_networkstatus_downloads(time_t now)
 {
-  or_options_t *options = get_options();
   int i;
   if (!networkstatus_get_live_consensus(now))
     time_to_download_next_consensus = now; /* No live consensus? Get one now!*/
   if (time_to_download_next_consensus > now)
     return; /* Wait until the current consensus is older. */
-  if (authdir_mode_v3(options))
-    return; /* Authorities never fetch a consensus */
   /* XXXXNM Microdescs: may need to download more types. */
   if (!download_status_is_ready(&consensus_dl_status[FLAV_NS], now,
                                 CONSENSUS_NETWORKSTATUS_MAX_DL_TRIES))
@@ -1246,7 +1281,7 @@ update_consensus_networkstatus_fetch_time(time_t now)
        * is no longer fresh... */
       start = c->fresh_until + min_sec_before_caching;
       /* Some clients may need the consensus sooner than others. */
-      if (options->FetchDirInfoExtraEarly) {
+      if (options->FetchDirInfoExtraEarly || authdir_mode_v3(options)) {
         dl_interval = 60;
         if (min_sec_before_caching + dl_interval > interval)
           dl_interval = interval/2;
@@ -1946,6 +1981,15 @@ routers_update_status_from_consensus_networkstatus(smartlist_t *routers,
       router->is_bad_directory = rs->is_bad_directory;
       router->is_bad_exit = rs->is_bad_exit;
       router->is_hs_dir = rs->is_hs_dir;
+    } else {
+      /* If we _are_ an authority, we should check whether this router
+       * is one that will cause us to need a reachability test. */
+      routerinfo_t *old_router =
+        router_get_by_digest(router->cache_info.identity_digest);
+      if (old_router != router) {
+        router->needs_retest_if_added =
+          dirserv_should_launch_reachability_test(router, old_router);
+      }
     }
     if (router->is_running && ds) {
       download_status_reset(&ds->v2_ns_dl_status);

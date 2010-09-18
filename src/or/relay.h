@@ -27,7 +27,8 @@ int connection_edge_send_command(edge_connection_t *fromconn,
                                  uint8_t relay_command, const char *payload,
                                  size_t payload_len);
 int connection_edge_package_raw_inbuf(edge_connection_t *conn,
-                                      int package_partial);
+                                      int package_partial,
+                                      int *max_cells);
 void connection_edge_consider_sending_sendme(edge_connection_t *conn);
 
 extern uint64_t stats_n_data_cells_packaged;
@@ -45,7 +46,8 @@ void cell_queue_append(cell_queue_t *queue, packed_cell_t *cell);
 void cell_queue_append_packed_copy(cell_queue_t *queue, const cell_t *cell);
 
 void append_cell_to_circuit_queue(circuit_t *circ, or_connection_t *orconn,
-                                  cell_t *cell, cell_direction_t direction);
+                                  cell_t *cell, cell_direction_t direction,
+                                  streamid_t fromstream);
 void connection_or_unlink_all_active_circs(or_connection_t *conn);
 int connection_or_flush_from_first_active_circuit(or_connection_t *conn,
                                                   int max, time_t now);
@@ -60,6 +62,7 @@ const char *decode_address_from_payload(tor_addr_t *addr_out,
 unsigned cell_ewma_get_tick(void);
 void cell_ewma_set_scale_factor(or_options_t *options,
                                 networkstatus_t *consensus);
+void circuit_clear_cell_queue(circuit_t *circ, or_connection_t *orconn);
 
 #endif
 

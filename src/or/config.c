@@ -3501,6 +3501,13 @@ options_validate(or_options_t *old_options, or_options_t *options,
              "upgrade your Tor controller as soon as possible.");
   }
 
+  if (options->CookieAuthFileGroupReadable && !options->CookieAuthFile) {
+    log_warn(LD_CONFIG, "You set the CookieAuthFileGroupReadable but did "
+             "not configure a the path for the cookie file via "
+             "CookieAuthFile. This means your cookie will not be group "
+             "readable.");
+  }
+
   if (options->UseEntryGuards && ! options->NumEntryGuards)
     REJECT("Cannot enable UseEntryGuards with NumEntryGuards set to 0");
 
@@ -3825,7 +3832,7 @@ get_windows_conf_root(void)
 {
   static int is_set = 0;
   static char path[MAX_PATH+1];
-  WCHAR wpath[MAX_PATH] = {0};
+  TCHAR tpath[MAX_PATH] = {0};
 
   LPITEMIDLIST idl;
   IMalloc *m;
@@ -3852,8 +3859,12 @@ get_windows_conf_root(void)
     return path;
   }
   /* Convert the path from an "ID List" (whatever that is!) to a path. */
-  result = SHGetPathFromIDListW(idl, wpath);
-  wcstombs(path,wpath,MAX_PATH);
+  result = SHGetPathFromIDList(idl, tpath);
+#ifdef UNICODE
+  wcstombs(path,tpath,MAX_PATH);
+#else
+  strlcpy(path,tpath,sizeof(path));
+#endif
 
   /* Now we need to free the memory that the path-idl was stored in.  In
    * typical Windows fashion, we can't just call 'free()' on it. */

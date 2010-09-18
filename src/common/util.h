@@ -160,6 +160,11 @@ unsigned round_to_next_multiple_of(unsigned number, unsigned divisor);
 uint32_t round_uint32_to_next_multiple_of(uint32_t number, uint32_t divisor);
 uint64_t round_uint64_to_next_multiple_of(uint64_t number, uint64_t divisor);
 
+/* Compute the CEIL of <b>a</b> divided by <b>b</b>, for nonnegative <b>a</b>
+ * and positive <b>b</b>.  Works on integer types only. Not defined if a+b can
+ * overflow. */
+#define CEIL_DIV(a,b) (((a)+(b)-1)/(b))
+
 /* String manipulation */
 
 /** Allowable characters in a hexadecimal string. */
@@ -251,6 +256,33 @@ int ftime_maybe_after(time_t now, time_t when);
 int ftime_maybe_before(time_t now, time_t when);
 int ftime_definitely_after(time_t now, time_t when);
 int ftime_definitely_before(time_t now, time_t when);
+
+/* Rate-limiter */
+
+/** A ratelim_t remembers how often an event is occurring, and how often
+ * it's allowed to occur.  Typical usage is something like:
+ *
+   <pre>
+    if (possibly_very_frequent_event()) {
+      const int INTERVAL = 300;
+      static ratelim_t warning_limit = RATELIM_INIT(INTERVAL);
+      char *m;
+      if ((m = rate_limit_log(&warning_limit, approx_time()))) {
+        log_warn(LD_GENERAL, "The event occurred!%s", m);
+        tor_free(m);
+      }
+    }
+   </pre>
+ */
+typedef struct ratelim_t {
+  int rate;
+  time_t last_allowed;
+  int n_calls_since_last_time;
+} ratelim_t;
+
+#define RATELIM_INIT(r) { (r), 0, 0 }
+
+char *rate_limit_log(ratelim_t *lim, time_t now);
 
 /* File helpers */
 ssize_t write_all(int fd, const char *buf, size_t count, int isSocket);
