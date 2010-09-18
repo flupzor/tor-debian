@@ -6,8 +6,11 @@ tor (0.2.2.16-alpha-1) experimental; urgency=low
     using polipo or privoxy.  The torify(1) wrapper that makes use
     of torsocks or tsocks already handles their absense and emmits a
     proper message telling the user what they are missing (closes: #595898).
+  * Remove suggests of mixminion which is no longer in the archive
+    (closes: #594207), and also of anon-proxy which appears to not
+    have been updated in at least two years.
 
- -- Peter Palfrader <weasel@debian.org>  Sat, 18 Sep 2010 19:42:18 +0200
+ -- Peter Palfrader <weasel@debian.org>  Sat, 18 Sep 2010 19:47:30 +0200
 
 tor (0.2.2.15-alpha-1) experimental; urgency=low
 

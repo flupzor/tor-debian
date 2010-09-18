@@ -11,7 +11,7 @@ Architecture: any
 Depends: ${shlibs:Depends}, adduser
 Conflicts: libssl0.9.8 (<< 0.9.8g-9)
 Recommends: polipo (>= 1) | privoxy, socat, logrotate, tor-geoipdb, torsocks | tsocks
-Suggests: mixmaster, mixminion, anon-proxy
+Suggests: mixmaster
 Description: anonymizing overlay network for TCP
  Tor is a connection-based low-latency anonymous communication system which
  addresses many flaws in the original onion routing design.
