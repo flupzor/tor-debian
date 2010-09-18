@@ -1578,6 +1578,49 @@ ftime_definitely_before(time_t now, time_t when)
 }
 
 /* =====
+ * Rate limiting
+ * ===== */
+
+/** If the rate-limiter <b>lim</b> is ready at <b>now</b>, return the number
+ * of calls to rate_limit_is_ready (including this one!) since the last time
+ * rate_limit_is_ready returned nonzero.  Otherwise return 0. */
+static int
+rate_limit_is_ready(ratelim_t *lim, time_t now)
+{
+  if (lim->rate + lim->last_allowed <= now) {
+    int res = lim->n_calls_since_last_time + 1;
+    lim->last_allowed = now;
+    lim->n_calls_since_last_time = 0;
+    return res;
+  } else {
+    ++lim->n_calls_since_last_time;
+    return 0;
+  }
+}
+
+/** If the rate-limiter <b>lim</b> is ready at <b>now</b>, return a newly
+ * allocated string indicating how many messages were suppressed, suitable to
+ * append to a log message.  Otherwise return NULL. */
+char *
+rate_limit_log(ratelim_t *lim, time_t now)
+{
+  int n;
+  if ((n = rate_limit_is_ready(lim, now))) {
+    if (n == 1) {
+      return tor_strdup("");
+    } else {
+      char *cp=NULL;
+      tor_asprintf(&cp,
+                   " [%d similar message(s) suppressed in last %d seconds]",
+                   n-1, lim->rate);
+      return cp;
+    }
+  } else {
+    return NULL;
+  }
+}
+
+/* =====
  * File helpers
  * ===== */
 
@@ -2526,26 +2569,34 @@ tor_listdir(const char *dirname)
   smartlist_t *result;
 #ifdef MS_WINDOWS
   char *pattern;
-  WCHAR wpattern[MAX_PATH] = {0};
+  TCHAR tpattern[MAX_PATH] = {0};
   char name[MAX_PATH] = {0};
   HANDLE handle;
-  WIN32_FIND_DATAW findData;
+  WIN32_FIND_DATA findData;
   size_t pattern_len = strlen(dirname)+16;
   pattern = tor_malloc(pattern_len);
   tor_snprintf(pattern, pattern_len, "%s\\*", dirname);
-  mbstowcs(wpattern,pattern,MAX_PATH);
-  if (INVALID_HANDLE_VALUE == (handle = FindFirstFileW(wpattern, &findData))) {
+#ifdef UNICODE
+  mbstowcs(tpattern,pattern,MAX_PATH);
+#else
+  strlcpy(tpattern, pattern, MAX_PATH);
+#endif
+  if (INVALID_HANDLE_VALUE == (handle = FindFirstFile(tpattern, &findData))) {
     tor_free(pattern);
     return NULL;
   }
-  wcstombs(name,findData.cFileName,MAX_PATH);
   result = smartlist_create();
   while (1) {
+#ifdef UNICODE
+    wcstombs(name,findData.cFileName,MAX_PATH);
+#else
+    strlcpy(name,findData.cFileName,sizeof(name));
+#endif
     if (strcmp(name, ".") &&
         strcmp(name, "..")) {
       smartlist_add(result, tor_strdup(name));
     }
-    if (!FindNextFileW(handle, &findData)) {
+    if (!FindNextFile(handle, &findData)) {
       DWORD err;
       if ((err = GetLastError()) != ERROR_NO_MORE_FILES) {
         char *errstr = format_win32_error(err);

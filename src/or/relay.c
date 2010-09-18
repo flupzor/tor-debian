@@ -38,25 +38,31 @@ static edge_connection_t *relay_lookup_conn(circuit_t *circ, cell_t *cell,
                                             cell_direction_t cell_direction,
                                             crypt_path_t *layer_hint);
 
-static int
-connection_edge_process_relay_cell(cell_t *cell, circuit_t *circ,
-                                   edge_connection_t *conn,
-                                   crypt_path_t *layer_hint);
-static void
-circuit_consider_sending_sendme(circuit_t *circ, crypt_path_t *layer_hint);
-static void
-circuit_resume_edge_reading(circuit_t *circ, crypt_path_t *layer_hint);
-static int
-circuit_resume_edge_reading_helper(edge_connection_t *conn,
-                                   circuit_t *circ,
-                                   crypt_path_t *layer_hint);
-static int
-circuit_consider_stop_edge_reading(circuit_t *circ, crypt_path_t *layer_hint);
+static int connection_edge_process_relay_cell(cell_t *cell, circuit_t *circ,
+                                              edge_connection_t *conn,
+                                              crypt_path_t *layer_hint);
+static void circuit_consider_sending_sendme(circuit_t *circ,
+                                            crypt_path_t *layer_hint);
+static void circuit_resume_edge_reading(circuit_t *circ,
+                                        crypt_path_t *layer_hint);
+static int circuit_resume_edge_reading_helper(edge_connection_t *conn,
+                                              circuit_t *circ,
+                                              crypt_path_t *layer_hint);
+static int circuit_consider_stop_edge_reading(circuit_t *circ,
+                                              crypt_path_t *layer_hint);
+static int circuit_queue_streams_are_blocked(circuit_t *circ);
 
 /** Cache the current hi-res time; the cache gets reset when libevent
  * calls us. */
 
 static struct timeval cached_time_hires = {0, 0};
+
+/** Stop reading on edge connections when we have this many cells
+ * waiting on the appropriate queue. */
+#define CELL_QUEUE_HIGHWATER_SIZE 256
+/** Start reading from edge connections again when we get down to this many
+ * cells. */
+#define CELL_QUEUE_LOWWATER_SIZE 64
 
 static void
 tor_gettimeofday_cached(struct timeval *tv)
@@ -268,7 +274,7 @@ circuit_receive_relay_cell(cell_t *cell, circuit_t *circ,
                                   * we might kill the circ before we relay
                                   * the cells. */
 
-  append_cell_to_circuit_queue(circ, or_conn, cell, cell_direction);
+  append_cell_to_circuit_queue(circ, or_conn, cell, cell_direction, 0);
   return 0;
 }
 
@@ -365,7 +371,7 @@ relay_crypt(circuit_t *circ, cell_t *cell, cell_direction_t cell_direction,
 static int
 circuit_package_relay_cell(cell_t *cell, circuit_t *circ,
                            cell_direction_t cell_direction,
-                           crypt_path_t *layer_hint)
+                           crypt_path_t *layer_hint, streamid_t on_stream)
 {
   or_connection_t *conn; /* where to send the cell */
 
@@ -409,7 +415,7 @@ circuit_package_relay_cell(cell_t *cell, circuit_t *circ,
   }
   ++stats_n_relay_cells_relayed;
 
-  append_cell_to_circuit_queue(circ, conn, cell, cell_direction);
+  append_cell_to_circuit_queue(circ, conn, cell, cell_direction, on_stream);
   return 0;
 }
 
@@ -536,7 +542,7 @@ relay_command_to_string(uint8_t command)
  * return 0.
  */
 int
-relay_send_command_from_edge(uint16_t stream_id, circuit_t *circ,
+relay_send_command_from_edge(streamid_t stream_id, circuit_t *circ,
                              uint8_t relay_command, const char *payload,
                              size_t payload_len, crypt_path_t *cpath_layer)
 {
@@ -624,8 +630,8 @@ relay_send_command_from_edge(uint16_t stream_id, circuit_t *circ,
     }
   }
 
-  if (circuit_package_relay_cell(&cell, circ, cell_direction, cpath_layer)
-      < 0) {
+  if (circuit_package_relay_cell(&cell, circ, cell_direction, cpath_layer,
+                                 stream_id) < 0) {
     log_warn(LD_BUG,"circuit_package_relay_cell failed. Closing.");
     circuit_mark_for_close(circ, END_CIRC_REASON_INTERNAL);
     return -1;
@@ -947,7 +953,7 @@ connection_edge_process_relay_cell_not_open(
     }
 
     /* handle anything that might have queued */
-    if (connection_edge_package_raw_inbuf(conn, 1) < 0) {
+    if (connection_edge_package_raw_inbuf(conn, 1, NULL) < 0) {
       /* (We already sent an end cell if possible) */
       connection_mark_for_close(TO_CONN(conn));
       return 0;
@@ -1188,6 +1194,7 @@ connection_edge_process_relay_cell(cell_t *cell, circuit_t *circ,
       }
       if (circ->n_conn) {
         uint8_t trunc_reason = *(uint8_t*)(cell->payload + RELAY_HEADER_SIZE);
+        circuit_clear_cell_queue(circ, circ->n_conn);
         connection_or_send_destroy(circ->n_circ_id, circ->n_conn,
                                    trunc_reason);
         circuit_set_n_circid_orconn(circ, 0, NULL);
@@ -1236,9 +1243,13 @@ connection_edge_process_relay_cell(cell_t *cell, circuit_t *circ,
       conn->package_window += STREAMWINDOW_INCREMENT;
       log_debug(domain,"stream-level sendme, packagewindow now %d.",
                 conn->package_window);
+      if (circuit_queue_streams_are_blocked(circ)) {
+        /* Still waiting for queue to flush; don't touch conn */
+        return 0;
+      }
       connection_start_reading(TO_CONN(conn));
       /* handle whatever might still be on the inbuf */
-      if (connection_edge_package_raw_inbuf(conn, 1) < 0) {
+      if (connection_edge_package_raw_inbuf(conn, 1, NULL) < 0) {
         /* (We already sent an end cell if possible) */
         connection_mark_for_close(TO_CONN(conn));
         return 0;
@@ -1304,15 +1315,19 @@ uint64_t stats_n_data_cells_received = 0;
  * ever received were completely full of data. */
 uint64_t stats_n_data_bytes_received = 0;
 
-/** While conn->inbuf has an entire relay payload of bytes on it,
- * and the appropriate package windows aren't empty, grab a cell
- * and send it down the circuit.
+/** If <b>conn</b> has an entire relay payload of bytes on its inbuf (or
+ * <b>package_partial</b> is true), and the appropriate package windows aren't
+ * empty, grab a cell and send it down the circuit.
+ *
+ * If *<b>max_cells</b> is given, package no more than max_cells.  Decrement
+ * *<b>max_cells</b> by the number of cells packaged.
  *
  * Return -1 (and send a RELAY_COMMAND_END cell if necessary) if conn should
  * be marked for close, else return 0.
  */
 int
-connection_edge_package_raw_inbuf(edge_connection_t *conn, int package_partial)
+connection_edge_package_raw_inbuf(edge_connection_t *conn, int package_partial,
+                                  int *max_cells)
 {
   size_t amount_to_process, length;
   char payload[CELL_PAYLOAD_SIZE];
@@ -1327,6 +1342,9 @@ connection_edge_package_raw_inbuf(edge_connection_t *conn, int package_partial)
              conn->_base.marked_for_close_file, conn->_base.marked_for_close);
     return 0;
   }
+
+  if (max_cells && *max_cells <= 0)
+    return 0;
 
  repeat_connection_edge_package_raw_inbuf:
 
@@ -1389,6 +1407,12 @@ connection_edge_package_raw_inbuf(edge_connection_t *conn, int package_partial)
   }
   log_debug(domain,"conn->package_window is now %d",conn->package_window);
 
+  if (max_cells) {
+    *max_cells -= 1;
+    if (*max_cells <= 0)
+      return 0;
+  }
+
   /* handle more if there's more, or return 0 if there isn't */
   goto repeat_connection_edge_package_raw_inbuf;
 }
@@ -1436,7 +1460,10 @@ connection_edge_consider_sending_sendme(edge_connection_t *conn)
 static void
 circuit_resume_edge_reading(circuit_t *circ, crypt_path_t *layer_hint)
 {
-
+  if (circuit_queue_streams_are_blocked(circ)) {
+    log_debug(layer_hint?LD_APP:LD_EXIT,"Too big queue, no resuming");
+    return;
+  }
   log_debug(layer_hint?LD_APP:LD_EXIT,"resuming");
 
   if (CIRCUIT_IS_ORIGIN(circ))
@@ -1452,31 +1479,100 @@ circuit_resume_edge_reading(circuit_t *circ, crypt_path_t *layer_hint)
  * of a linked list of edge streams that should each be considered.
  */
 static int
-circuit_resume_edge_reading_helper(edge_connection_t *conn,
+circuit_resume_edge_reading_helper(edge_connection_t *first_conn,
                                    circuit_t *circ,
                                    crypt_path_t *layer_hint)
 {
-  for ( ; conn; conn=conn->next_stream) {
-    if (conn->_base.marked_for_close)
+  edge_connection_t *conn;
+  int n_streams, n_streams_left;
+  int packaged_this_round;
+  int cells_on_queue;
+  int cells_per_conn;
+
+  /* How many cells do we have space for?  It will be the minimum of
+   * the number needed to exhaust the package window, and the minimum
+   * needed to fill the cell queue. */
+  int max_to_package = circ->package_window;
+  if (CIRCUIT_IS_ORIGIN(circ)) {
+    cells_on_queue = circ->n_conn_cells.n;
+  } else {
+    or_circuit_t *or_circ = TO_OR_CIRCUIT(circ);
+    cells_on_queue = or_circ->p_conn_cells.n;
+  }
+  if (CELL_QUEUE_HIGHWATER_SIZE - cells_on_queue < max_to_package)
+    max_to_package = CELL_QUEUE_HIGHWATER_SIZE - cells_on_queue;
+
+  /* Count how many non-marked streams there are that have anything on
+   * their inbuf, and enable reading on all of the connections. */
+  n_streams = 0;
+  for (conn=first_conn; conn; conn=conn->next_stream) {
+    if (conn->_base.marked_for_close || conn->package_window <= 0)
       continue;
-    if ((!layer_hint && conn->package_window > 0) ||
-        (layer_hint && conn->package_window > 0 &&
-         conn->cpath_layer == layer_hint)) {
+    if (!layer_hint || conn->cpath_layer == layer_hint) {
       connection_start_reading(TO_CONN(conn));
+
+      if (buf_datalen(conn->_base.inbuf) > 0)
+        ++n_streams;
+    }
+  }
+
+  if (n_streams == 0) /* avoid divide-by-zero */
+    return 0;
+
+ again:
+
+  cells_per_conn = CEIL_DIV(max_to_package, n_streams);
+
+  packaged_this_round = 0;
+  n_streams_left = 0;
+
+  /* Iterate over all connections.  Package up to cells_per_conn cells on
+   * each.  Update packaged_this_round with the total number of cells
+   * packaged, and n_streams_left with the number that still have data to
+   * package.
+   */
+  for (conn=first_conn; conn; conn=conn->next_stream) {
+    if (conn->_base.marked_for_close || conn->package_window <= 0)
+      continue;
+    if (!layer_hint || conn->cpath_layer == layer_hint) {
+      int n = cells_per_conn, r;
       /* handle whatever might still be on the inbuf */
-      if (connection_edge_package_raw_inbuf(conn, 1)<0) {
-        /* (We already sent an end cell if possible) */
+      r = connection_edge_package_raw_inbuf(conn, 1, &n);
+
+      /* Note how many we packaged */
+      packaged_this_round += (cells_per_conn-n);
+
+      if (r<0) {
+        /* Problem while packaging. (We already sent an end cell if
+         * possible) */
         connection_mark_for_close(TO_CONN(conn));
         continue;
       }
+
+      /* If there's still data to read, we'll be coming back to this stream. */
+      if (buf_datalen(conn->_base.inbuf))
+          ++n_streams_left;
 
       /* If the circuit won't accept any more data, return without looking
        * at any more of the streams. Any connections that should be stopped
        * have already been stopped by connection_edge_package_raw_inbuf. */
       if (circuit_consider_stop_edge_reading(circ, layer_hint))
         return -1;
+      /* XXXX should we also stop immediately if we fill up the cell queue?
+       * Probably. */
     }
   }
+
+  /* If we made progress, and we are willing to package more, and there are
+   * any streams left that want to package stuff... try again!
+   */
+  if (packaged_this_round && packaged_this_round < max_to_package &&
+      n_streams_left) {
+    max_to_package -= packaged_this_round;
+    n_streams = n_streams_left;
+    goto again;
+  }
+
   return 0;
 }
 
@@ -1544,13 +1640,6 @@ circuit_consider_sending_sendme(circuit_t *circ, crypt_path_t *layer_hint)
     }
   }
 }
-
-/** Stop reading on edge connections when we have this many cells
- * waiting on the appropriate queue. */
-#define CELL_QUEUE_HIGHWATER_SIZE 256
-/** Start reading from edge connections again when we get down to this many
- * cells. */
-#define CELL_QUEUE_LOWWATER_SIZE 64
 
 #ifdef ACTIVE_CIRCUITS_PARANOIA
 #define assert_active_circuits_ok_paranoid(conn) \
@@ -2092,12 +2181,19 @@ connection_or_unlink_all_active_circs(or_connection_t *orconn)
 
 /** Block (if <b>block</b> is true) or unblock (if <b>block</b> is false)
  * every edge connection that is using <b>circ</b> to write to <b>orconn</b>,
- * and start or stop reading as appropriate. */
-static void
+ * and start or stop reading as appropriate.
+ *
+ * If <b>stream_id</b> is nonzero, block only the edge connection whose
+ * stream_id matches it.
+ *
+ * Returns the number of streams whose status we changed.
+ */
+static int
 set_streams_blocked_on_circ(circuit_t *circ, or_connection_t *orconn,
-                            int block)
+                            int block, streamid_t stream_id)
 {
   edge_connection_t *edge = NULL;
+  int n = 0;
   if (circ->n_conn == orconn) {
     circ->streams_blocked_on_n_conn = block;
     if (CIRCUIT_IS_ORIGIN(circ))
@@ -2110,7 +2206,13 @@ set_streams_blocked_on_circ(circuit_t *circ, or_connection_t *orconn,
 
   for (; edge; edge = edge->next_stream) {
     connection_t *conn = TO_CONN(edge);
-    edge->edge_blocked_on_circ = block;
+    if (stream_id && edge->stream_id != stream_id)
+      continue;
+
+    if (edge->edge_blocked_on_circ != block) {
+      ++n;
+      edge->edge_blocked_on_circ = block;
+    }
 
     if (!conn->read_event) {
       /* This connection is a placeholder for something; probably a DNS
@@ -2127,6 +2229,8 @@ set_streams_blocked_on_circ(circuit_t *circ, or_connection_t *orconn,
         connection_start_reading(conn);
     }
   }
+
+  return n;
 }
 
 /** Pull as many cells as possible (but no more than <b>max</b>) from the
@@ -2193,7 +2297,9 @@ connection_or_flush_from_first_active_circuit(or_connection_t *conn, int max,
       flushed = (uint32_t)((now.tv_sec % SECONDS_IN_A_DAY) * 100L +
                  (uint32_t)now.tv_usec / (uint32_t)10000L);
       if (!it_queue || !it_queue->first) {
-        log_warn(LD_BUG, "Cannot determine insertion time of cell.");
+        log_info(LD_GENERAL, "Cannot determine insertion time of cell. "
+                             "Looks like the CellStatistics option was "
+                             "recently enabled.");
       } else {
         or_circuit_t *orcirc = TO_OR_CIRCUIT(circ);
         insertion_time_elem_t *elem = it_queue->first;
@@ -2252,7 +2358,7 @@ connection_or_flush_from_first_active_circuit(or_connection_t *conn, int max,
   /* Is the cell queue low enough to unblock all the streams that are waiting
    * to write to this circuit? */
   if (streams_blocked && queue->n <= CELL_QUEUE_LOWWATER_SIZE)
-    set_streams_blocked_on_circ(circ, conn, 0); /* unblock streams */
+    set_streams_blocked_on_circ(circ, conn, 0, 0); /* unblock streams */
 
   /* Did we just run out of cells on this circuit's queue? */
   if (queue->n == 0) {
@@ -2269,10 +2375,14 @@ connection_or_flush_from_first_active_circuit(or_connection_t *conn, int max,
  * transmitting in <b>direction</b>. */
 void
 append_cell_to_circuit_queue(circuit_t *circ, or_connection_t *orconn,
-                             cell_t *cell, cell_direction_t direction)
+                             cell_t *cell, cell_direction_t direction,
+                             streamid_t fromstream)
 {
   cell_queue_t *queue;
   int streams_blocked;
+  if (circ->marked_for_close)
+    return;
+
   if (direction == CELL_DIRECTION_OUT) {
     queue = &circ->n_conn_cells;
     streams_blocked = circ->streams_blocked_on_n_conn;
@@ -2291,7 +2401,12 @@ append_cell_to_circuit_queue(circuit_t *circ, or_connection_t *orconn,
   /* If we have too many cells on the circuit, we should stop reading from
    * the edge streams for a while. */
   if (!streams_blocked && queue->n >= CELL_QUEUE_HIGHWATER_SIZE)
-    set_streams_blocked_on_circ(circ, orconn, 1); /* block streams */
+    set_streams_blocked_on_circ(circ, orconn, 1, 0); /* block streams */
+
+  if (streams_blocked && fromstream) {
+    /* This edge connection is apparently not blocked; block it. */
+    set_streams_blocked_on_circ(circ, orconn, 1, fromstream);
+  }
 
   if (queue->n == 1) {
     /* This was the first cell added to the queue.  We need to make this
@@ -2370,6 +2485,25 @@ decode_address_from_payload(tor_addr_t *addr_out, const char *payload,
   return payload + 2 + (uint8_t)payload[1];
 }
 
+/** Remove all the cells queued on <b>circ</b> for <b>orconn</b>. */
+void
+circuit_clear_cell_queue(circuit_t *circ, or_connection_t *orconn)
+{
+  cell_queue_t *queue;
+  if (circ->n_conn == orconn) {
+    queue = &circ->n_conn_cells;
+  } else {
+    or_circuit_t *orcirc = TO_OR_CIRCUIT(circ);
+    tor_assert(orcirc->p_conn == orconn);
+    queue = &orcirc->p_conn_cells;
+  }
+
+  if (queue->n)
+    make_circuit_inactive_on_conn(circ,orconn);
+
+  cell_queue_clear(queue);
+}
+
 /** Fail with an assert if the active circuits ring on <b>orconn</b> is
  * corrupt.  */
 void
@@ -2403,5 +2537,18 @@ assert_active_circuits_ok(or_connection_t *orconn)
   } while (cur != head);
 
   tor_assert(n == smartlist_len(orconn->active_circuit_pqueue));
+}
+
+/** Return 1 if we shouldn't restart reading on this circuit, even if
+ * we get a SENDME.  Else return 0.
+*/
+static int
+circuit_queue_streams_are_blocked(circuit_t *circ)
+{
+  if (CIRCUIT_IS_ORIGIN(circ)) {
+    return circ->streams_blocked_on_n_conn;
+  } else {
+    return circ->streams_blocked_on_p_conn;
+  }
 }
 

@@ -252,8 +252,7 @@ connection_or_flushed_some(or_connection_t *conn)
   /* If we're under the low water mark, add cells until we're just over the
    * high water mark. */
   if (datalen < OR_CONN_LOWWATER) {
-    ssize_t n = (OR_CONN_HIGHWATER - datalen + CELL_NETWORK_SIZE-1)
-      / CELL_NETWORK_SIZE;
+    ssize_t n = CEIL_DIV(OR_CONN_HIGHWATER - datalen, CELL_NETWORK_SIZE);
     time_t now = approx_time();
     while (conn->active_circuits && n > 0) {
       int flushed;
@@ -371,10 +370,10 @@ connection_or_update_token_buckets_helper(or_connection_t *conn, int reset,
      * bandwidth parameters in the consensus, but allow local config
      * options to override. */
     rate = options->PerConnBWRate ? (int)options->PerConnBWRate :
-        (int)networkstatus_get_param(NULL, "bwconnrate",
+        (int)networkstatus_get_param(NULL, "perconnbwrate",
                                      (int)options->BandwidthRate);
     burst = options->PerConnBWBurst ? (int)options->PerConnBWBurst :
-        (int)networkstatus_get_param(NULL, "bwconnburst",
+        (int)networkstatus_get_param(NULL, "perconnbwburst",
                                      (int)options->BandwidthBurst);
   }
 
@@ -1323,10 +1322,6 @@ connection_or_send_destroy(circid_t circ_id, or_connection_t *conn, int reason)
   cell.command = CELL_DESTROY;
   cell.payload[0] = (uint8_t) reason;
   log_debug(LD_OR,"Sending destroy (circID %d).", circ_id);
-
-  /* XXXX It's possible that under some circumstances, we want the destroy
-   * to take precedence over other data waiting on the circuit's cell queue.
-   */
 
   connection_or_write_cell_to_buf(&cell, conn);
   return 0;

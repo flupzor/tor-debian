@@ -24,6 +24,7 @@ void authority_cert_get_all(smartlist_t *certs_out);
 void authority_cert_dl_failed(const char *id_digest, int status);
 void authority_certs_fetch_missing(networkstatus_t *status, time_t now);
 int router_reload_router_list(void);
+int authority_cert_dl_looks_uncertain(const char *id_digest);
 smartlist_t *router_get_trusted_dir_servers(void);
 
 routerstatus_t *router_pick_directory_server(authority_type_t type, int flags);
@@ -35,6 +36,7 @@ int router_get_my_share_of_directory_requests(double *v2_share_out,
 void router_reset_status_download_failures(void);
 void routerlist_add_family(smartlist_t *sl, routerinfo_t *router);
 int routers_in_same_family(routerinfo_t *r1, routerinfo_t *r2);
+int routers_have_same_or_addr(const routerinfo_t *r1, const routerinfo_t *r2);
 void add_nickname_list_to_smartlist(smartlist_t *sl, const char *list,
                                     int must_be_running);
 int router_nickname_is_in_list(routerinfo_t *router, const char *list);
@@ -115,6 +117,7 @@ was_router_added_t router_add_to_routerlist(routerinfo_t *router,
 was_router_added_t router_add_extrainfo_to_routerlist(
                                         extrainfo_t *ei, const char **msg,
                                         int from_cache, int from_fetch);
+void routerlist_descriptors_added(smartlist_t *sl, int from_cache);
 void routerlist_remove_old_routers(void);
 int router_load_single_router(const char *s, uint8_t purpose, int cache,
                               const char **msg);

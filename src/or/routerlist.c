@@ -440,6 +440,23 @@ authority_cert_dl_failed(const char *id_digest, int status)
   download_status_failed(&cl->dl_status, status);
 }
 
+/** Return true iff when we've been getting enough failures when trying to
+ * download the certificate with ID digest <b>id_digest</b> that we're willing
+ * to start bugging the user about it. */
+int
+authority_cert_dl_looks_uncertain(const char *id_digest)
+{
+#define N_AUTH_CERT_DL_FAILURES_TO_BUG_USER 2
+  cert_list_t *cl;
+  int n_failures;
+  if (!trusted_dir_certs ||
+      !(cl = digestmap_get(trusted_dir_certs, id_digest)))
+    return 0;
+
+  n_failures = download_status_get_n_failures(&cl->dl_status);
+  return n_failures >= N_AUTH_CERT_DL_FAILURES_TO_BUG_USER;
+}
+
 /** How many times will we try to fetch a certificate before giving up? */
 #define MAX_CERT_DL_FAILURES 8
 
@@ -1255,6 +1272,13 @@ mark_all_trusteddirservers_up(void)
     });
   }
   router_dir_info_changed();
+}
+
+/** Return true iff r1 and r2 have the same address and OR port. */
+int
+routers_have_same_or_addr(const routerinfo_t *r1, const routerinfo_t *r2)
+{
+  return r1->addr == r2->addr && r1->or_port == r2->or_port;
 }
 
 /** Reset all internal variables used to count failed downloads of network
@@ -3159,8 +3183,10 @@ router_add_to_routerlist(routerinfo_t *router, const char **msg,
     /* If we have this descriptor already and the new descriptor is a bridge
      * descriptor, replace it. If we had a bridge descriptor before and the
      * new one is not a bridge descriptor, don't replace it. */
-    if (old_router && (!routerinfo_is_a_configured_bridge(router) ||
-                routerinfo_is_a_configured_bridge(old_router))) {
+    tor_assert(old_router);
+    if (! (routerinfo_is_a_configured_bridge(router) &&
+            (router->purpose == ROUTER_PURPOSE_BRIDGE ||
+             old_router->purpose != ROUTER_PURPOSE_BRIDGE))) {
       log_info(LD_DIR,
                "Dropping descriptor that we already have for router '%s'",
                router->nickname);
@@ -3251,8 +3277,7 @@ router_add_to_routerlist(routerinfo_t *router, const char **msg,
       log_debug(LD_DIR, "Replacing entry for router '%s/%s' [%s]",
                 router->nickname, old_router->nickname,
                 hex_str(id_digest,DIGEST_LEN));
-      if (router->addr == old_router->addr &&
-          router->or_port == old_router->or_port) {
+      if (routers_have_same_or_addr(router, old_router)) {
         /* these carry over when the address and orport are unchanged. */
         router->last_reachable = old_router->last_reachable;
         router->testing_since = old_router->testing_since;
@@ -3281,11 +3306,6 @@ router_add_to_routerlist(routerinfo_t *router, const char **msg,
    * the list. */
   routerlist_insert(routerlist, router);
   if (!from_cache) {
-    if (authdir) {
-      /* launch an immediate reachability test, so we will have an opinion
-       * soon in case we're generating a consensus soon */
-      dirserv_single_reachability_test(time(NULL), router);
-    }
     signed_desc_append_to_journal(&router->cache_info,
                                   &routerlist->desc_store);
   }
@@ -3605,15 +3625,19 @@ routerlist_remove_old_routers(void)
 
 /** We just added a new set of descriptors. Take whatever extra steps
  * we need. */
-static void
+void
 routerlist_descriptors_added(smartlist_t *sl, int from_cache)
 {
   tor_assert(sl);
   control_event_descriptors_changed(sl);
-  SMARTLIST_FOREACH(sl, routerinfo_t *, ri,
+  SMARTLIST_FOREACH_BEGIN(sl, routerinfo_t *, ri) {
     if (ri->purpose == ROUTER_PURPOSE_BRIDGE)
       learned_bridge_descriptor(ri, from_cache);
-  );
+    if (ri->needs_retest_if_added) {
+      ri->needs_retest_if_added = 0;
+      dirserv_single_reachability_test(approx_time(), ri);
+    }
+  } SMARTLIST_FOREACH_END(ri);
 }
 
 /**
@@ -4196,7 +4220,7 @@ launch_router_descriptor_downloads(smartlist_t *downloadable,
       pds_flags |= PDS_NO_EXISTING_SERVERDESC_FETCH;
     }
 
-    n_per_request = (n_downloadable+MIN_REQUESTS-1) / MIN_REQUESTS;
+    n_per_request = CEIL_DIV(n_downloadable, MIN_REQUESTS);
     if (n_per_request > MAX_DL_PER_REQUEST)
       n_per_request = MAX_DL_PER_REQUEST;
     if (n_per_request < MIN_DL_PER_REQUEST)
@@ -4209,7 +4233,7 @@ launch_router_descriptor_downloads(smartlist_t *downloadable,
 
     log_info(LD_DIR,
              "Launching %d request%s for %d router%s, %d at a time",
-             (n_downloadable+n_per_request-1)/n_per_request,
+             CEIL_DIV(n_downloadable, n_per_request),
              req_plural, n_downloadable, rtr_plural, n_per_request);
     smartlist_sort_digests(downloadable);
     for (i=0; i < n_downloadable; i += n_per_request) {
