@@ -9,8 +9,9 @@ tor (0.2.2.16-alpha-1) experimental; urgency=low
   * Remove suggests of mixminion which is no longer in the archive
     (closes: #594207), and also of anon-proxy which appears to not
     have been updated in at least two years.
+  * Add xul-ext-torbutton to suggests.
 
- -- Peter Palfrader <weasel@debian.org>  Sat, 18 Sep 2010 19:47:30 +0200
+ -- Peter Palfrader <weasel@debian.org>  Sat, 18 Sep 2010 19:49:23 +0200
 
 tor (0.2.2.15-alpha-1) experimental; urgency=low
 
