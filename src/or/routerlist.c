@@ -1572,6 +1572,29 @@ router_get_advertised_bandwidth_capped(routerinfo_t *router)
   return result;
 }
 
+/** When weighting bridges, enforce these values as lower and upper
+ * bound for believable bandwidth, because there is no way for us
+ * to verify a bridge's bandwidth currently. */
+#define BRIDGE_MIN_BELIEVABLE_BANDWIDTH 20000  /* 20 kB/sec */
+#define BRIDGE_MAX_BELIEVABLE_BANDWIDTH 100000 /* 100 kB/sec */
+
+/** Return the smaller of the router's configured BandwidthRate
+ * and its advertised capacity, making sure to stay within the
+ * interval between bridge-min-believe-bw and
+ * bridge-max-believe-bw. */
+static uint32_t
+bridge_get_advertised_bandwidth_bounded(routerinfo_t *router)
+{
+  uint32_t result = router->bandwidthcapacity;
+  if (result > router->bandwidthrate)
+    result = router->bandwidthrate;
+  if (result > BRIDGE_MAX_BELIEVABLE_BANDWIDTH)
+    result = BRIDGE_MAX_BELIEVABLE_BANDWIDTH;
+  else if (result < BRIDGE_MIN_BELIEVABLE_BANDWIDTH)
+    result = BRIDGE_MIN_BELIEVABLE_BANDWIDTH;
+  return result;
+}
+
 /** Return bw*1000, unless bw*1000 would overflow, in which case return
  * INT32_MAX. */
 static INLINE int32_t
@@ -1610,6 +1633,7 @@ smartlist_choose_by_bandwidth_weights(smartlist_t *sl,
   double *bandwidths;
   double tmp = 0;
   unsigned int i;
+  int have_unknown = 0; /* true iff sl contains element not in consensus. */
 
   /* Can't choose exit and guard at same time */
   tor_assert(rule == NO_WEIGHTING ||
@@ -1725,7 +1749,8 @@ smartlist_choose_by_bandwidth_weights(smartlist_t *sl,
       if (rs && rs->has_bandwidth) {
         this_bw = kb_to_bytes(rs->bandwidth);
       } else { /* bridge or other descriptor not in our consensus */
-        this_bw = router_get_advertised_bandwidth_capped(router);
+        this_bw = bridge_get_advertised_bandwidth_bounded(router);
+        have_unknown = 1;
       }
       if (router_digest_is_me(router->cache_info.identity_digest))
         is_me = 1;
@@ -1756,9 +1781,11 @@ smartlist_choose_by_bandwidth_weights(smartlist_t *sl,
 
   /* If there is no bandwidth, choose at random */
   if (DBL_TO_U64(weighted_bw) == 0) {
-    log_warn(LD_CIRC,
-             "Weighted bandwidth is %lf in node selection for rule %s",
-             weighted_bw, bandwidth_weight_rule_to_string(rule));
+    /* Don't warn when using bridges/relays not in the consensus */
+    if (!have_unknown)
+      log_warn(LD_CIRC,
+               "Weighted bandwidth is %lf in node selection for rule %s",
+               weighted_bw, bandwidth_weight_rule_to_string(rule));
     tor_free(bandwidths);
     return smartlist_choose(sl);
   }
@@ -1893,7 +1920,7 @@ smartlist_choose_by_bandwidth(smartlist_t *sl, bandwidth_weight_rule_t rule,
         flags |= is_exit ? 2 : 0;
         flags |= is_guard ? 4 : 0;
       } else /* bridge or other descriptor not in our consensus */
-        this_bw = router_get_advertised_bandwidth_capped(router);
+        this_bw = bridge_get_advertised_bandwidth_bounded(router);
     }
     if (is_exit)
       bitarray_set(exit_bits, i);
@@ -1901,6 +1928,8 @@ smartlist_choose_by_bandwidth(smartlist_t *sl, bandwidth_weight_rule_t rule,
       bitarray_set(guard_bits, i);
     if (is_known) {
       bandwidths[i] = (int32_t) this_bw; // safe since MAX_BELIEVABLE<INT32_MAX
+      // XXX this is no longer true! We don't always cap the bw anymore. Can
+      // a consensus make us overflow?-sh
       tor_assert(bandwidths[i] >= 0);
       if (is_guard)
         total_guard_bw += this_bw;
@@ -4673,16 +4702,21 @@ get_dir_info_status_string(void)
 /** Iterate over the servers listed in <b>consensus</b>, and count how many of
  * them seem like ones we'd use, and how many of <em>those</em> we have
  * descriptors for.  Store the former in *<b>num_usable</b> and the latter in
- * *<b>num_present</b>.  */
+ * *<b>num_present</b>.  If <b>in_set</b> is non-NULL, only consider those
+ * routers in <b>in_set</b>.
+ */
 static void
 count_usable_descriptors(int *num_present, int *num_usable,
                          const networkstatus_t *consensus,
-                         or_options_t *options, time_t now)
+                         or_options_t *options, time_t now,
+                         routerset_t *in_set)
 {
   *num_present = 0, *num_usable=0;
 
   SMARTLIST_FOREACH(consensus->routerstatus_list, routerstatus_t *, rs,
      {
+       if (in_set && ! routerset_contains_routerstatus(in_set, rs))
+         continue;
        if (client_would_use_router(rs, now, options)) {
          ++*num_usable; /* the consensus says we want it. */
          if (router_get_by_descriptor_digest(rs->descriptor_digest)) {
@@ -4711,7 +4745,7 @@ count_loading_descriptors_progress(void)
     return 0; /* can't count descriptors if we have no list of them */
 
   count_usable_descriptors(&num_present, &num_usable,
-                           consensus, get_options(), now);
+                           consensus, get_options(), now, NULL);
 
   if (num_usable == 0)
     return 0; /* don't div by 0 */
@@ -4755,21 +4789,38 @@ update_router_have_minimum_dir_info(void)
     goto done;
   }
 
-  count_usable_descriptors(&num_present, &num_usable, consensus, options, now);
+  count_usable_descriptors(&num_present, &num_usable, consensus, options, now,
+                           NULL);
 
   if (num_present < num_usable/4) {
     tor_snprintf(dir_info_status, sizeof(dir_info_status),
             "We have only %d/%d usable descriptors.", num_present, num_usable);
     res = 0;
     control_event_bootstrap(BOOTSTRAP_STATUS_REQUESTING_DESCRIPTORS, 0);
+    goto done;
   } else if (num_present < 2) {
     tor_snprintf(dir_info_status, sizeof(dir_info_status),
                  "Only %d descriptor%s here and believed reachable!",
                  num_present, num_present ? "" : "s");
     res = 0;
-  } else {
-    res = 1;
+    goto done;
   }
+
+  /* Check for entry nodes. */
+  if (options->EntryNodes) {
+    count_usable_descriptors(&num_present, &num_usable, consensus, options,
+                             now, options->EntryNodes);
+
+    if (!num_usable || !num_present) {
+      tor_snprintf(dir_info_status, sizeof(dir_info_status),
+                   "We have only %d/%d usable entry node descriptors.",
+                   num_present, num_usable);
+      res = 0;
+      goto done;
+    }
+  }
+
+  res = 1;
 
  done:
   if (res && !have_min_dir_info) {
@@ -4783,6 +4834,13 @@ update_router_have_minimum_dir_info(void)
     log(quiet ? LOG_INFO : LOG_NOTICE, LD_DIR,
         "Our directory information is no longer up-to-date "
         "enough to build circuits: %s", dir_info_status);
+
+    /* a) make us log when we next complete a circuit, so we know when Tor
+     * is back up and usable, and b) disable some activities that Tor
+     * should only do while circuits are working, like reachability tests
+     * and fetching bridge descriptors only over circuits. */
+    can_complete_circuit = 0;
+
     control_event_client_status(LOG_NOTICE, "NOT_ENOUGH_DIR_INFO");
   }
   have_min_dir_info = res;

@@ -65,7 +65,10 @@ Other options can be specified either on the command-line (--option
     value), or in the configuration file (option value or option "value").
     Options are case-insensitive. C-style escaped characters are allowed inside
     quoted values.   Options on the command line take precedence over
-    options found in the configuration file.
+    options found in the configuration file, except indicated otherwise.  To
+    split one configuration entry into multiple lines, use a single \ before
+    the end of the line.  Comments can be used in such multiline entries, but
+    they must start at the beginning of a line.
 
 **BandwidthRate** __N__ **bytes**|**KB**|**MB**|**GB**::
     A token bucket limits the average incoming bandwidth usage on this node to
@@ -905,6 +908,12 @@ is non-zero):
     the next day. All times are local, and given in 24-hour time. (Defaults to
     "month 1 0:00".)
 
+**RefuseUnknownExits** **0**|**1**|**auto**::
+    Prevent nodes that don't appear in the consensus from exiting using this
+    relay.  If the option is 1, we always block exit attempts from such
+    nodes; if it's 0, we never do, and if the option is "auto", then we do
+    whatever the authorities suggest in the consensus. (Defaults to auto.)
+
 **ServerDNSResolvConfFile** __filename__::
     Overrides the default DNS configuration with the configuration in
     __filename__. The file format is the same as the standard Unix
@@ -1222,7 +1231,7 @@ The following options are used to configure a hidden service.
 **RendPostPeriod** __N__ **seconds**|**minutes**|**hours**|**days**|**weeks**::
     Every time the specified period elapses, Tor uploads any rendezvous 
     service descriptors to the directory servers. This information  is also
-    uploaded whenever it changes. (Default: 20 minutes)
+    uploaded whenever it changes. (Default: 1 hour)
 
 TESTING NETWORK OPTIONS
 -----------------------

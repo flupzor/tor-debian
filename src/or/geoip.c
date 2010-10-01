@@ -145,6 +145,7 @@ _geoip_compare_entries(const void **_a, const void **_b)
 static int
 _geoip_compare_key_to_entry(const void *_key, const void **_member)
 {
+  /* No alignment issue here, since _key really is a pointer to uint32_t */
   const uint32_t addr = *(uint32_t *)_key;
   const geoip_entry_t *entry = *_member;
   if (addr < entry->ip_low)
@@ -253,6 +254,8 @@ geoip_get_country_by_ip(uint32_t ipaddr)
 int
 geoip_get_n_countries(void)
 {
+  if (!geoip_countries)
+    init_geoip_countries();
   return (int) smartlist_len(geoip_countries);
 }
 
