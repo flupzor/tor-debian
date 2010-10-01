@@ -614,6 +614,10 @@ typedef enum {
 
 /* Negative reasons are internal: we never send them in a DESTROY or TRUNCATE
  * call; they only go to the controller for tracking  */
+/** Our post-timeout circuit time measurement period expired.
+ * We must give up now */
+#define END_CIRC_REASON_MEASUREMENT_EXPIRED -3
+
 /** We couldn't build a path for this circuit. */
 #define END_CIRC_REASON_NOPATH          -2
 /** Catch-all "other" reason for closing origin circuits. */
@@ -1047,7 +1051,10 @@ typedef struct or_connection_t {
    * NETINFO cell listed the address we're connected to as recognized. */
   unsigned int is_canonical:1;
   /** True iff this connection shouldn't get any new circs attached to it,
-   * because the connection is too old, or because there's a better one, etc.
+   * because the connection is too old, or because there's a better one.
+   * More generally, this flag is used to note an unhealthy connection;
+   * for example, if a bad connection fails we shouldn't assume that the
+   * router itself has a problem.
    */
   unsigned int is_bad_for_new_circs:1;
   uint8_t link_proto; /**< What protocol version are we using? 0 for
@@ -2160,8 +2167,12 @@ typedef struct origin_circuit_t {
    * to the specification? */
   unsigned int remaining_relay_early_cells : 4;
 
-  /** Set if this circuit insanely old and if we already informed the user */
+  /** Set if this circuit is insanely old and we already informed the user */
   unsigned int is_ancient : 1;
+
+  /** Set if this circuit has already been opened. Used to detect
+   * cannibalized circuits. */
+  unsigned int has_opened : 1;
 
   /** What commands were sent over this circuit that decremented the
    * RELAY_EARLY counter? This is for debugging task 878. */
@@ -2468,10 +2479,13 @@ typedef struct {
   int ConstrainedSockets; /**< Shrink xmit and recv socket buffers. */
   uint64_t ConstrainedSockSize; /**< Size of constrained buffers. */
 
-  /** Whether we should drop exit streams from Tors that we don't know
-   * are relays. XXX022 In here for 0.2.2.11 as a temporary test before
-   * we switch over to putting it in consensusparams. -RD */
-  int RefuseUnknownExits;
+  /** Whether we should drop exit streams from Tors that we don't know are
+   * relays.  One of "0" (never refuse), "1" (always refuse), or "auto" (do
+   * what the consensus says, defaulting to 'refuse' if the consensus says
+   * nothing). */
+  char *RefuseUnknownExits;
+  /** Parsed version of RefuseUnknownExits. -1 for auto. */
+  int RefuseUnknownExits_;
 
   /** Application ports that require all nodes in circ to have sufficient
    * uptime. */
@@ -2831,6 +2845,9 @@ typedef struct {
   uint64_t AccountingBytesReadInInterval;
   uint64_t AccountingBytesWrittenInInterval;
   int AccountingSecondsActive;
+  int AccountingSecondsToReachSoftLimit;
+  time_t AccountingSoftLimitHitAt;
+  uint64_t AccountingBytesAtSoftLimit;
   uint64_t AccountingExpectedUsage;
 
   /** A list of Entry Guard-related configuration lines. */
@@ -2950,26 +2967,6 @@ typedef uint32_t build_time_t;
 /** Save state every 10 circuits */
 #define CBT_SAVE_STATE_EVERY 10
 
-/* Circuit Build Timeout network liveness constants */
-
-/**
- * Have we received a cell in the last N circ attempts?
- *
- * This tells us when to temporarily switch back to
- * BUILD_TIMEOUT_INITIAL_VALUE until we start getting cells,
- * at which point we switch back to computing the timeout from
- * our saved history.
- */
-#define CBT_NETWORK_NONLIVE_TIMEOUT_COUNT 3
-
-/**
- * This tells us when to toss out the last streak of N timeouts.
- *
- * If instead we start getting cells, we switch back to computing the timeout
- * from our saved history.
- */
-#define CBT_NETWORK_NONLIVE_DISCARD_COUNT (CBT_NETWORK_NONLIVE_TIMEOUT_COUNT*2)
-
 /* Circuit build times consensus parameters */
 
 /**
@@ -2988,8 +2985,9 @@ typedef uint32_t build_time_t;
  * Maximum count of timeouts that finish the first hop in the past
  * RECENT_CIRCUITS before calculating a new timeout.
  *
- * This tells us to abandon timeout history and set
- * the timeout back to BUILD_TIMEOUT_INITIAL_VALUE.
+ * This tells us whether to abandon timeout history and set
+ * the timeout back to whatever circuit_build_times_get_initial_timeout()
+ * gives us.
  */
 #define CBT_DEFAULT_MAX_RECENT_TIMEOUT_COUNT (CBT_DEFAULT_RECENT_CIRCUITS*9/10)
 
@@ -3004,15 +3002,13 @@ double circuit_build_times_quantile_cutoff(void);
 #define CBT_DEFAULT_TEST_FREQUENCY 60
 
 /** Lowest allowable value for CircuitBuildTimeout in milliseconds */
-#define CBT_DEFAULT_TIMEOUT_MIN_VALUE (2*1000)
+#define CBT_DEFAULT_TIMEOUT_MIN_VALUE (1500)
 
 /** Initial circuit build timeout in milliseconds */
 #define CBT_DEFAULT_TIMEOUT_INITIAL_VALUE (60*1000)
 int32_t circuit_build_times_initial_timeout(void);
 
-#if CBT_DEFAULT_MAX_RECENT_TIMEOUT_COUNT < 1 || \
-    CBT_NETWORK_NONLIVE_DISCARD_COUNT < 1 || \
-    CBT_NETWORK_NONLIVE_TIMEOUT_COUNT < 1
+#if CBT_DEFAULT_MAX_RECENT_TIMEOUT_COUNT < 1
 #error "RECENT_CIRCUITS is set too low."
 #endif
 
@@ -3022,8 +3018,6 @@ typedef struct {
   time_t network_last_live;
   /** If the network is not live, how many timeouts has this caused? */
   int nonlive_timeouts;
-  /** If the network is not live, have we yet discarded our history? */
-  int nonlive_discarded;
   /** Circular array of circuits that have made it to the first hop. Slot is
    * 1 if circuit timed out, 0 if circuit succeeded */
   int8_t *timeouts_after_firsthop;
@@ -3031,12 +3025,6 @@ typedef struct {
   int num_recent_circs;
   /** Index into circular array. */
   int after_firsthop_idx;
-  /** Timeout gathering is suspended if non-zero. The old timeout value
-    * is stored here in that case. */
-  double suspended_timeout;
-  /** Timeout gathering is suspended if non-zero. The old close value
-    * is stored here in that case. */
-  double suspended_close_timeout;
 } network_liveness_t;
 
 /** Structure for circuit build times history */

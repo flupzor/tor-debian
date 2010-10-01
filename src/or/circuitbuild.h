@@ -24,6 +24,7 @@ origin_circuit_t *circuit_establish_circuit(uint8_t purpose,
 int circuit_handle_first_hop(origin_circuit_t *circ);
 void circuit_n_conn_done(or_connection_t *or_conn, int status);
 int inform_testing_reachability(void);
+int circuit_timeout_want_to_count_circ(origin_circuit_t *circ);
 int circuit_send_next_onion_skin(origin_circuit_t *circ);
 void circuit_note_clock_jumped(int seconds_elapsed);
 int circuit_extend(cell_t *cell, circuit_t *circ);
@@ -49,7 +50,7 @@ void extend_info_free(extend_info_t *info);
 routerinfo_t *build_state_get_exit_router(cpath_build_state_t *state);
 const char *build_state_get_exit_nickname(cpath_build_state_t *state);
 
-void entry_guards_compute_status(void);
+void entry_guards_compute_status(or_options_t *options, time_t now);
 int entry_guard_register_connect_status(const char *digest, int succeeded,
                                         int mark_relay_status, time_t now);
 void entry_nodes_should_be_added(void);
@@ -68,16 +69,17 @@ learned_router_identity(tor_addr_t *addr, uint16_t port, const char *digest);
 void bridge_add_from_config(const tor_addr_t *addr, uint16_t port,
                             char *digest);
 void retry_bridge_descriptor_fetch_directly(const char *digest);
-void fetch_bridge_descriptors(time_t now);
+void fetch_bridge_descriptors(or_options_t *options, time_t now);
 void learned_bridge_descriptor(routerinfo_t *ri, int from_cache);
 int any_bridge_descriptors_known(void);
 int any_pending_bridge_descriptor_fetches(void);
-int bridges_known_but_down(void);
-void bridges_retry_all(void);
+int entries_known_but_down(or_options_t *options);
+void entries_retry_all(or_options_t *options);
 
 void entry_guards_free_all(void);
 
 extern circuit_build_times_t circ_times;
+int circuit_build_times_enough_to_compute(circuit_build_times_t *cbt);
 void circuit_build_times_update_state(circuit_build_times_t *cbt,
                                       or_state_t *state);
 int circuit_build_times_parse_state(circuit_build_times_t *cbt,

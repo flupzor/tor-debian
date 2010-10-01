@@ -149,6 +149,14 @@ circuit_build_times_min_circs_to_observe(void)
   return num;
 }
 
+/** Return true iff <b>cbt</b> has recorded enough build times that we
+ * want to start acting on the timeout it implies. */
+int
+circuit_build_times_enough_to_compute(circuit_build_times_t *cbt)
+{
+  return cbt->total_build_times >= circuit_build_times_min_circs_to_observe();
+}
+
 double
 circuit_build_times_quantile_cutoff(void)
 {
@@ -292,8 +300,8 @@ circuit_build_times_reset(circuit_build_times_t *cbt)
 /**
  * Initialize the buildtimes structure for first use.
  *
- * Sets the initial timeout value based to either the
- * config setting or BUILD_TIMEOUT_INITIAL_VALUE.
+ * Sets the initial timeout values based on either the config setting,
+ * the consensus param, or the default (CBT_DEFAULT_TIMEOUT_INITIAL_VALUE).
  */
 void
 circuit_build_times_init(circuit_build_times_t *cbt)
@@ -306,6 +314,7 @@ circuit_build_times_init(circuit_build_times_t *cbt)
   control_event_buildtimeout_set(cbt, BUILDTIMEOUT_SET_EVENT_RESET);
 }
 
+#if 0
 /**
  * Rewind our build time history by n positions.
  */
@@ -332,6 +341,7 @@ circuit_build_times_rewind_history(circuit_build_times_t *cbt, int n)
           "Rewound history by %d places. Current index: %d. "
           "Total: %d", n, cbt->build_times_idx, cbt->total_build_times);
 }
+#endif
 
 /**
  * Add a new build time value <b>time</b> to the set of build times. Time
@@ -916,9 +926,7 @@ int
 circuit_build_times_needs_circuits(circuit_build_times_t *cbt)
 {
   /* Return true if < MIN_CIRCUITS_TO_OBSERVE */
-  if (cbt->total_build_times < circuit_build_times_min_circs_to_observe())
-    return 1;
-  return 0;
+  return !circuit_build_times_enough_to_compute(cbt);
 }
 
 /**
@@ -933,7 +941,11 @@ circuit_build_times_needs_circuits_now(circuit_build_times_t *cbt)
 }
 
 /**
- * Called to indicate that the network showed some signs of liveness.
+ * Called to indicate that the network showed some signs of liveness,
+ * i.e. we received a cell.
+ *
+ * This is used by circuit_build_times_network_check_live() to decide
+ * if we should record the circuit build timeout or not.
  *
  * This function is called every time we receive a cell. Avoid
  * syscalls, events, and other high-intensity work.
@@ -941,14 +953,26 @@ circuit_build_times_needs_circuits_now(circuit_build_times_t *cbt)
 void
 circuit_build_times_network_is_live(circuit_build_times_t *cbt)
 {
-  cbt->liveness.network_last_live = approx_time();
-  cbt->liveness.nonlive_discarded = 0;
+  time_t now = approx_time();
+  if (cbt->liveness.nonlive_timeouts > 0) {
+    log_notice(LD_CIRC,
+               "Tor now sees network activity. Restoring circuit build "
+               "timeout recording. Network was down for %d seconds "
+               "during %d circuit attempts.",
+               (int)(now - cbt->liveness.network_last_live),
+               cbt->liveness.nonlive_timeouts);
+  }
+  cbt->liveness.network_last_live = now;
   cbt->liveness.nonlive_timeouts = 0;
 }
 
 /**
  * Called to indicate that we completed a circuit. Because this circuit
  * succeeded, it doesn't count as a timeout-after-the-first-hop.
+ *
+ * This is used by circuit_build_times_network_check_changed() to determine
+ * if we had too many recent timeouts and need to reset our learned timeout
+ * to something higher.
  */
 void
 circuit_build_times_network_circ_success(circuit_build_times_t *cbt)
@@ -961,6 +985,10 @@ circuit_build_times_network_circ_success(circuit_build_times_t *cbt)
 /**
  * A circuit just timed out. If it failed after the first hop, record it
  * in our history for later deciding if the network speed has changed.
+ *
+ * This is used by circuit_build_times_network_check_changed() to determine
+ * if we had too many recent timeouts and need to reset our learned timeout
+ * to something higher.
  */
 static void
 circuit_build_times_network_timeout(circuit_build_times_t *cbt,
@@ -977,6 +1005,9 @@ circuit_build_times_network_timeout(circuit_build_times_t *cbt,
  * A circuit was just forcibly closed. If there has been no recent network
  * activity at all, but this circuit was launched back when we thought the
  * network was live, increment the number of "nonlive" circuit timeouts.
+ *
+ * This is used by circuit_build_times_network_check_live() to decide
+ * if we should record the circuit build timeout or not.
  */
 static void
 circuit_build_times_network_close(circuit_build_times_t *cbt,
@@ -986,15 +1017,8 @@ circuit_build_times_network_close(circuit_build_times_t *cbt,
   /*
    * Check if this is a timeout that was for a circuit that spent its
    * entire existence during a time where we have had no network activity.
-   *
-   * Also double check that it is a valid timeout after we have possibly
-   * just recently reset cbt->close_ms.
-   *
-   * We use close_ms here because timeouts aren't actually counted as timeouts
-   * until close_ms elapses.
    */
-  if (cbt->liveness.network_last_live <= start_time &&
-          start_time <= (now - cbt->close_ms/1000.0)) {
+  if (cbt->liveness.network_last_live < start_time) {
     if (did_onehop) {
       char last_live_buf[ISO_TIME_LEN+1];
       char start_time_buf[ISO_TIME_LEN+1];
@@ -1009,12 +1033,25 @@ circuit_build_times_network_close(circuit_build_times_t *cbt,
                now_buf);
     }
     cbt->liveness.nonlive_timeouts++;
+    if (cbt->liveness.nonlive_timeouts == 1) {
+      log_notice(LD_CIRC,
+                 "Tor has not observed any network activity for the past %d "
+                 "seconds. Disabling circuit build timeout code.",
+                 (int)(now - cbt->liveness.network_last_live));
+    } else {
+      log_info(LD_CIRC,
+             "Got non-live timeout. Current count is: %d",
+             cbt->liveness.nonlive_timeouts);
+    }
   }
 }
 
 /**
- * Returns false if the network has not received a cell or tls handshake
- * in the past NETWORK_NOTLIVE_TIMEOUT_COUNT circuits.
+ * When the network is not live, we do not record circuit build times.
+ *
+ * The network is considered not live if there has been at least one
+ * circuit build that began and ended (had its close_ms measurement
+ * period expire) since we last received a cell.
  *
  * Also has the side effect of rewinding the circuit time history
  * in the case of recent liveness changes.
@@ -1022,45 +1059,8 @@ circuit_build_times_network_close(circuit_build_times_t *cbt,
 int
 circuit_build_times_network_check_live(circuit_build_times_t *cbt)
 {
-  time_t now = approx_time();
-  if (cbt->liveness.nonlive_timeouts >= CBT_NETWORK_NONLIVE_DISCARD_COUNT) {
-    if (!cbt->liveness.nonlive_discarded) {
-      cbt->liveness.nonlive_discarded = 1;
-      log_notice(LD_CIRC, "Network is no longer live (too many recent "
-                "circuit timeouts). Dead for %ld seconds.",
-                (long int)(now - cbt->liveness.network_last_live));
-      /* Only discard NETWORK_NONLIVE_TIMEOUT_COUNT-1 because we stopped
-       * counting after that */
-      circuit_build_times_rewind_history(cbt,
-                     CBT_NETWORK_NONLIVE_TIMEOUT_COUNT-1);
-      control_event_buildtimeout_set(cbt, BUILDTIMEOUT_SET_EVENT_DISCARD);
-    }
+  if (cbt->liveness.nonlive_timeouts > 0) {
     return 0;
-  } else if (cbt->liveness.nonlive_timeouts >=
-                CBT_NETWORK_NONLIVE_TIMEOUT_COUNT) {
-    if (cbt->timeout_ms < circuit_build_times_get_initial_timeout()) {
-      log_notice(LD_CIRC,
-                "Network is flaky. No activity for %ld seconds. "
-                "Temporarily raising timeout to %lds.",
-                (long int)(now - cbt->liveness.network_last_live),
-                tor_lround(circuit_build_times_get_initial_timeout()/1000));
-      cbt->liveness.suspended_timeout = cbt->timeout_ms;
-      cbt->liveness.suspended_close_timeout = cbt->close_ms;
-      cbt->close_ms = cbt->timeout_ms
-                    = circuit_build_times_get_initial_timeout();
-      control_event_buildtimeout_set(cbt, BUILDTIMEOUT_SET_EVENT_SUSPENDED);
-    }
-
-    return 0;
-  } else if (cbt->liveness.suspended_timeout > 0) {
-    log_notice(LD_CIRC,
-              "Network activity has resumed. "
-              "Resuming circuit timeout calculations.");
-    cbt->timeout_ms = cbt->liveness.suspended_timeout;
-    cbt->close_ms = cbt->liveness.suspended_close_timeout;
-    cbt->liveness.suspended_timeout = 0;
-    cbt->liveness.suspended_close_timeout = 0;
-    control_event_buildtimeout_set(cbt, BUILDTIMEOUT_SET_EVENT_RESUME);
   }
 
   return 1;
@@ -1069,7 +1069,8 @@ circuit_build_times_network_check_live(circuit_build_times_t *cbt)
 /**
  * Returns true if we have seen more than MAX_RECENT_TIMEOUT_COUNT of
  * the past RECENT_CIRCUITS time out after the first hop. Used to detect
- * if the network connection has changed significantly.
+ * if the network connection has changed significantly, and if so,
+ * resets our circuit build timeout to the default.
  *
  * Also resets the entire timeout history in this case and causes us
  * to restart the process of building test circuits and estimating a
@@ -1197,6 +1198,11 @@ circuit_build_times_count_close(circuit_build_times_t *cbt,
 /**
  * Update timeout counts to determine if we need to expire
  * our build time history due to excessive timeouts.
+ *
+ * We do not record any actual time values at this stage;
+ * we are only interested in recording the fact that a timeout
+ * happened. We record the time values via
+ * circuit_build_times_count_close() and circuit_build_times_add_time().
  */
 void
 circuit_build_times_count_timeout(circuit_build_times_t *cbt,
@@ -1208,11 +1214,11 @@ circuit_build_times_count_timeout(circuit_build_times_t *cbt,
     return;
   }
 
+  /* Register the fact that a timeout just occurred. */
   circuit_build_times_network_timeout(cbt, did_onehop);
 
   /* If there are a ton of timeouts, we should reset
-   * the circuit build timeout.
-   */
+   * the circuit build timeout. */
   circuit_build_times_network_check_changed(cbt);
 }
 
@@ -1223,9 +1229,9 @@ circuit_build_times_count_timeout(circuit_build_times_t *cbt,
 static int
 circuit_build_times_set_timeout_worker(circuit_build_times_t *cbt)
 {
-  if (cbt->total_build_times < circuit_build_times_min_circs_to_observe()) {
+  build_time_t max_time;
+  if (!circuit_build_times_enough_to_compute(cbt))
     return 0;
-  }
 
   if (!circuit_build_times_update_alpha(cbt))
     return 0;
@@ -1236,10 +1242,28 @@ circuit_build_times_set_timeout_worker(circuit_build_times_t *cbt)
   cbt->close_ms = circuit_build_times_calculate_timeout(cbt,
                                 circuit_build_times_close_quantile());
 
+  max_time = circuit_build_times_max(cbt);
+
   /* Sometimes really fast guard nodes give us such a steep curve
    * that this ends up being not that much greater than timeout_ms.
    * Make it be at least 1 min to handle this case. */
   cbt->close_ms = MAX(cbt->close_ms, circuit_build_times_initial_timeout());
+
+  if (cbt->timeout_ms > max_time) {
+    log_notice(LD_CIRC,
+               "Circuit build timeout of %dms is beyond the maximum build "
+               "time we have ever observed. Capping it to %dms.",
+               (int)cbt->timeout_ms, max_time);
+    cbt->timeout_ms = max_time;
+  }
+
+  if (max_time < INT32_MAX/2 && cbt->close_ms > 2*max_time) {
+    log_notice(LD_CIRC,
+               "Circuit build measurement period of %dms is more than twice "
+               "the maximum build time we have ever observed. Capping it to "
+               "%dms.", (int)cbt->close_ms, 2*max_time);
+    cbt->close_ms = 2*max_time;
+  }
 
   cbt->have_computed_timeout = 1;
   return 1;
@@ -1816,6 +1840,18 @@ should_use_create_fast_for_circuit(origin_circuit_t *circ)
   return 1;
 }
 
+/** Return true if <b>circ</b> is the type of circuit we want to count
+ * timeouts from. In particular, we want it to have not completed yet
+ * (already completing indicates we cannibalized it), and we want it to
+ * have exactly three hops.
+ */
+int
+circuit_timeout_want_to_count_circ(origin_circuit_t *circ)
+{
+  return !circ->has_opened
+          && circ->build_state->desired_path_len == DEFAULT_ROUTE_LEN;
+}
+
 /** This is the backbone function for building circuits.
  *
  * If circ's first hop is closed, then we need to build a create
@@ -1889,11 +1925,12 @@ circuit_send_next_onion_skin(origin_circuit_t *circ)
     if (!hop) {
       /* done building the circuit. whew. */
       circuit_set_state(TO_CIRCUIT(circ), CIRCUIT_STATE_OPEN);
-      if (!circ->build_state->onehop_tunnel) {
+      if (circuit_timeout_want_to_count_circ(circ)) {
         struct timeval end;
         long timediff;
         tor_gettimeofday(&end);
         timediff = tv_mdiff(&circ->_base.highres_created, &end);
+
         /*
          * If the circuit build time is much greater than we would have cut
          * it off at, we probably had a suspend event along this codepath,
@@ -1901,9 +1938,10 @@ circuit_send_next_onion_skin(origin_circuit_t *circ)
          */
         if (timediff < 0 || timediff > 2*circ_times.close_ms+1000) {
           log_notice(LD_CIRC, "Strange value for circuit build time: %ldmsec. "
-                              "Assuming clock jump.", timediff);
+                              "Assuming clock jump. Purpose %d", timediff,
+                              circ->_base.purpose);
         } else if (!circuit_build_times_disabled()) {
-          /* Don't count circuit times if the network was not live */
+          /* Only count circuit times if the network is live */
           if (circuit_build_times_network_check_live(&circ_times)) {
             circuit_build_times_add_time(&circ_times, (build_time_t)timediff);
             circuit_build_times_set_timeout(&circ_times);
@@ -1918,9 +1956,9 @@ circuit_send_next_onion_skin(origin_circuit_t *circ)
       circuit_reset_failure_count(0);
       if (circ->build_state->onehop_tunnel)
         control_event_bootstrap(BOOTSTRAP_STATUS_REQUESTING_STATUS, 0);
-      if (!has_completed_circuit && !circ->build_state->onehop_tunnel) {
+      if (!can_complete_circuit && !circ->build_state->onehop_tunnel) {
         or_options_t *options = get_options();
-        has_completed_circuit=1;
+        can_complete_circuit=1;
         /* FFFF Log a count of known routers here */
         log_notice(LD_GENERAL,
             "Tor has successfully opened a circuit. "
@@ -1987,7 +2025,7 @@ circuit_note_clock_jumped(int seconds_elapsed)
       seconds_elapsed >=0 ? "forward" : "backward");
   control_event_general_status(LOG_WARN, "CLOCK_JUMPED TIME=%d",
                                seconds_elapsed);
-  has_completed_circuit=0; /* so it'll log when it works again */
+  can_complete_circuit=0; /* so it'll log when it works again */
   control_event_client_status(severity, "CIRCUIT_NOT_ESTABLISHED REASON=%s",
                               "CLOCK_JUMPED");
   circuit_mark_all_unused_circs();
@@ -2308,8 +2346,8 @@ onionskin_answer(or_circuit_t *circ, uint8_t cell_type, const char *payload,
          cell_type == CELL_CREATED ? ONIONSKIN_REPLY_LEN : DIGEST_LEN*2);
 
   log_debug(LD_CIRC,"init digest forward 0x%.8x, backward 0x%.8x.",
-            (unsigned int)*(uint32_t*)(keys),
-            (unsigned int)*(uint32_t*)(keys+20));
+            (unsigned int)get_uint32(keys),
+            (unsigned int)get_uint32(keys+20));
   if (circuit_init_cpath_crypto(tmp_cpath, keys, 0)<0) {
     log_warn(LD_BUG,"Circuit initialization failed");
     tor_free(tmp_cpath);
@@ -2448,6 +2486,8 @@ router_handles_some_port(routerinfo_t *router, smartlist_t *needed_ports)
 
   for (i = 0; i < smartlist_len(needed_ports); ++i) {
     addr_policy_result_t r;
+    /* alignment issues aren't a worry for this dereference, since
+       needed_ports is explicitly a smartlist of uint16_t's */
     port = *(uint16_t *)smartlist_get(needed_ports, i);
     tor_assert(port);
     r = compare_addr_to_addr_policy(0, port, router->exit_policy);
@@ -3207,8 +3247,6 @@ entry_guard_set_status(entry_guard_t *e, routerinfo_t *ri,
   char buf[HEX_DIGEST_LEN+1];
   int changed = 0;
 
-  tor_assert(options);
-
   *reason = NULL;
 
   /* Do we want to mark this guard as bad? */
@@ -3466,9 +3504,8 @@ add_an_entry_guard(routerinfo_t *chosen, int reset_status)
 /** If the use of entry guards is configured, choose more entry guards
  * until we have enough in the list. */
 static void
-pick_entry_guards(void)
+pick_entry_guards(or_options_t *options)
 {
-  or_options_t *options = get_options();
   int changed = 0;
 
   tor_assert(entry_guards);
@@ -3500,10 +3537,9 @@ entry_guard_free(entry_guard_t *e)
  * or which was selected by a version of Tor that's known to select
  * entry guards badly. */
 static int
-remove_obsolete_entry_guards(void)
+remove_obsolete_entry_guards(time_t now)
 {
   int changed = 0, i;
-  time_t now = time(NULL);
 
   for (i = 0; i < smartlist_len(entry_guards); ++i) {
     entry_guard_t *entry = smartlist_get(entry_guards, i);
@@ -3563,11 +3599,10 @@ remove_obsolete_entry_guards(void)
  * long that we don't think they'll come up again. Return 1 if we
  * removed any, or 0 if we did nothing. */
 static int
-remove_dead_entry_guards(void)
+remove_dead_entry_guards(time_t now)
 {
   char dbuf[HEX_DIGEST_LEN+1];
   char tbuf[ISO_TIME_LEN+1];
-  time_t now = time(NULL);
   int i;
   int changed = 0;
 
@@ -3602,22 +3637,17 @@ remove_dead_entry_guards(void)
  * think that things are unlisted.
  */
 void
-entry_guards_compute_status(void)
+entry_guards_compute_status(or_options_t *options, time_t now)
 {
-  time_t now;
   int changed = 0;
   int severity = LOG_DEBUG;
-  or_options_t *options;
   digestmap_t *reasons;
 
   if (! entry_guards)
     return;
 
-  options = get_options();
   if (options->EntryNodes) /* reshuffle the entry guard list if needed */
     entry_nodes_should_be_added();
-
-  now = time(NULL);
 
   reasons = digestmap_new();
   SMARTLIST_FOREACH_BEGIN(entry_guards, entry_guard_t *, entry)
@@ -3634,7 +3664,7 @@ entry_guards_compute_status(void)
     }
   SMARTLIST_FOREACH_END(entry);
 
-  if (remove_dead_entry_guards())
+  if (remove_dead_entry_guards(now))
     changed = 1;
 
   severity = changed ? LOG_DEBUG : LOG_INFO;
@@ -3799,9 +3829,8 @@ entry_nodes_should_be_added(void)
 /** Add all nodes in EntryNodes that aren't currently guard nodes to the list
  * of guard nodes, at the front. */
 static void
-entry_guards_prepend_from_config(void)
+entry_guards_prepend_from_config(or_options_t *options)
 {
-  or_options_t *options = get_options();
   smartlist_t *entry_routers, *entry_fps;
   smartlist_t *old_entry_guards_on_list, *old_entry_guards_not_on_list;
   tor_assert(entry_guards);
@@ -3929,11 +3958,11 @@ choose_random_entry(cpath_build_state_t *state)
     entry_guards = smartlist_create();
 
   if (should_add_entry_nodes)
-    entry_guards_prepend_from_config();
+    entry_guards_prepend_from_config(options);
 
   if (!entry_list_is_constrained(options) &&
       smartlist_len(entry_guards) < options->NumEntryGuards)
-    pick_entry_guards();
+    pick_entry_guards(options);
 
  retry:
   smartlist_clear(live_entry_guards);
@@ -4162,7 +4191,7 @@ entry_guards_parse_state(or_state_t *state, int set, char **msg)
     entry_guards_dirty = 0;
     /* XXX022 hand new_entry_guards to this func, and move it up a
      * few lines, so we don't have to re-dirty it */
-    if (remove_obsolete_entry_guards())
+    if (remove_obsolete_entry_guards(now))
       entry_guards_dirty = 1;
   }
   digestmap_free(added_by, _tor_free);
@@ -4467,9 +4496,8 @@ retry_bridge_descriptor_fetch_directly(const char *digest)
  * descriptor, fetch a new copy of its descriptor -- either directly
  * from the bridge or via a bridge authority. */
 void
-fetch_bridge_descriptors(time_t now)
+fetch_bridge_descriptors(or_options_t *options, time_t now)
 {
-  or_options_t *options = get_options();
   int num_bridge_auths = get_n_authorities(BRIDGE_AUTHORITY);
   int ask_bridge_directly;
   int can_use_bridge_authority;
@@ -4549,6 +4577,10 @@ learned_bridge_descriptor(routerinfo_t *ri, int from_cache)
       add_an_entry_guard(ri, 1);
       log_notice(LD_DIR, "new bridge descriptor '%s' (%s)", ri->nickname,
                  from_cache ? "cached" : "fresh");
+      /* set entry->made_contact so if it goes down we don't drop it from
+       * our entry node list */
+      entry_guard_register_connect_status(ri->cache_info.identity_digest,
+                                          1, 0, now);
       if (first)
         routerlist_retry_directory_downloads(now);
     }
@@ -4589,48 +4621,63 @@ any_pending_bridge_descriptor_fetches(void)
   return 0;
 }
 
-/** Return 1 if we have at least one descriptor for a bridge and
- * all descriptors we know are down. Else return 0. If <b>act</b> is
- * 1, then mark the down bridges up; else just observe and report. */
+/** Return 1 if we have at least one descriptor for an entry guard
+ * (bridge or member of EntryNodes) and all descriptors we know are
+ * down. Else return 0. If <b>act</b> is 1, then mark the down guards
+ * up; else just observe and report. */
 static int
-bridges_retry_helper(int act)
+entries_retry_helper(or_options_t *options, int act)
 {
   routerinfo_t *ri;
   int any_known = 0;
   int any_running = 0;
+  int purpose = options->UseBridges ?
+                  ROUTER_PURPOSE_BRIDGE : ROUTER_PURPOSE_GENERAL;
   if (!entry_guards)
     entry_guards = smartlist_create();
   SMARTLIST_FOREACH(entry_guards, entry_guard_t *, e,
     {
       ri = router_get_by_digest(e->identity);
-      if (ri && ri->purpose == ROUTER_PURPOSE_BRIDGE) {
+      if (ri && ri->purpose == purpose) {
         any_known = 1;
         if (ri->is_running)
-          any_running = 1; /* some bridge is both known and running */
-        else if (act) { /* mark it for retry */
-          ri->is_running = 1;
+          any_running = 1; /* some entry is both known and running */
+        else if (act) {
+          /* Mark all current connections to this OR as unhealthy, since
+           * otherwise there could be one that started 30 seconds
+           * ago, and in 30 seconds it will time out, causing us to mark
+           * the node down and undermine the retry attempt. We mark even
+           * the established conns, since if the network just came back
+           * we'll want to attach circuits to fresh conns. */
+          connection_or_set_bad_connections(ri->cache_info.identity_digest, 1);
+
+          /* mark this entry node for retry */
+          router_set_status(ri->cache_info.identity_digest, 1);
           e->can_retry = 1;
           e->bad_since = 0;
         }
       }
     });
-  log_debug(LD_DIR, "any_known %d, any_running %d", any_known, any_running);
+  log_debug(LD_DIR, "%d: any_known %d, any_running %d",
+            act, any_known, any_running);
   return any_known && !any_running;
 }
 
-/** Do we know any descriptors for our bridges, and are they all
- * down? */
+/** Do we know any descriptors for our bridges / entrynodes, and are
+ * all the ones we have descriptors for down? */
 int
-bridges_known_but_down(void)
+entries_known_but_down(or_options_t *options)
 {
-  return bridges_retry_helper(0);
+  tor_assert(entry_list_is_constrained(options));
+  return entries_retry_helper(options, 0);
 }
 
-/** Mark all down known bridges up. */
+/** Mark all down known bridges / entrynodes up. */
 void
-bridges_retry_all(void)
+entries_retry_all(or_options_t *options)
 {
-  bridges_retry_helper(1);
+  tor_assert(entry_list_is_constrained(options));
+  entries_retry_helper(options, 1);
 }
 
 /** Release all storage held by the list of entry guards and related

@@ -119,8 +119,12 @@ static smartlist_t *active_linked_connection_lst = NULL;
 static int called_loop_once = 0;
 
 /** We set this to 1 when we've opened a circuit, so we can print a log
- * entry to inform the user that Tor is working. */
-int has_completed_circuit=0;
+ * entry to inform the user that Tor is working.  We set it to 0 when
+ * we think the fact that we once opened a circuit doesn't mean we can do so
+ * any longer (a big time jump happened, when we notice our directory is
+ * heinously out-of-date, etc.
+ */
+int can_complete_circuit=0;
 
 /** How often do we check for router descriptors that we should download
  * when we have too little directory info? */
@@ -706,7 +710,7 @@ directory_info_has_arrived(time_t now, int from_cache)
 
     /* if we have enough dir info, then update our guard status with
      * whatever we just learned. */
-    entry_guards_compute_status();
+    entry_guards_compute_status(options, now);
     /* Don't even bother trying to get extrainfo until the rest of our
      * directory info is up-to-date */
     if (options->DownloadExtraInfo)
@@ -714,7 +718,7 @@ directory_info_has_arrived(time_t now, int from_cache)
   }
 
   if (server_mode(options) && !we_are_hibernating() && !from_cache &&
-      (has_completed_circuit || !any_predicted_circuits(now)))
+      (can_complete_circuit || !any_predicted_circuits(now)))
     consider_testing_reachability(1, 1);
 }
 
@@ -908,7 +912,7 @@ run_scheduled_events(time_t now)
     update_router_descriptor_downloads(now);
     update_extrainfo_downloads(now);
     if (options->UseBridges)
-      fetch_bridge_descriptors(now);
+      fetch_bridge_descriptors(options, now);
     if (router_have_minimum_dir_info())
       time_to_try_getting_descriptors = now + LAZY_DESCRIPTOR_RETRY_INTERVAL;
     else
@@ -1093,7 +1097,7 @@ run_scheduled_events(time_t now)
     /* also, check religiously for reachability, if it's within the first
      * 20 minutes of our uptime. */
     if (server_mode(options) &&
-        (has_completed_circuit || !any_predicted_circuits(now)) &&
+        (can_complete_circuit || !any_predicted_circuits(now)) &&
         !we_are_hibernating()) {
       if (stats_n_seconds_working < TIMEOUT_UNTIL_UNREACHABILITY_COMPLAINT) {
         consider_testing_reachability(1, dirport_reachability_count==0);
@@ -1169,7 +1173,7 @@ run_scheduled_events(time_t now)
     circuit_expire_old_circuits_serverside(now);
 
   /** 5. We do housekeeping for each connection... */
-  connection_or_set_bad_connections();
+  connection_or_set_bad_connections(NULL, 0);
   for (i=0;i<smartlist_len(connection_array);i++) {
     run_connection_housekeeping(i, now);
   }
@@ -1192,7 +1196,7 @@ run_scheduled_events(time_t now)
   circuit_close_all_marked();
 
   /** 7. And upload service descriptors if necessary. */
-  if (has_completed_circuit && !we_are_hibernating()) {
+  if (can_complete_circuit && !we_are_hibernating()) {
     rend_consider_services_upload(now);
     rend_consider_descriptor_republication();
   }
@@ -1274,7 +1278,7 @@ second_elapsed_callback(periodic_timer_t *timer, void *arg)
   if (server_mode(options) &&
       !we_are_hibernating() &&
       seconds_elapsed > 0 &&
-      has_completed_circuit &&
+      can_complete_circuit &&
       stats_n_seconds_working / TIMEOUT_UNTIL_UNREACHABILITY_COMPLAINT !=
       (stats_n_seconds_working+seconds_elapsed) /
         TIMEOUT_UNTIL_UNREACHABILITY_COMPLAINT) {

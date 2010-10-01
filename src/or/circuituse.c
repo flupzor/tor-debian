@@ -34,8 +34,6 @@ extern circuit_t *global_circuitlist; /* from circuitlist.c */
 static void circuit_expire_old_circuits_clientside(time_t now);
 static void circuit_increment_failure_count(void);
 
-long int lround(double x);
-
 /** Return 1 if <b>circ</b> could be returned by circuit_get_best().
  * Else return 0.
  */
@@ -280,11 +278,14 @@ void
 circuit_expire_building(time_t now)
 {
   circuit_t *victim, *next_circ = global_circuitlist;
-  /* circ_times.timeout is BUILD_TIMEOUT_INITIAL_VALUE if we haven't
-   * decided on a customized one yet */
-  time_t general_cutoff = now - lround(circ_times.timeout_ms/1000);
-  time_t begindir_cutoff = now - lround(circ_times.timeout_ms/2000);
-  time_t close_cutoff = now - lround(circ_times.close_ms/1000);
+  /* circ_times.timeout_ms and circ_times.close_ms are from
+   * circuit_build_times_get_initial_timeout() if we haven't computed
+   * custom timeouts yet */
+  time_t general_cutoff = now - tor_lround(circ_times.timeout_ms/1000);
+  time_t begindir_cutoff = now - tor_lround(circ_times.timeout_ms/2000);
+  time_t fourhop_cutoff = now - tor_lround(4*circ_times.timeout_ms/3000);
+  time_t cannibalize_cutoff = now - tor_lround(circ_times.timeout_ms/2000);
+  time_t close_cutoff = now - tor_lround(circ_times.close_ms/1000);
   time_t introcirc_cutoff = begindir_cutoff;
   cpath_build_state_t *build_state;
 
@@ -299,6 +300,11 @@ circuit_expire_building(time_t now)
     build_state = TO_ORIGIN_CIRCUIT(victim)->build_state;
     if (build_state && build_state->onehop_tunnel)
       cutoff = begindir_cutoff;
+    else if (build_state && build_state->desired_path_len == 4
+             && !TO_ORIGIN_CIRCUIT(victim)->has_opened)
+      cutoff = fourhop_cutoff;
+    else if (TO_ORIGIN_CIRCUIT(victim)->has_opened)
+      cutoff = cannibalize_cutoff;
     else if (victim->purpose == CIRCUIT_PURPOSE_C_INTRODUCING)
       cutoff = introcirc_cutoff;
     else if (victim->purpose == CIRCUIT_PURPOSE_C_MEASURE_TIMEOUT)
@@ -378,29 +384,40 @@ circuit_expire_building(time_t now)
         continue;
       }
 
-      /* circuits are allowed to last longer for measurement.
-       * Switch their purpose and wait. */
-      if (victim->purpose != CIRCUIT_PURPOSE_C_MEASURE_TIMEOUT) {
-        victim->purpose = CIRCUIT_PURPOSE_C_MEASURE_TIMEOUT;
-        circuit_build_times_count_timeout(&circ_times,
-                                          first_hop_succeeded);
-        continue;
-      }
+      if (circuit_timeout_want_to_count_circ(TO_ORIGIN_CIRCUIT(victim)) &&
+          circuit_build_times_enough_to_compute(&circ_times)) {
+        /* Circuits are allowed to last longer for measurement.
+         * Switch their purpose and wait. */
+        if (victim->purpose != CIRCUIT_PURPOSE_C_MEASURE_TIMEOUT) {
+          control_event_circuit_status(TO_ORIGIN_CIRCUIT(victim),
+                                       CIRC_EVENT_FAILED,
+                                       END_CIRC_REASON_TIMEOUT);
+          victim->purpose = CIRCUIT_PURPOSE_C_MEASURE_TIMEOUT;
+          /* Record this failure to check for too many timeouts
+           * in a row. This function does not record a time value yet
+           * (we do that later); it only counts the fact that we did
+           * have a timeout. */
+          circuit_build_times_count_timeout(&circ_times,
+                                            first_hop_succeeded);
+          continue;
+        }
 
-      /*
-       * If the circuit build time is much greater than we would have cut
-       * it off at, we probably had a suspend event along this codepath,
-       * and we should discard the value.
-       */
-      if (now - victim->timestamp_created > 2*circ_times.close_ms/1000+1) {
-        log_notice(LD_CIRC,
-                   "Extremely large value for circuit build timeout: %lds. "
-                   "Assuming clock jump.",
-                   (long)(now - victim->timestamp_created));
-      } else if (circuit_build_times_count_close(&circ_times,
-                                          first_hop_succeeded,
-                                          victim->timestamp_created)) {
-        circuit_build_times_set_timeout(&circ_times);
+        /*
+         * If the circuit build time is much greater than we would have cut
+         * it off at, we probably had a suspend event along this codepath,
+         * and we should discard the value.
+         */
+        if (now - victim->timestamp_created > 2*circ_times.close_ms/1000+1) {
+          log_notice(LD_CIRC,
+                     "Extremely large value for circuit build timeout: %lds. "
+                     "Assuming clock jump. Purpose %d",
+                     (long)(now - victim->timestamp_created),
+                      victim->purpose);
+        } else if (circuit_build_times_count_close(&circ_times,
+                                            first_hop_succeeded,
+                                            victim->timestamp_created)) {
+          circuit_build_times_set_timeout(&circ_times);
+        }
       }
     }
 
@@ -416,7 +433,10 @@ circuit_expire_building(time_t now)
                circuit_state_to_string(victim->state), victim->purpose);
 
     circuit_log_path(LOG_INFO,LD_CIRC,TO_ORIGIN_CIRCUIT(victim));
-    circuit_mark_for_close(victim, END_CIRC_REASON_TIMEOUT);
+    if (victim->purpose == CIRCUIT_PURPOSE_C_MEASURE_TIMEOUT)
+      circuit_mark_for_close(victim, END_CIRC_REASON_MEASUREMENT_EXPIRED);
+    else
+      circuit_mark_for_close(victim, END_CIRC_REASON_TIMEOUT);
   }
 }
 
@@ -903,6 +923,11 @@ circuit_has_opened(origin_circuit_t *circ)
 {
   control_event_circuit_status(circ, CIRC_EVENT_BUILT, 0);
 
+  /* Remember that this circuit has finished building. Now if we start
+   * it building again later (e.g. by extending it), we will know not
+   * to consider its build time. */
+  circ->has_opened = 1;
+
   switch (TO_CIRCUIT(circ)->purpose) {
     case CIRCUIT_PURPOSE_C_ESTABLISH_REND:
       rend_client_rendcirc_has_opened(circ);
@@ -955,8 +980,19 @@ circuit_build_failed(origin_circuit_t *circ)
      * to blame, blame it. Also, avoid this relay for a while, and
      * fail any one-hop directory fetches destined for it. */
     const char *n_conn_id = circ->cpath->extend_info->identity_digest;
+    int already_marked = 0;
     if (circ->_base.n_conn) {
       or_connection_t *n_conn = circ->_base.n_conn;
+      if (n_conn->is_bad_for_new_circs) {
+        /* We only want to blame this router when a fresh healthy
+         * connection fails. So don't mark this router as newly failed,
+         * since maybe this was just an old circuit attempt that's
+         * finally timing out now. Also, there's no need to blow away
+         * circuits/streams/etc, since the failure of an unhealthy conn
+         * doesn't tell us much about whether a healthy conn would
+         * succeed. */
+        already_marked = 1;
+      }
       log_info(LD_OR,
                "Our circuit failed to get a response from the first hop "
                "(%s:%d). I'm going to try to rotate to a better connection.",
@@ -966,7 +1002,7 @@ circuit_build_failed(origin_circuit_t *circ)
       log_info(LD_OR,
                "Our circuit died before the first hop with no connection");
     }
-    if (n_conn_id) {
+    if (n_conn_id && !already_marked) {
       entry_guard_register_connect_status(n_conn_id, 0, 1, time(NULL));
       /* if there are any one-hop streams waiting on this circuit, fail
        * them now so they can retry elsewhere. */
@@ -1192,11 +1228,13 @@ circuit_get_open_circ_or_launch(edge_connection_t *conn,
       int severity = LOG_NOTICE;
       /* FFFF if this is a tunneled directory fetch, don't yell
        * as loudly. the user doesn't even know it's happening. */
-      if (options->UseBridges && bridges_known_but_down()) {
+      if (entry_list_is_constrained(options) &&
+          entries_known_but_down(options)) {
         log_fn(severity, LD_APP|LD_DIR,
                "Application request when we haven't used client functionality "
-               "lately. Optimistically trying known bridges again.");
-        bridges_retry_all();
+               "lately. Optimistically trying known %s again.",
+               options->UseBridges ? "bridges" : "entrynodes");
+        entries_retry_all(options);
       } else if (!options->UseBridges || any_bridge_descriptors_known()) {
         log_fn(severity, LD_APP|LD_DIR,
                "Application request when we haven't used client functionality "
