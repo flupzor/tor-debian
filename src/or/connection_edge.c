@@ -600,7 +600,7 @@ circuit_discard_optional_exit_enclaves(extend_info_t *info)
         !edge_conn->chosen_exit_retries)
       continue;
     r1 = router_get_by_nickname(edge_conn->chosen_exit_name, 0);
-    r2 = router_get_by_nickname(info->nickname, 0);
+    r2 = router_get_by_digest(info->identity_digest);
     if (!r1 || !r2 || r1 != r2)
       continue;
     tor_assert(edge_conn->socks_request);
@@ -2001,13 +2001,13 @@ connection_ap_process_natd(edge_connection_t *conn)
   if (err == 0)
     return 0;
   if (err < 0) {
-    log_warn(LD_APP,"Natd handshake failed (DEST too long). Closing");
+    log_warn(LD_APP,"NATD handshake failed (DEST too long). Closing");
     connection_mark_unattached_ap(conn, END_STREAM_REASON_INVALID_NATD_DEST);
     return -1;
   }
 
   if (strcmpstart(tmp_buf, "[DEST ")) {
-    log_warn(LD_APP,"Natd handshake was ill-formed; closing. The client "
+    log_warn(LD_APP,"NATD handshake was ill-formed; closing. The client "
              "said: %s",
              escaped(tmp_buf));
     connection_mark_unattached_ap(conn, END_STREAM_REASON_INVALID_NATD_DEST);
@@ -2016,7 +2016,7 @@ connection_ap_process_natd(edge_connection_t *conn)
 
   daddr = tbuf = &tmp_buf[0] + 6; /* after end of "[DEST " */
   if (!(tbuf = strchr(tbuf, ' '))) {
-    log_warn(LD_APP,"Natd handshake was ill-formed; closing. The client "
+    log_warn(LD_APP,"NATD handshake was ill-formed; closing. The client "
              "said: %s",
              escaped(tmp_buf));
     connection_mark_unattached_ap(conn, END_STREAM_REASON_INVALID_NATD_DEST);
@@ -2030,7 +2030,7 @@ connection_ap_process_natd(edge_connection_t *conn)
   socks->port = (uint16_t)
     tor_parse_long(tbuf, 10, 1, 65535, &port_ok, &daddr);
   if (!port_ok) {
-    log_warn(LD_APP,"Natd handshake failed; port %s is ill-formed or out "
+    log_warn(LD_APP,"NATD handshake failed; port %s is ill-formed or out "
              "of range.", escaped(tbuf));
     connection_mark_unattached_ap(conn, END_STREAM_REASON_INVALID_NATD_DEST);
     return -1;

@@ -308,7 +308,7 @@ connection_or_finished_connecting(or_connection_t *or_conn)
 
   proxy_type = PROXY_NONE;
 
-  if (get_options()->HttpsProxy)
+  if (get_options()->HTTPSProxy)
     proxy_type = PROXY_CONNECT;
   else if (get_options()->Socks4Proxy)
     proxy_type = PROXY_SOCKS4;
@@ -805,10 +805,10 @@ connection_or_connect(const tor_addr_t *_addr, uint16_t port,
   control_event_or_conn_status(conn, OR_CONN_EVENT_LAUNCHED, 0);
 
   /* use a proxy server if available */
-  if (options->HttpsProxy) {
+  if (options->HTTPSProxy) {
     using_proxy = 1;
-    tor_addr_copy(&addr, &options->HttpsProxyAddr);
-    port = options->HttpsProxyPort;
+    tor_addr_copy(&addr, &options->HTTPSProxyAddr);
+    port = options->HTTPSProxyPort;
   } else if (options->Socks4Proxy) {
     using_proxy = 1;
     tor_addr_copy(&addr, &options->Socks4ProxyAddr);
@@ -1007,6 +1007,9 @@ connection_or_check_valid_tls_handshake(or_connection_t *conn,
     started_here ? conn->_base.address :
                    safe_str_client(conn->_base.address);
   const char *conn_type = started_here ? "outgoing" : "incoming";
+  crypto_pk_env_t *our_identity =
+    started_here ? get_tlsclient_identity_key() :
+                   get_server_identity_key();
   int has_cert = 0, has_identity=0;
 
   check_no_tls_errors();
@@ -1044,7 +1047,7 @@ connection_or_check_valid_tls_handshake(or_connection_t *conn,
   if (identity_rcvd) {
     has_identity = 1;
     crypto_pk_get_digest(identity_rcvd, digest_rcvd_out);
-    if (crypto_pk_cmp_keys(get_identity_key(), identity_rcvd)<0) {
+    if (crypto_pk_cmp_keys(our_identity, identity_rcvd)<0) {
       conn->circ_id_type = CIRC_ID_TYPE_LOWER;
     } else {
       conn->circ_id_type = CIRC_ID_TYPE_HIGHER;
