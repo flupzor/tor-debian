@@ -1213,7 +1213,7 @@ directory_caches_dir_info(or_options_t *options)
     return 0;
   /* We need an up-to-date view of network info if we're going to try to
    * block exit attempts from unknown relays. */
-  return router_my_exit_policy_is_reject_star() &&
+  return ! router_my_exit_policy_is_reject_star() &&
     should_refuse_unknown_exits(options);
 }
 
@@ -1552,7 +1552,8 @@ dirserv_regenerate_directory(void)
 {
   char *new_directory=NULL;
 
-  if (dirserv_dump_directory_to_string(&new_directory, get_identity_key())) {
+  if (dirserv_dump_directory_to_string(&new_directory,
+                                       get_server_identity_key())) {
     log_warn(LD_BUG, "Error creating directory.");
     tor_free(new_directory);
     return NULL;
@@ -1582,7 +1583,7 @@ generate_runningrouters(void)
   char digest[DIGEST_LEN];
   char published[ISO_TIME_LEN+1];
   size_t len;
-  crypto_pk_env_t *private_key = get_identity_key();
+  crypto_pk_env_t *private_key = get_server_identity_key();
   char *identity_pkey; /* Identity key, DER64-encoded. */
   size_t identity_pkey_len;
 
@@ -2710,7 +2711,7 @@ generate_v2_networkstatus_opinion(void)
   smartlist_t *routers = NULL;
   digestmap_t *omit_as_sybil = NULL;
 
-  private_key = get_identity_key();
+  private_key = get_server_identity_key();
 
   if (resolve_my_address(LOG_WARN, options, &addr, &hostname)<0) {
     log_warn(LD_NET, "Couldn't resolve my hostname");

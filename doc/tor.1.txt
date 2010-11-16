@@ -89,14 +89,14 @@ Other options can be specified either on the command-line (--option
     without impacting network performance.
 
 **RelayBandwidthRate** __N__ **bytes**|**KB**|**MB**|**GB**::
-    If defined, a separate token bucket limits the average incoming bandwidth
+    If not 0, a separate token bucket limits the average incoming bandwidth
     usage for \_relayed traffic_ on this node to the specified number of bytes
     per second, and the average outgoing bandwidth usage to that same value.
     Relayed traffic currently is calculated to include answers to directory
     requests, but that may change in future versions. (Default: 0)
 
 **RelayBandwidthBurst** __N__ **bytes**|**KB**|**MB**|**GB**::
-    Limit the maximum token bucket size (also known as the burst) for
+    If not 0, limit the maximum token bucket size (also known as the burst) for
     \_relayed traffic_ to the given number of bytes in each direction.
     (Default: 0)
 
@@ -110,7 +110,7 @@ Other options can be specified either on the command-line (--option
     You should never need to change this value, since a network-wide value is
     published in the consensus and your relay will use that value. (Default: 0)
 
-**ConLimit** __NUM__::
+**ConnLimit** __NUM__::
     The minimum number of file descriptors that must be available to the Tor
     process before it will start. Tor will ask the OS for as many file
     descriptors as the OS will allow (you can find this by "ulimit -H -n").
@@ -414,7 +414,9 @@ The following options are useful only for clients (that is, if
     This option controls whether circuits built by Tor will include relays with
     the AllowSingleHopExits flag set to true. If ExcludeSingleHopRelays is set
     to 0, these relays will be included. Note that these relays might be at
-    higher risk of being seized or observed, so they are not normally included.
+    higher risk of being seized or observed, so they are not normally
+    included.  Also note that relatively few clients turn off this option,
+    so using these relays might make your client stand out.
     (Default: 1)
 
 **Bridge** __IP__:__ORPort__ [fingerprint]::
@@ -670,7 +672,7 @@ The following options are useful only for clients (that is, if
 
 **AllowDotExit** **0**|**1**::
     If enabled, we convert "www.google.com.foo.exit" addresses on the
-    SocksPort/TransPort/NatdPort into "www.google.com" addresses that exit from
+    SocksPort/TransPort/NATDPort into "www.google.com" addresses that exit from
     the node "foo". Disabled by default since attacking websites and exit
     relays can use it to manipulate your path selection. (Default: 0)
 
@@ -751,6 +753,11 @@ The following options are useful only for clients (that is, if
     Like WarnPlaintextPorts, but instead of warning about risky port uses, Tor
     will instead refuse to make the connection. (Default: None).
 
+**AllowSingleHopCircuits** **0**|**1**::
+    When this option is set, the attached Tor controller can use relays
+    that have the **AllowSingleHopExits** option turned on to build
+    one-hop Tor connections.  (Default: 0)
+
 SERVER OPTIONS
 --------------
 
@@ -768,7 +775,9 @@ is non-zero):
 **AllowSingleHopExits** **0**|**1**::
     This option controls whether clients can use this server as a single hop
     proxy. If set to 1, clients can use this server as an exit even if it is
-    the only hop in the circuit. (Default: 0)
+    the only hop in the circuit.  Note that most clients will refuse to use
+    servers that set this option, since most clients have
+    ExcludeSingleHopRelays set.  (Default: 0)
 
 **AssumeReachable** **0**|**1**::
     This option is used when bootstrapping a new Tor network. If set to 1,
@@ -779,9 +788,9 @@ is non-zero):
 
 **BridgeRelay** **0**|**1**::
     Sets the relay to act as a "bridge" with respect to relaying connections
-    from bridge users to the Tor network. Mainly it influences how the relay
-    will cache and serve directory information. Usually used in combination
-    with PublishServerDescriptor.
+    from bridge users to the Tor network. It mainly causes Tor to publish a
+    server descriptor to the bridge database, rather than publishing a relay
+    descriptor to the public directory authorities.
 
 **ContactInfo** __email_address__::
     Administrative contact information for server. This line might get picked
@@ -867,15 +876,17 @@ is non-zero):
     multiple times to bind to multiple addresses/ports.
 
 **PublishServerDescriptor** **0**|**1**|**v1**|**v2**|**v3**|**bridge**|**hidserv**,**...**::
-    This option is only considered if you have an ORPort defined. You can
+    This option specifies which descriptors Tor will publish when acting as
+    a relay or hidden service. You can
     choose multiple arguments, separated by commas.
  +
-    If set to 0, Tor will act as a server but it will not publish its
-    descriptor to the directory authorities. (This is useful if you're testing
+    If this option is set to 0, Tor will not publish its
+    descriptors to any directories. (This is useful if you're testing
     out your server, or if you're using a Tor controller that handles directory
-    publishing for you.) Otherwise, Tor will publish its descriptor to all
-    directory authorities of the type(s) specified. The value "1" is the
-    default, which means "publish to the appropriate authorities".
+    publishing for you.) Otherwise, Tor will publish its descriptors of all
+    type(s) specified. The default is "1",
+    which means "if running as a server or a hidden service, publish the
+    appropriate descriptors to the authorities".
 
 **ShutdownWaitLength** __NUM__::
     When we get a SIGINT and we're a server, we begin shutting down:
@@ -1187,6 +1198,11 @@ DIRECTORY AUTHORITY SERVER OPTIONS
     server's preferred number, but the consensus of all preferences. Must be at
     least 2. (Default: 3.)
 
+**V3BandwidthsFile** __FILENAME__::
+    V3 authoritative directories only. Configures the location of the
+    bandiwdth-authority generated file storing information on relays' measured
+    bandwidth capacities. (Default: unset.)
+
 HIDDEN SERVICE OPTIONS
 ----------------------
 
@@ -1255,6 +1271,7 @@ The following options are used for running a testing Tor network.
        V3AuthVotingInterval 5 minutes
        V3AuthVoteDelay 20 seconds
        V3AuthDistDelay 20 seconds
+       MinUptimeHidServDirectoryV2 0 seconds
        TestingV3AuthInitialVotingInterval 5 minutes
        TestingV3AuthInitialVoteDelay 20 seconds
        TestingV3AuthInitialDistDelay 20 seconds
