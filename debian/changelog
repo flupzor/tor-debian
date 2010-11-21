@@ -1,3 +1,10 @@
+tor (0.2.2.18-alpha-X) Xxperimental; urgency=low
+
+  * If we overwrite src/or/micro-revision.i in during build,
+    clean it out in the clean target.
+
+ -- Peter Palfrader <weasel@debian.org>  Sun, 21 Nov 2010 15:29:36 +0100
+
 tor (0.2.2.18-alpha-1) experimental; urgency=low
 
   * New upstream version.

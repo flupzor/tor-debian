@@ -122,6 +122,7 @@ clean: unpatch
 	rm -f src/or/micro-revision.i
 
 	[ ! -f Makefile ] || $(MAKE) distclean
+	! [ -e debian/micro-revision.i ] || rm -f src/or/micro-revision.i
 
 	# Normally the .deb wouldn't ship with a ../.git
 	if [ -d .git ] && which git >/dev/null; then \
