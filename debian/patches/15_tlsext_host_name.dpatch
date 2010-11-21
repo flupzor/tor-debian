@@ -1,0 +1,67 @@
+#! /bin/sh -e
+## 15_tlsext_host_name.dpatch
+##
+## All lines beginning with `## DP:' are a description of the patch.
+## DP: Do not set the hostname TLS extension server-side; only client-side
+
+if [ $# -lt 1 ]; then
+    echo "`basename $0`: script expects -patch|-unpatch as argument" >&2
+    exit 1
+fi
+
+[ -f debian/patches/00patch-opts ] && . debian/patches/00patch-opts
+patch_opts="${patch_opts:--f --no-backup-if-mismatch} ${2:+-d $2}"
+
+case "$1" in
+    -patch) patch -p1 ${patch_opts} < $0;;
+    -unpatch) patch -R -p1 ${patch_opts} < $0;;
+    *)
+        echo "`basename $0`: script expects -patch|-unpatch as argument" >&2
+        exit 1;;
+esac
+
+exit 0
+
+#From 92a99736fd22564515604aa140b8898befd9858e Mon Sep 17 00:00:00 2001
+#From: Nick Mathewson <nickm@torproject.org>
+#Date: Sat, 20 Nov 2010 22:21:50 -0500
+#Subject: [PATCH] Do not set the hostname TLS extension server-side; only client-side
+#
+#This may fix bug 2204, and resolve the incompatibility with openssl
+#0.9.8p/1.0.0b.
+#---
+# changes/fix2204     |    7 +++++++
+# src/common/tortls.c |    2 +-
+# 2 files changed, 8 insertions(+), 1 deletions(-)
+# create mode 100644 changes/fix2204
+#
+#diff --git a/changes/fix2204 b/changes/fix2204
+#new file mode 100644
+#index 0000000..fb2771a
+#--- /dev/null
+#+++ b/changes/fix2204
+#@@ -0,0 +1,7 @@
+#+  o Major bugfixes
+#+    - Do not set the tlsext_host_name extension on server SSL objects;
+#+      only on client SSL objects.  We set it to immitate a browser, not a
+#+      vhosting server. This resolves an incompatibility with openssl 0.9.8p
+#+      and openssl 1.0.0b.  Fixes bug 2204; bugfix on 0.2.1.1-alpha.
+#+
+#+
+@DPATCH@
+diff --git a/src/common/tortls.c b/src/common/tortls.c
+index 25f21a9..2915f79 100644
+--- a/src/common/tortls.c
++++ b/src/common/tortls.c
+@@ -898,7 +898,7 @@ tor_tls_new(int sock, int isServer)
+ 
+ #ifdef SSL_set_tlsext_host_name
+   /* Browsers use the TLS hostname extension, so we should too. */
+-  {
++  if (!isServer) {
+     char *fake_hostname = crypto_random_hostname(4,25, "www.",".com");
+     SSL_set_tlsext_host_name(result->ssl, fake_hostname);
+     tor_free(fake_hostname);
+-- 
+1.7.1
+
