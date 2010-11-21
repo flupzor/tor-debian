@@ -1,4 +1,4 @@
-tor (0.2.2.18-alpha-X) Xxperimental; urgency=low
+tor (0.2.2.18-alpha-2) experimental; urgency=low
 
   * If we overwrite src/or/micro-revision.i in during build,
     clean it out in the clean target.
@@ -10,7 +10,7 @@ tor (0.2.2.18-alpha-X) Xxperimental; urgency=low
     server. This resolves an incompatibility with openssl 0.9.8p and openssl
     1.0.0b.  Fixes bug 2204; bugfix on 0.2.1.1-alpha.
 
- -- Peter Palfrader <weasel@debian.org>  Sun, 21 Nov 2010 20:50:08 +0100
+ -- Peter Palfrader <weasel@debian.org>  Sun, 21 Nov 2010 23:39:32 +0100
 
 tor (0.2.2.18-alpha-1) experimental; urgency=low
 
