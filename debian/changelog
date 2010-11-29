@@ -1,8 +1,10 @@
 tor (0.2.2.19-alpha-1) experimental; urgency=low
 
   * New upstream version.
+    - remove debian/patches/15_tlsext_host_name (already included in new
+      upstream version).
 
- -- Peter Palfrader <weasel@debian.org>  Mon, 29 Nov 2010 13:44:54 +0100
+ -- Peter Palfrader <weasel@debian.org>  Mon, 29 Nov 2010 13:46:10 +0100
 
 tor (0.2.2.18-alpha-2) experimental; urgency=low
 
