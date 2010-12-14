@@ -8,8 +8,10 @@ tor (0.2.2.19-alpha-2) experimental; urgency=low
     It turns out this actually is a security issue, so try to be more
     conservative when fixing up modes and only chown/chgrp
     /var/{lib,log,run}/tor directly, never recursively.
+  * Remove /var/run/tor, recursively, on purge.  We already do this
+    for /var/lib/tor and /var/log/tor.
 
- -- Peter Palfrader <weasel@debian.org>  Mon, 13 Dec 2010 19:04:51 +0100
+ -- Peter Palfrader <weasel@debian.org>  Tue, 14 Dec 2010 20:08:32 +0100
 
 tor (0.2.2.19-alpha-1) experimental; urgency=low
 
