@@ -1,5 +1,10 @@
-tor (0.2.2.19-alpha-X) Xxperimental; urgency=low
+tor (0.2.2.20-alpha-1) experimental; urgency=high
 
+  * New upstream version.
+    - Fix a remotely exploitable bug that could be used to crash instances
+      of Tor remotely by overflowing on the heap. Remote-code execution
+      hasn't been confirmed, but can't be ruled out. Everyone should
+      upgrade. Bugfix on the 0.1.1 series and later.
   * Since the dawn of time (0.0.2pre19-1, January 2004, initial release
     of the debian package), the postinst script has changed ownership and
     permissions of various trees like /var/lib/tor, /var/run/tor, and
@@ -11,7 +16,7 @@ tor (0.2.2.19-alpha-X) Xxperimental; urgency=low
   * Remove /var/run/tor, recursively, on purge.  We already do this
     for /var/lib/tor and /var/log/tor.
 
- -- Peter Palfrader <weasel@debian.org>  Wed, 15 Dec 2010 21:56:39 +0100
+ -- Peter Palfrader <weasel@debian.org>  Fri, 17 Dec 2010 23:56:10 +0100
 
 tor (0.2.2.19-alpha-1) experimental; urgency=low
 
