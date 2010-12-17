@@ -515,7 +515,6 @@ accounting_run_housekeeping(time_t now)
 static void
 accounting_set_wakeup_time(void)
 {
-  char buf[ISO_TIME_LEN+1];
   char digest[DIGEST_LEN];
   crypto_digest_env_t *d_env;
   int time_in_interval;
@@ -529,21 +528,26 @@ accounting_set_wakeup_time(void)
     }
   }
 
-  format_iso_time(buf, interval_start_time);
-  crypto_pk_get_digest(get_server_identity_key(), digest);
+  if (server_identity_key_is_set()) {
+    char buf[ISO_TIME_LEN+1];
+    format_iso_time(buf, interval_start_time);
 
-  d_env = crypto_new_digest_env();
-  crypto_digest_add_bytes(d_env, buf, ISO_TIME_LEN);
-  crypto_digest_add_bytes(d_env, digest, DIGEST_LEN);
-  crypto_digest_get_digest(d_env, digest, DIGEST_LEN);
-  crypto_free_digest_env(d_env);
+    crypto_pk_get_digest(get_server_identity_key(), digest);
+
+    d_env = crypto_new_digest_env();
+    crypto_digest_add_bytes(d_env, buf, ISO_TIME_LEN);
+    crypto_digest_add_bytes(d_env, digest, DIGEST_LEN);
+    crypto_digest_get_digest(d_env, digest, DIGEST_LEN);
+    crypto_free_digest_env(d_env);
+  } else {
+    crypto_rand(digest, DIGEST_LEN);
+  }
 
   if (!expected_bandwidth_usage) {
     char buf1[ISO_TIME_LEN+1];
     char buf2[ISO_TIME_LEN+1];
     format_local_iso_time(buf1, interval_start_time);
     format_local_iso_time(buf2, interval_end_time);
-    time_to_exhaust_bw = GUESS_TIME_TO_USE_BANDWIDTH;
     interval_wakeup_time = interval_start_time;
 
     log_notice(LD_ACCT,
@@ -558,8 +562,8 @@ accounting_set_wakeup_time(void)
 
   time_to_exhaust_bw =
     (get_options()->AccountingMax/expected_bandwidth_usage)*60;
-  if (time_to_exhaust_bw > TIME_MAX) {
-    time_to_exhaust_bw = TIME_MAX;
+  if (time_to_exhaust_bw > INT_MAX) {
+    time_to_exhaust_bw = INT_MAX;
     time_to_consider = 0;
   } else {
     time_to_consider = time_in_interval - (int)time_to_exhaust_bw;
@@ -577,8 +581,6 @@ accounting_set_wakeup_time(void)
      * to be chosen than the last half. */
     interval_wakeup_time = interval_start_time +
       (get_uint32(digest) % time_to_consider);
-
-    format_iso_time(buf, interval_wakeup_time);
   }
 
   {

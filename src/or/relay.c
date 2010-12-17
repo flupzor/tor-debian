@@ -97,7 +97,7 @@ relay_set_digest(crypto_digest_env_t *digest, cell_t *cell)
   char integrity[4];
   relay_header_t rh;
 
-  crypto_digest_add_bytes(digest, cell->payload, CELL_PAYLOAD_SIZE);
+  crypto_digest_add_bytes(digest, (char*)cell->payload, CELL_PAYLOAD_SIZE);
   crypto_digest_get_digest(digest, integrity, 4);
 //  log_fn(LOG_DEBUG,"Putting digest of %u %u %u %u into relay cell.",
 //    integrity[0], integrity[1], integrity[2], integrity[3]);
@@ -130,7 +130,7 @@ relay_digest_matches(crypto_digest_env_t *digest, cell_t *cell)
 //    received_integrity[0], received_integrity[1],
 //    received_integrity[2], received_integrity[3]);
 
-  crypto_digest_add_bytes(digest, cell->payload, CELL_PAYLOAD_SIZE);
+  crypto_digest_add_bytes(digest, (char*) cell->payload, CELL_PAYLOAD_SIZE);
   crypto_digest_get_digest(digest, calculated_integrity, 4);
 
   if (memcmp(received_integrity, calculated_integrity, 4)) {
@@ -156,12 +156,12 @@ relay_digest_matches(crypto_digest_env_t *digest, cell_t *cell)
  * Return -1 if the crypto fails, else return 0.
  */
 static int
-relay_crypt_one_payload(crypto_cipher_env_t *cipher, char *in,
+relay_crypt_one_payload(crypto_cipher_env_t *cipher, uint8_t *in,
                         int encrypt_mode)
 {
   int r;
   (void)encrypt_mode;
-  r = crypto_cipher_crypt_inplace(cipher, in, CELL_PAYLOAD_SIZE);
+  r = crypto_cipher_crypt_inplace(cipher, (char*) in, CELL_PAYLOAD_SIZE);
 
   if (r) {
     log_warn(LD_BUG,"Error during relay encryption");
@@ -476,10 +476,9 @@ relay_lookup_conn(circuit_t *circ, cell_t *cell,
  * about the wire format.
  */
 void
-relay_header_pack(char *dest, const relay_header_t *src)
+relay_header_pack(uint8_t *dest, const relay_header_t *src)
 {
-  *(uint8_t*)(dest) = src->command;
-
+  set_uint8(dest, src->command);
   set_uint16(dest+1, htons(src->recognized));
   set_uint16(dest+3, htons(src->stream_id));
   memcpy(dest+5, src->integrity, 4);
@@ -490,10 +489,9 @@ relay_header_pack(char *dest, const relay_header_t *src)
  * relay_header_t structure <b>dest</b>.
  */
 void
-relay_header_unpack(relay_header_t *dest, const char *src)
+relay_header_unpack(relay_header_t *dest, const uint8_t *src)
 {
-  dest->command = *(uint8_t*)(src);
-
+  dest->command = get_uint8(src);
   dest->recognized = ntohs(get_uint16(src+1));
   dest->stream_id = ntohs(get_uint16(src+3));
   memcpy(dest->integrity, src+5, 4);
@@ -1124,13 +1122,13 @@ connection_edge_process_relay_cell(cell_t *cell, circuit_t *circ,
       }
 
       stats_n_data_bytes_received += rh.length;
-      connection_write_to_buf(cell->payload + RELAY_HEADER_SIZE,
+      connection_write_to_buf((char*)(cell->payload + RELAY_HEADER_SIZE),
                               rh.length, TO_CONN(conn));
       connection_edge_consider_sending_sendme(conn);
       return 0;
     case RELAY_COMMAND_END:
       reason = rh.length > 0 ?
-        *(uint8_t *)(cell->payload+RELAY_HEADER_SIZE) : END_STREAM_REASON_MISC;
+        get_uint8(cell->payload+RELAY_HEADER_SIZE) : END_STREAM_REASON_MISC;
       if (!conn) {
         log_info(domain,"end cell (%s) dropped, unknown stream.",
                  stream_end_reason_to_string(reason));
@@ -1478,10 +1476,11 @@ circuit_resume_edge_reading_helper(edge_connection_t *first_conn,
                                    crypt_path_t *layer_hint)
 {
   edge_connection_t *conn;
-  int n_streams, n_streams_left;
+  int n_packaging_streams, n_streams_left;
   int packaged_this_round;
   int cells_on_queue;
   int cells_per_conn;
+  edge_connection_t *chosen_stream = NULL;
 
   /* How many cells do we have space for?  It will be the minimum of
    * the number needed to exhaust the package window, and the minimum
@@ -1496,26 +1495,61 @@ circuit_resume_edge_reading_helper(edge_connection_t *first_conn,
   if (CELL_QUEUE_HIGHWATER_SIZE - cells_on_queue < max_to_package)
     max_to_package = CELL_QUEUE_HIGHWATER_SIZE - cells_on_queue;
 
+  /* Once we used to start listening on the streams in the order they
+   * appeared in the linked list.  That leads to starvation on the
+   * streams that appeared later on the list, since the first streams
+   * would always get to read first.  Instead, we just pick a random
+   * stream on the list, and enable reading for streams starting at that
+   * point (and wrapping around as if the list were circular).  It would
+   * probably be better to actually remember which streams we've
+   * serviced in the past, but this is simple and effective. */
+
+  /* Select a stream uniformly at random from the linked list.  We
+   * don't need cryptographic randomness here. */
+  {
+    int num_streams = 0;
+    for (conn = first_conn; conn; conn = conn->next_stream) {
+      num_streams++;
+      if ((tor_weak_random() % num_streams)==0)
+        chosen_stream = conn;
+      /* Invariant: chosen_stream has been chosen uniformly at random from
+       * among the first num_streams streams on first_conn. */
+    }
+  }
+
   /* Count how many non-marked streams there are that have anything on
    * their inbuf, and enable reading on all of the connections. */
-  n_streams = 0;
-  for (conn=first_conn; conn; conn=conn->next_stream) {
+  n_packaging_streams = 0;
+  /* Activate reading starting from the chosen stream */
+  for (conn=chosen_stream; conn; conn = conn->next_stream) {
+    /* Start reading for the streams starting from here */
     if (conn->_base.marked_for_close || conn->package_window <= 0)
       continue;
     if (!layer_hint || conn->cpath_layer == layer_hint) {
       connection_start_reading(TO_CONN(conn));
 
       if (buf_datalen(conn->_base.inbuf) > 0)
-        ++n_streams;
+        ++n_packaging_streams;
+    }
+  }
+  /* Go back and do the ones we skipped, circular-style */
+  for (conn = first_conn; conn != chosen_stream; conn = conn->next_stream) {
+    if (conn->_base.marked_for_close || conn->package_window <= 0)
+      continue;
+    if (!layer_hint || conn->cpath_layer == layer_hint) {
+      connection_start_reading(TO_CONN(conn));
+
+      if (buf_datalen(conn->_base.inbuf) > 0)
+        ++n_packaging_streams;
     }
   }
 
-  if (n_streams == 0) /* avoid divide-by-zero */
+  if (n_packaging_streams == 0) /* avoid divide-by-zero */
     return 0;
 
  again:
 
-  cells_per_conn = CEIL_DIV(max_to_package, n_streams);
+  cells_per_conn = CEIL_DIV(max_to_package, n_packaging_streams);
 
   packaged_this_round = 0;
   n_streams_left = 0;
@@ -1563,7 +1597,7 @@ circuit_resume_edge_reading_helper(edge_connection_t *first_conn,
   if (packaged_this_round && packaged_this_round < max_to_package &&
       n_streams_left) {
     max_to_package -= packaged_this_round;
-    n_streams = n_streams_left;
+    n_packaging_streams = n_streams_left;
     goto again;
   }
 
@@ -2427,7 +2461,7 @@ append_cell_to_circuit_queue(circuit_t *circ, or_connection_t *orconn,
  *   ADDRESS                                   [length bytes]
  * Return the number of bytes added, or -1 on error */
 int
-append_address_to_payload(char *payload_out, const tor_addr_t *addr)
+append_address_to_payload(uint8_t *payload_out, const tor_addr_t *addr)
 {
   uint32_t a;
   switch (tor_addr_family(addr)) {
@@ -2452,13 +2486,13 @@ append_address_to_payload(char *payload_out, const tor_addr_t *addr)
  * encoded as by append_address_to_payload(), try to decode the address into
  * *<b>addr_out</b>.  Return the next byte in the payload after the address on
  * success, or NULL on failure. */
-const char *
-decode_address_from_payload(tor_addr_t *addr_out, const char *payload,
+const uint8_t *
+decode_address_from_payload(tor_addr_t *addr_out, const uint8_t *payload,
                             int payload_len)
 {
   if (payload_len < 2)
     return NULL;
-  if (payload_len < 2+(uint8_t)payload[1])
+  if (payload_len < 2+payload[1])
     return NULL;
 
   switch (payload[0]) {
@@ -2470,13 +2504,13 @@ decode_address_from_payload(tor_addr_t *addr_out, const char *payload,
   case RESOLVED_TYPE_IPV6:
     if (payload[1] != 16)
       return NULL;
-    tor_addr_from_ipv6_bytes(addr_out, payload+2);
+    tor_addr_from_ipv6_bytes(addr_out, (char*)(payload+2));
     break;
   default:
     tor_addr_make_unspec(addr_out);
     break;
   }
-  return payload + 2 + (uint8_t)payload[1];
+  return payload + 2 + payload[1];
 }
 
 /** Remove all the cells queued on <b>circ</b> for <b>orconn</b>. */
