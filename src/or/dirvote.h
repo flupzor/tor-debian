@@ -1,7 +1,7 @@
 /* Copyright (c) 2001 Matej Pfajfar.
  * Copyright (c) 2001-2004, Roger Dingledine.
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2010, The Tor Project, Inc. */
+ * Copyright (c) 2007-2011, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 /**
@@ -18,9 +18,6 @@
 #define MIN_DIST_SECONDS 20
 /** Smallest allowable voting interval. */
 #define MIN_VOTE_INTERVAL 300
-
-/** Precision multiplier for the Bw weights */
-#define BW_WEIGHT_SCALE   10000
 
 void dirvote_free_all(void);
 

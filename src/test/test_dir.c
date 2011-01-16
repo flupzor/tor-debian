@@ -1,6 +1,6 @@
 /* Copyright (c) 2001-2004, Roger Dingledine.
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2010, The Tor Project, Inc. */
+ * Copyright (c) 2007-2011, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 #include "orconfig.h"
@@ -609,8 +609,11 @@ test_dir_param_voting(void)
                          "abcd=20 c=60 cw=500 x-yz=-9 zzzzz=101", NULL, 0, 0);
   smartlist_split_string(vote4.net_params,
                          "ab=900 abcd=200 c=1 cw=51 x-yz=100", NULL, 0, 0);
-  test_eq(100, networkstatus_get_param(&vote4, "x-yz", 50));
-  test_eq(222, networkstatus_get_param(&vote4, "foobar", 222));
+  test_eq(100, networkstatus_get_param(&vote4, "x-yz", 50, 0, 300));
+  test_eq(222, networkstatus_get_param(&vote4, "foobar", 222, 0, 300));
+  test_eq(80, networkstatus_get_param(&vote4, "ab", 12, 0, 80));
+  test_eq(-8, networkstatus_get_param(&vote4, "ab", -12, -100, -8));
+  test_eq(0, networkstatus_get_param(&vote4, "foobar", 0, -100, 8));
 
   smartlist_add(votes, &vote1);
   smartlist_add(votes, &vote2);
@@ -745,11 +748,11 @@ test_dir_v3_networkstatus(void)
   sign_skey_leg1 = pk_generate(4);
 
   test_assert(!crypto_pk_read_private_key_from_string(sign_skey_1,
-                                                      AUTHORITY_SIGNKEY_1));
+                                                      AUTHORITY_SIGNKEY_1, -1));
   test_assert(!crypto_pk_read_private_key_from_string(sign_skey_2,
-                                                      AUTHORITY_SIGNKEY_2));
+                                                      AUTHORITY_SIGNKEY_2, -1));
   test_assert(!crypto_pk_read_private_key_from_string(sign_skey_3,
-                                                      AUTHORITY_SIGNKEY_3));
+                                                      AUTHORITY_SIGNKEY_3, -1));
 
   test_assert(!crypto_pk_cmp_keys(sign_skey_1, cert1->signing_key));
   test_assert(!crypto_pk_cmp_keys(sign_skey_2, cert2->signing_key));
