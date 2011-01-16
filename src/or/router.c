@@ -1,7 +1,7 @@
 /* Copyright (c) 2001 Matej Pfajfar.
  * Copyright (c) 2001-2004, Roger Dingledine.
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2010, The Tor Project, Inc. */
+ * Copyright (c) 2007-2011, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 #define ROUTER_PRIVATE
@@ -1068,7 +1068,7 @@ should_refuse_unknown_exits(or_options_t *options)
   if (options->RefuseUnknownExits_ != -1) {
     return options->RefuseUnknownExits_;
   } else {
-    return networkstatus_get_param(NULL, "refuseunknownexits", 1);
+    return networkstatus_get_param(NULL, "refuseunknownexits", 1, 0, 1);
   }
 }
 

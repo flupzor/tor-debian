@@ -50,7 +50,6 @@ diff -ur tor-0.2.2.9-alpha/doc/tor-resolve.1.txt tor-0.2.2.9-alpha.new/doc/tor-r
  AUTHORS
  -------
 -Roger Dingledine <arma@mit.edu>, Nick Mathewson <nickm@alum.mit.edu>.
-\ No newline at end of file
 +Roger Dingledine <arma@mit.edu>, Nick Mathewson <nickm@alum.mit.edu>.
 diff -ur tor-0.2.2.9-alpha/doc/tor.1.txt tor-0.2.2.9-alpha.new/doc/tor.1.txt
 --- tor-0.2.2.9-alpha/doc/tor.1.txt	2010-02-22 22:22:33.000000000 +0100

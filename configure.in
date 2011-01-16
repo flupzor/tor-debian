@@ -4,7 +4,7 @@ dnl Copyright (c) 2007-2008, The Tor Project, Inc.
 dnl See LICENSE for licensing information
 
 AC_INIT
-AM_INIT_AUTOMAKE(tor, 0.2.2.20-alpha)
+AM_INIT_AUTOMAKE(tor, 0.2.2.21-alpha)
 AM_CONFIG_HEADER(orconfig.h)
 
 AC_CANONICAL_HOST
@@ -586,6 +586,23 @@ fi
 if test "$tor_cv_time_t_signed" != no; then
   AC_DEFINE([TIME_T_IS_SIGNED], 1,
             [Define to 1 iff time_t is signed])
+fi
+
+AC_CACHE_CHECK([whether size_t is signed], tor_cv_size_t_signed, [
+AC_RUN_IFELSE([AC_LANG_SOURCE([
+#ifdef HAVE_SYS_TYPES_H
+#include <sys/types.h>
+#endif
+int main(int c, char**v) { if (((size_t)-1)<0) return 1; else return 0; }])],
+  tor_cv_size_t_signed=no, tor_cv_size_t_signed=yes, tor_cv_size_t_signed=cross)
+])
+
+if test "$tor_cv_size_t_signed" = cross; then
+  AC_MSG_NOTICE([Cross compiling: assuming that size_t is not signed.])
+fi
+
+if test "$tor_cv_size_t_signed" = yes; then
+  AC_MSG_ERROR([You have a signed size_t; that's grossly nonconformant.])
 fi
 
 AC_CHECK_SIZEOF(socklen_t, , [AC_INCLUDES_DEFAULT()

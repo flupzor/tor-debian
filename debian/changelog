@@ -1,3 +1,11 @@
+tor (0.2.2.21-alpha-1) experimental; urgency=high
+
+  * New upstream version, including several security related fixes.  See
+    upstream changelog for details.  Addresses CVE-2011-0427.
+  * Forward port patches/03_tor_manpage_in_section_8.
+
+ -- Peter Palfrader <weasel@debian.org>  Sun, 16 Jan 2011 18:40:27 +0100
+
 tor (0.2.2.20-alpha-1) experimental; urgency=high
 
   * New upstream version.
