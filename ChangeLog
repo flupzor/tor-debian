@@ -1,3 +1,26 @@
+Changes in version 0.2.2.22-alpha - 2011-01-25
+  o Major bugfixes:
+    - Fix a bounds-checking error that could allow an attacker to
+      remotely crash a directory authority. Bugfix on 0.2.1.5-alpha.
+      Found by "piebeer".
+    - Don't assert when changing from bridge to relay or vice versa
+      via the controller. The assert happened because we didn't properly
+      initialize our keys in this case. Bugfix on 0.2.2.18-alpha; fixes
+      bug 2433. Reported by bastik.
+
+  o Minor features:
+    - Adjust our TLS Diffie-Hellman parameters to match those used by
+      Apache's mod_ssl.
+    - Provide a log message stating which geoip file we're parsing
+      instead of just stating that we're parsing the geoip file.
+      Implements ticket 2432.
+
+  o Minor bugfixes:
+    - Check for and reject overly long directory certificates and
+      directory tokens before they have a chance to hit any assertions.
+      Bugfix on 0.2.1.28 / 0.2.2.20-alpha. Found by "doorss".
+
+
 Changes in version 0.2.2.21-alpha - 2011-01-15
   Tor 0.2.2.21-alpha includes all the patches from Tor 0.2.1.29, which
   continues our recent code security audit work. The main fix resolves
@@ -48,12 +71,8 @@ Changes in version 0.2.2.21-alpha - 2011-01-15
     - Correctly handle the case where AutomapHostsOnResolve is set but
       no virtual addresses are available. Fixes bug 2328; bugfix on
       0.1.2.1-alpha. Bug found by doorss.
-    - Correctly handle wrapping around to when we run out of virtual
-      address space. Found by cypherpunks, bugfix on 0.2.0.5-alpha.
-    - The 0.2.1.28 tarball was missing src/common/OpenBSD_malloc_Linux.c
-      because we built it with a too-old version of automake. Thus that
-      release broke ./configure --enable-openbsd-malloc, which is popular
-      among really fast exit relays on Linux.
+    - Correctly handle wrapping around when we run out of virtual
+      address space. Found by cypherpunks; bugfix on 0.2.0.5-alpha.
 
   o Minor features, also included in 0.2.1.29:
     - Update to the January 1 2011 Maxmind GeoLite Country database.
@@ -63,6 +82,10 @@ Changes in version 0.2.2.21-alpha - 2011-01-15
     - Tor does not build packages correctly with Automake 1.6 and earlier;
       added a check to Makefile.am to make sure that we're building with
       Automake 1.7 or later.
+    - The 0.2.1.28 tarball was missing src/common/OpenBSD_malloc_Linux.c
+      because we built it with a too-old version of automake. Thus that
+      release broke ./configure --enable-openbsd-malloc, which is popular
+      among really fast exit relays on Linux.
 
   o Major bugfixes, new in 0.2.2.21-alpha:
     - Prevent crash/heap corruption when the cbtnummodes consensus

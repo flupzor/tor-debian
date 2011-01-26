@@ -1,3 +1,9 @@
+tor (0.2.2.22-alpha-1) experimental; urgency=low
+
+  * New upstream version.
+
+ -- Peter Palfrader <weasel@debian.org>  Wed, 26 Jan 2011 19:20:21 +0100
+
 tor (0.2.2.21-alpha-1) experimental; urgency=high
 
   * New upstream version, including several security related fixes.  See
