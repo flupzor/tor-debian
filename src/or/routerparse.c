@@ -1088,7 +1088,7 @@ check_signature_token(const char *digest,
   signed_digest = tor_malloc(keysize);
   if (crypto_pk_public_checksig(pkey, signed_digest, keysize,
                                 tok->object_body, tok->object_size)
-      < DIGEST_LEN) {
+      < digest_len) {
     log_warn(LD_DIR, "Error reading %s: invalid signature.", doctype);
     tor_free(signed_digest);
     return -1;
@@ -1505,6 +1505,12 @@ router_parse_entry_from_string(const char *s, const char *end,
       router->has_old_dnsworkers = 1;
   }
 
+  if (find_opt_by_keyword(tokens, K_REJECT6) ||
+      find_opt_by_keyword(tokens, K_ACCEPT6)) {
+    log_warn(LD_DIR, "Rejecting router with reject6/accept6 line: they crash "
+             "older Tors.");
+    goto err;
+  }
   exit_policy_tokens = find_all_exitpolicy(tokens);
   if (!smartlist_len(exit_policy_tokens)) {
     log_warn(LD_DIR, "No exit policy tokens in descriptor.");

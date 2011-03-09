@@ -195,6 +195,7 @@ static config_var_t _option_vars[] = {
   V(CircuitStreamTimeout,        INTERVAL, "0"),
   V(CircuitPriorityHalflife,     DOUBLE,  "-100.0"), /*negative:'Use default'*/
   V(ClientDNSRejectInternalAddresses, BOOL,"1"),
+  V(ClientRejectInternalAddresses, BOOL,   "1"),
   V(ClientOnly,                  BOOL,     "0"),
   V(ConsensusParams,             STRING,   NULL),
   V(ConnLimit,                   UINT,     "1000"),
@@ -287,6 +288,7 @@ static config_var_t _option_vars[] = {
   OBSOLETE("IgnoreVersion"),
   V(KeepalivePeriod,             INTERVAL, "5 minutes"),
   VAR("Log",                     LINELIST, Logs,             NULL),
+  V(LogMessageDomains,           BOOL,     "0"),
   OBSOLETE("LinkPadding"),
   OBSOLETE("LogLevel"),
   OBSOLETE("LogFile"),
@@ -391,6 +393,7 @@ static config_var_t _option_vars[] = {
   VAR("__HashedControlSessionPassword", LINELIST, HashedControlSessionPassword,
       NULL),
   V(MinUptimeHidServDirectoryV2, INTERVAL, "24 hours"),
+  V(_UsingTestNetworkDefaults,   BOOL,     "0"),
 
   { NULL, CONFIG_TYPE_OBSOLETE, 0, NULL }
 };
@@ -405,6 +408,7 @@ static config_var_t testing_tor_network_defaults[] = {
   V(AuthDirMaxServersPerAddr,    UINT,     "0"),
   V(AuthDirMaxServersPerAuthAddr,UINT,     "0"),
   V(ClientDNSRejectInternalAddresses, BOOL,"0"),
+  V(ClientRejectInternalAddresses, BOOL,   "0"),
   V(ExitPolicyRejectPrivate,     BOOL,     "0"),
   V(V3AuthVotingInterval,        INTERVAL, "5 minutes"),
   V(V3AuthVoteDelay,             INTERVAL, "20 seconds"),
@@ -415,6 +419,7 @@ static config_var_t testing_tor_network_defaults[] = {
   V(TestingAuthDirTimeToLearnReachability, INTERVAL, "0 minutes"),
   V(TestingEstimatedDescriptorPropagationTime, INTERVAL, "0 minutes"),
   V(MinUptimeHidServDirectoryV2, INTERVAL, "0 minutes"),
+  V(_UsingTestNetworkDefaults,   BOOL,     "1"),
   { NULL, CONFIG_TYPE_OBSOLETE, 0, NULL }
 };
 #undef VAR
@@ -443,15 +448,19 @@ static config_var_t _state_vars[] = {
   V(BWHistoryReadEnds,                ISOTIME,  NULL),
   V(BWHistoryReadInterval,            UINT,     "900"),
   V(BWHistoryReadValues,              CSV,      ""),
+  V(BWHistoryReadMaxima,              CSV,      ""),
   V(BWHistoryWriteEnds,               ISOTIME,  NULL),
   V(BWHistoryWriteInterval,           UINT,     "900"),
   V(BWHistoryWriteValues,             CSV,      ""),
+  V(BWHistoryWriteMaxima,             CSV,      ""),
   V(BWHistoryDirReadEnds,             ISOTIME,  NULL),
   V(BWHistoryDirReadInterval,         UINT,     "900"),
   V(BWHistoryDirReadValues,           CSV,      ""),
+  V(BWHistoryDirReadMaxima,           CSV,      ""),
   V(BWHistoryDirWriteEnds,            ISOTIME,  NULL),
   V(BWHistoryDirWriteInterval,        UINT,     "900"),
   V(BWHistoryDirWriteValues,          CSV,      ""),
+  V(BWHistoryDirWriteMaxima,          CSV,      ""),
 
   V(TorVersion,                       STRING,   NULL),
 
@@ -2839,7 +2848,9 @@ compute_publishserverdescriptor(or_options_t *options)
     else if (!strcasecmp(string, "bridge"))
       *auth |= BRIDGE_AUTHORITY;
     else if (!strcasecmp(string, "hidserv"))
-      *auth |= HIDSERV_AUTHORITY;
+      log_warn(LD_CONFIG,
+               "PublishServerDescriptor hidserv is invalid. See "
+               "PublishHidServDescriptors.");
     else if (!strcasecmp(string, "") || !strcmp(string, "0"))
       /* no authority */;
     else
@@ -3343,6 +3354,11 @@ options_validate(or_options_t *old_options, or_options_t *options,
                            "PerConnBWBurst", msg) < 0)
     return -1;
 
+  if (options->RelayBandwidthRate && !options->RelayBandwidthBurst)
+    options->RelayBandwidthBurst = options->RelayBandwidthRate;
+  if (options->RelayBandwidthBurst && !options->RelayBandwidthRate)
+    options->RelayBandwidthRate = options->RelayBandwidthBurst;
+
   if (server_mode(options)) {
     if (options->BandwidthRate < ROUTER_REQUIRED_MIN_BANDWIDTH) {
       tor_asprintf(msg,
@@ -3370,9 +3386,6 @@ options_validate(or_options_t *old_options, or_options_t *options,
       return -1;
     }
   }
-
-  if (options->RelayBandwidthRate && !options->RelayBandwidthBurst)
-    options->RelayBandwidthBurst = options->RelayBandwidthRate;
 
   if (options->RelayBandwidthRate > options->RelayBandwidthBurst)
     REJECT("RelayBandwidthBurst must be at least equal "
@@ -3644,7 +3657,7 @@ options_validate(or_options_t *old_options, or_options_t *options,
   /* Keep changes to hard-coded values synchronous to man page and default
    * values table. */
   if (options->TestingV3AuthInitialVotingInterval != 30*60 &&
-      !options->TestingTorNetwork) {
+      !options->TestingTorNetwork && !options->_UsingTestNetworkDefaults) {
     REJECT("TestingV3AuthInitialVotingInterval may only be changed in testing "
            "Tor networks!");
   } else if (options->TestingV3AuthInitialVotingInterval < MIN_VOTE_INTERVAL) {
@@ -3655,7 +3668,8 @@ options_validate(or_options_t *old_options, or_options_t *options,
   }
 
   if (options->TestingV3AuthInitialVoteDelay != 5*60 &&
-      !options->TestingTorNetwork) {
+      !options->TestingTorNetwork && !options->_UsingTestNetworkDefaults) {
+
     REJECT("TestingV3AuthInitialVoteDelay may only be changed in testing "
            "Tor networks!");
   } else if (options->TestingV3AuthInitialVoteDelay < MIN_VOTE_SECONDS) {
@@ -3663,7 +3677,7 @@ options_validate(or_options_t *old_options, or_options_t *options,
   }
 
   if (options->TestingV3AuthInitialDistDelay != 5*60 &&
-      !options->TestingTorNetwork) {
+      !options->TestingTorNetwork && !options->_UsingTestNetworkDefaults) {
     REJECT("TestingV3AuthInitialDistDelay may only be changed in testing "
            "Tor networks!");
   } else if (options->TestingV3AuthInitialDistDelay < MIN_DIST_SECONDS) {
@@ -3678,7 +3692,7 @@ options_validate(or_options_t *old_options, or_options_t *options,
   }
 
   if (options->TestingAuthDirTimeToLearnReachability != 30*60 &&
-      !options->TestingTorNetwork) {
+      !options->TestingTorNetwork && !options->_UsingTestNetworkDefaults) {
     REJECT("TestingAuthDirTimeToLearnReachability may only be changed in "
            "testing Tor networks!");
   } else if (options->TestingAuthDirTimeToLearnReachability < 0) {
@@ -3688,7 +3702,7 @@ options_validate(or_options_t *old_options, or_options_t *options,
   }
 
   if (options->TestingEstimatedDescriptorPropagationTime != 10*60 &&
-      !options->TestingTorNetwork) {
+      !options->TestingTorNetwork && !options->_UsingTestNetworkDefaults) {
     REJECT("TestingEstimatedDescriptorPropagationTime may only be changed in "
            "testing Tor networks!");
   } else if (options->TestingEstimatedDescriptorPropagationTime < 0) {
@@ -3811,7 +3825,8 @@ options_transition_affects_workers(or_options_t *old_options,
       old_options->SafeLogging != new_options->SafeLogging ||
       old_options->ClientOnly != new_options->ClientOnly ||
       public_server_mode(old_options) != public_server_mode(new_options) ||
-      !config_lines_eq(old_options->Logs, new_options->Logs))
+      !config_lines_eq(old_options->Logs, new_options->Logs) ||
+      old_options->LogMessageDomains != new_options->LogMessageDomains)
     return 1;
 
   /* Check whether log options match. */
@@ -4386,6 +4401,9 @@ options_init_logs(or_options_t *options, int validate_only)
     tor_free(severity);
   }
   smartlist_free(elts);
+
+  if (ok && !validate_only)
+    logs_set_domain_logging(options->LogMessageDomains);
 
   return ok?0:-1;
 }

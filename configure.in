@@ -4,7 +4,7 @@ dnl Copyright (c) 2007-2008, The Tor Project, Inc.
 dnl See LICENSE for licensing information
 
 AC_INIT
-AM_INIT_AUTOMAKE(tor, 0.2.2.22-alpha)
+AM_INIT_AUTOMAKE(tor, 0.2.2.23-alpha)
 AM_CONFIG_HEADER(orconfig.h)
 
 AC_CANONICAL_HOST
@@ -848,6 +848,20 @@ AC_SUBST(BINDIR)
 LOCALSTATEDIR=`eval echo $localstatedir`
 AC_SUBST(LOCALSTATEDIR)
 
+if test "$bwin32" = true; then
+  # Test if the linker supports the --nxcompat and --dynamicbase options
+  # for Windows
+  save_LDFLAGS="$LDFLAGS"
+  LDFLAGS="-Wl,--nxcompat -Wl,--dynamicbase"
+  AC_MSG_CHECKING([whether the linker supports DllCharacteristics])
+  AC_LINK_IFELSE([AC_LANG_PROGRAM([])],
+    [AC_MSG_RESULT([yes])]
+    [save_LDFLAGS="$save_LDFLAGS $LDFLAGS"],
+    [AC_MSG_RESULT([no])]
+  )
+  LDFLAGS="$save_LDFLAGS"
+fi
+
 # Set CFLAGS _after_ all the above checks, since our warnings are stricter
 # than autoconf's macros like.
 if test "$GCC" = yes; then
@@ -932,7 +946,7 @@ fi
 
 CPPFLAGS="$CPPFLAGS $TOR_CPPFLAGS_libevent $TOR_CPPFLAGS_openssl $TOR_CPPFLAGS_zlib"
 
-AC_CONFIG_FILES([Makefile tor.spec Doxyfile contrib/tor.sh contrib/torctl contrib/torify contrib/tor.logrotate contrib/Makefile src/config/torrc.sample src/Makefile doc/Makefile doc/spec/Makefile src/config/Makefile src/common/Makefile src/or/Makefile src/test/Makefile src/win32/Makefile src/tools/Makefile contrib/suse/Makefile contrib/suse/tor.sh])
+AC_CONFIG_FILES([Makefile tor.spec Doxyfile contrib/tor.sh contrib/torctl contrib/torify contrib/tor.logrotate contrib/Makefile src/config/torrc.sample src/Makefile doc/Makefile src/config/Makefile src/common/Makefile src/or/Makefile src/test/Makefile src/win32/Makefile src/tools/Makefile contrib/suse/Makefile contrib/suse/tor.sh])
 AC_OUTPUT
 
 if test -x /usr/bin/perl && test -x ./contrib/updateVersions.pl ; then
