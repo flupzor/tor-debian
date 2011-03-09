@@ -583,6 +583,9 @@ typedef enum {
 /** This is a connection on the NATD port, and the destination IP:Port was
  * either ill-formed or out-of-range. */
 #define END_STREAM_REASON_INVALID_NATD_DEST 261
+/** The target address is in a private network (like 127.0.0.1 or 10.0.0.1);
+ * you don't want to do that over a randomly chosen exit */
+#define END_STREAM_REASON_PRIVATE_ADDR 262
 
 /** Bitwise-and this value with endreason to mask out all flags. */
 #define END_STREAM_REASON_MASK 511
@@ -1169,6 +1172,10 @@ typedef struct edge_connection_t {
    * we fail to complete a circuit to our chosen exit -- if it reaches
    * zero, abandon the associated mapaddress. */
   unsigned int chosen_exit_retries:3;
+
+  /** True iff this is an AP connection that came from a transparent or
+   * NATd connection */
+  unsigned int is_transparent_ap:1;
 
   /** If this is a DNSPort connection, this field holds the pending DNS
    * request that we're going to try to answer.  */
@@ -2338,6 +2345,9 @@ typedef struct {
   config_line_t *Logs; /**< New-style list of configuration lines
                         * for logs */
 
+  int LogMessageDomains; /**< Boolean: Should we log the domain(s) in which
+                          * each log message occurs? */
+
   char *DebugLogFile; /**< Where to send verbose log messages. */
   char *DataDirectory; /**< OR only: where to store long-term data. */
   char *Nickname; /**< OR only: nickname of this onion router. */
@@ -2749,6 +2759,10 @@ typedef struct {
    * Helps avoid some cross-site attacks. */
   int ClientDNSRejectInternalAddresses;
 
+  /** If true, do not accept any requests to connect to internal addresses
+   * over randomly chosen exits. */
+  int ClientRejectInternalAddresses;
+
   /** The length of time that we think a consensus should be fresh. */
   int V3AuthVotingInterval;
   /** The length of time we think it will take to distribute votes. */
@@ -2827,6 +2841,11 @@ typedef struct {
    */
   double CircuitPriorityHalflife;
 
+  /** Set to true if the TestingTorNetwork configuration option is set.
+   * This is used so that options_validate() has a chance to realize that
+   * the defaults have changed. */
+  int _UsingTestNetworkDefaults;
+
 } or_options_t;
 
 /** Persistent state for an onion router, as saved to disk. */
@@ -2858,19 +2877,25 @@ typedef struct {
    * bandwidth usage. The "Interval" fields hold the granularity, in seconds,
    * of the entries of Values.  The "Values" lists hold decimal string
    * representations of the number of bytes read or written in each
-   * interval. */
+   * interval. The "Maxima" list holds decimal strings describing the highest
+   * rate achieved during the interval.
+   */
   time_t      BWHistoryReadEnds;
   int         BWHistoryReadInterval;
   smartlist_t *BWHistoryReadValues;
+  smartlist_t *BWHistoryReadMaxima;
   time_t      BWHistoryWriteEnds;
   int         BWHistoryWriteInterval;
   smartlist_t *BWHistoryWriteValues;
+  smartlist_t *BWHistoryWriteMaxima;
   time_t      BWHistoryDirReadEnds;
   int         BWHistoryDirReadInterval;
   smartlist_t *BWHistoryDirReadValues;
+  smartlist_t *BWHistoryDirReadMaxima;
   time_t      BWHistoryDirWriteEnds;
   int         BWHistoryDirWriteInterval;
   smartlist_t *BWHistoryDirWriteValues;
+  smartlist_t *BWHistoryDirWriteMaxima;
 
   /** Build time histogram */
   config_line_t * BuildtimeHistogram;
