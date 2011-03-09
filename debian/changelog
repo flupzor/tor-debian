@@ -1,6 +1,9 @@
 tor (0.2.2.23-alpha-1) experimental; urgency=low
 
   * New upstream version.
+  * The tor specification files are no longer shipped in the tarball,
+    so /usr/share/doc/tor/spec is no more.  They can be found online
+    at <URL:https://gitweb.torproject.org/torspec.git/tree>.
 
  -- Peter Palfrader <weasel@debian.org>  Wed, 09 Mar 2011 14:40:16 +0100
 
