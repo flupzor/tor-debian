@@ -1,4 +1,4 @@
-tor (0.2.2.23-alpha-2) experimental; urgency=low
+tor (0.2.2.23-alpha-XXX) Xxperimental; urgency=low
 
   * Forward port missing changes from the 0.2.1.x tree:
     - Add ${misc:Depends} for all three binary packages because debhelper
@@ -21,7 +21,7 @@ tor (0.2.2.23-alpha-2) experimental; urgency=low
       Thanks to Holger and piuparts for catching this.
       [tor 0.2.1.26-3]
 
- -- Peter Palfrader <weasel@debian.org>  Thu, 10 Mar 2011 10:42:17 +0100
+ -- Peter Palfrader <weasel@debian.org>  Thu, 10 Mar 2011 10:52:06 +0100
 
 tor (0.2.2.23-alpha-1) experimental; urgency=low
 
