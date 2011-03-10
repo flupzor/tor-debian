@@ -107,7 +107,7 @@ EOF
 		fi
 	done
 	if [ -e /var/lib/tor/keys/secret_id_key ]; then
-		id_mtime=`/usr/bin/stat -c %Y /var/lib/tor/keys/secret_id_key`
+		id_mtime=`stat -c %Y /var/lib/tor/keys/secret_id_key`
 		sept=`date -d '2006-09-10' +%s`
 		if [ "$id_mtime" -gt "$sept" ] ; then
 			mv -v /var/lib/tor/keys/secret_id_key /var/lib/tor/keys/moved-away-by-tor-package/secret_id_key

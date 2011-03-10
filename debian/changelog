@@ -2,6 +2,7 @@ tor (0.2.2.23-alpha-2) experimental; urgency=low
 
   * Add ${misc:Depends} for all three binary packages because debhelper
     might want to add stuff.
+  * tor.postinst: Stop calling stat(1) with its full path.
 
  -- Peter Palfrader <weasel@debian.org>  Thu, 10 Mar 2011 10:40:05 +0100
 
