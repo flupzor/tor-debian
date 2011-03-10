@@ -16,6 +16,10 @@ tor (0.2.2.23-alpha-2) experimental; urgency=low
     - Also include a cron.weekly job that removes old coredumps from
       /var/lib/tor.  This action can be disabled in /etc/default/tor.
       [tor 0.2.1.26-2]
+    - Make sure the cronjob does not try to access a /var/lib/tor
+      that has already been removed (due to for instance package removal).
+      Thanks to Holger and piuparts for catching this.
+      [tor 0.2.1.26-3]
 
  -- Peter Palfrader <weasel@debian.org>  Thu, 10 Mar 2011 10:42:17 +0100
 
