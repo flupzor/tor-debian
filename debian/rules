@@ -181,6 +181,7 @@ binary-common:
 	dh_installexamples
 	dh_installlogrotate
 	dh_installinit
+	dh_installcron
 	dh_installman
 	dh_link
 	dh_strip --dbg-package=tor-dbg

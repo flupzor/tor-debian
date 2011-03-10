@@ -34,9 +34,25 @@ RUN_DAEMON="yes"
 # ARGS=""
 
 #
-# Comment this out if you do not want to get coredumps
+# Uncomment the ulimit call below if you want tor to produce coredumps on
+# segfaults and assert errors.
 #
-ulimit -c unlimited
+# Keeping coredumps around is some sort of security issue since they
+# may leak session keys, sensitive client data and more, should such
+# files fall into the wrong hands.  Therefore coredumps are not enabled
+# by default.
+#
+# ulimit -c unlimited
+
+#
+# Config option for the weekly cron file: Whether or not to remove old
+# coredumps in /var/lib/tor.  Coredumps can hold sensitive data, as such
+# they probably should not be kept lying around if nobody will ever look
+# at them.  This option makes /etc/cron.weekly/tor clean out files older
+# then three weeks.
+#
+CLEANUP_OLD_COREFILES=y
+
 
 # Let the vidalia package override some of our settings.
 # People who have vidalia installed might not want to run Tor as a system
