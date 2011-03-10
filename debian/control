@@ -8,7 +8,7 @@ Homepage: https://www.torproject.org/
 
 Package: tor
 Architecture: any
-Depends: ${shlibs:Depends}, adduser
+Depends: ${shlibs:Depends}, adduser, ${misc:Depends}
 Conflicts: libssl0.9.8 (<< 0.9.8g-9)
 Recommends: polipo (>= 1) | privoxy, socat, logrotate, tor-geoipdb, torsocks | tsocks
 Suggests: mixmaster, xul-ext-torbutton
@@ -51,7 +51,7 @@ Description: anonymizing overlay network for TCP
 
 Package: tor-dbg
 Architecture: any
-Depends: tor (= ${binary:Version})
+Depends: tor (= ${binary:Version}), ${misc:Depends}
 Suggests: gdb
 Priority: extra
 Section: debug
@@ -63,7 +63,7 @@ Description: debugging symbols for Tor
 Package: tor-geoipdb
 Architecture: all
 Priority: extra
-Depends: tor (>= ${source:Version})
+Depends: tor (>= ${source:Version}), ${misc:Depends}
 Description: geoIP database for Tor
  This package provides a geoIP database for Tor, i.e. it maps IPv4 addresses
  to countries.
