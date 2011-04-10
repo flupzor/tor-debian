@@ -528,6 +528,20 @@ get_weighted_fractional_uptime(or_history_t *hist, time_t when)
   return ((double) up) / total;
 }
 
+/** Return how long the router whose identity digest is <b>id</b> has
+ *  been reachable. Return 0 if the router is unknown or currently deemed
+ *  unreachable. */
+long
+rep_hist_get_uptime(const char *id, time_t when)
+{
+  or_history_t *hist = get_or_history(id);
+  if (!hist)
+    return 0;
+  if (!hist->start_of_run || when < hist->start_of_run)
+    return 0;
+  return when - hist->start_of_run;
+}
+
 /** Return an estimated MTBF for the router whose identity digest is
  * <b>id</b>. Return 0 if the router is unknown. */
 double
@@ -2323,7 +2337,6 @@ typedef struct circ_buffer_stats_t {
   uint32_t local_circ_id;
 } circ_buffer_stats_t;
 
-/** Holds stats. */
 smartlist_t *circuits_for_buffer_stats = NULL;
 
 /** Remember cell statistics for circuit <b>circ</b> at time
@@ -2343,9 +2356,9 @@ rep_hist_buffer_stats_add_circ(circuit_t *circ, time_t end_of_interval)
     return;
   if (!circuits_for_buffer_stats)
     circuits_for_buffer_stats = smartlist_create();
-  start_of_interval = circ->timestamp_created >
+  start_of_interval = circ->timestamp_created.tv_sec >
       start_of_buffer_stats_interval ?
-        circ->timestamp_created :
+        circ->timestamp_created.tv_sec :
         start_of_buffer_stats_interval;
   interval_length = (int) (end_of_interval - start_of_interval);
   stat = tor_malloc_zero(sizeof(circ_buffer_stats_t));
