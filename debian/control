@@ -48,8 +48,8 @@ Description: anonymizing overlay network for TCP
  network if you really need strong anonymity.
  .
  The latest information can be found at https://www.torproject.org/, or on the
- mailing lists, archived at http://archives.seul.org/or/talk/ or
- http://archives.seul.org/or/announce/.
+ mailing lists, archived at https://lists.torproject.org/pipermail/tor-talk/ or
+ https://lists.torproject.org/pipermail/tor-announce/.
 
 Package: tor-dbg
 Architecture: any
