@@ -5,6 +5,8 @@ Maintainer: Peter Palfrader <weasel@debian.org>
 Build-Depends: debhelper (>= 5), libssl-dev, dpatch, zlib1g-dev, libevent-dev (>= 1.1), binutils (>= 2.14.90.0.7), hardening-includes, asciidoc (>= 8.2), docbook-xml, docbook-xsl, xmlto
 Standards-Version: 3.8.1
 Homepage: https://www.torproject.org/
+Vcs-Git: git://git.torproject.org/debian/tor.git
+Vcs-Browser: https://gitweb.torproject.org/debian/tor.git
 
 Package: tor
 Architecture: any
