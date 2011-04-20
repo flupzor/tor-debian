@@ -1,3 +1,10 @@
+tor (0.2.2.24-alpha-X) Xxperimental; urgency=low
+
+  * Add Vcs-* control fields. Patch by intrigeri@boum.org
+    (closes: #623316).
+
+ -- Peter Palfrader <weasel@debian.org>  Wed, 20 Apr 2011 17:59:11 +0200
+
 tor (0.2.2.24-alpha-1) experimental; urgency=low
 
   * New upstream version.
