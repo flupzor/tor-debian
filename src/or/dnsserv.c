@@ -19,7 +19,7 @@
 #ifdef HAVE_EVENT2_DNS_H
 #include <event2/dns.h>
 #include <event2/dns_compat.h>
-/* XXXX022 this implies we want an improved evdns  */
+/* XXXX023 this implies we want an improved evdns  */
 #include <event2/dns_struct.h>
 #else
 #include "eventdns.h"
@@ -280,7 +280,7 @@ dnsserv_resolved(edge_connection_t *conn,
              conn->socks_request->command == SOCKS_COMMAND_RESOLVE) {
     evdns_server_request_add_a_reply(req,
                                      name,
-                                     1, (char*)answer, ttl);
+                                     1, answer, ttl);
   } else if (answer_type == RESOLVED_TYPE_HOSTNAME &&
              answer_len < 256 &&
              conn->socks_request->command == SOCKS_COMMAND_RESOLVE_PTR) {

@@ -91,7 +91,7 @@
 #include "compat_libevent.h"
 #include "ht.h"
 
-/* These signals are defined to help control_signal_act work.
+/* These signals are defined to help handle_control_signal work.
  */
 #ifndef SIGHUP
 #define SIGHUP 1
@@ -1006,7 +1006,7 @@ typedef struct connection_t {
   /** Unique identifier for this connection on this Tor instance. */
   uint64_t global_identifier;
 
-  /* XXXX022 move this field, and all the listener-only fields (just
+  /* XXXX023 move this field, and all the listener-only fields (just
      socket_family, I think), into a new listener_connection_t subtype. */
   /** If the connection is a CONN_TYPE_AP_DNS_LISTENER, this field points
    * to the evdns_server_port is uses to listen to and answer connections. */
@@ -1150,6 +1150,13 @@ typedef struct edge_connection_t {
    * a new circuit. We keep track because the timeout is longer if we've
    * already retried several times. */
   uint8_t num_socks_retries;
+
+#define NUM_CIRCUITS_LAUNCHED_THRESHOLD 10
+  /** Number of times we've launched a circuit to handle this stream. If
+    * it gets too high, that could indicate an inconsistency between our
+    * "launch a circuit to handle this stream" logic and our "attach our
+    * stream to one of the available circuits" logic. */
+  unsigned int num_circuits_launched:4;
 
   /** True iff this connection is for a DNS request only. */
   unsigned int is_dns_request:1;
@@ -2127,8 +2134,14 @@ typedef struct circuit_t {
   char *n_conn_onionskin;
 
   struct timeval timestamp_created; /**< When was the circuit created? */
-  time_t timestamp_dirty; /**< When the circuit was first used, or 0 if the
-                           * circuit is clean. */
+  /** When the circuit was first used, or 0 if the circuit is clean.
+   *
+   * XXXX023 Note that some code will artifically adjust this value backward
+   * in time in order to indicate that a circuit shouldn't be used for new
+   * streams, but that it can stay alive as long as it has streams on it.
+   * That's a kludge we should fix.
+   */
+  time_t timestamp_dirty;
 
   uint16_t marked_for_close; /**< Should we close this circuit at the end of
                               * the main loop? (If true, holds the line number
@@ -2381,7 +2394,7 @@ typedef struct {
                                  * ORs not to consider as exits. */
 
   /** Union of ExcludeNodes and ExcludeExitNodes */
-  struct routerset_t *_ExcludeExitNodesUnion;
+  routerset_t *_ExcludeExitNodesUnion;
 
   int DisableAllSwap; /**< Boolean: Attempt to call mlockall() on our
                        * process for all current and future memory. */
@@ -3481,7 +3494,7 @@ typedef struct trusted_dir_server_t {
 
 #define ROUTER_MAX_DECLARED_BANDWIDTH INT32_MAX
 
-/* Flags for pick_directory_server and pick_trusteddirserver. */
+/* Flags for pick_directory_server() and pick_trusteddirserver(). */
 /** Flag to indicate that we should not automatically be willing to use
  * ourself to answer a directory request.
  * Passed to router_pick_directory_server (et al).*/

@@ -946,7 +946,7 @@ running_long_enough_to_decide_unreachable(void)
 void
 dirserv_set_router_is_running(routerinfo_t *router, time_t now)
 {
-  /*XXXX022 This function is a mess.  Separate out the part that calculates
+  /*XXXX023 This function is a mess.  Separate out the part that calculates
     whether it's reachable and the part that tells rephist that the router was
     unreachable.
    */
@@ -1754,9 +1754,12 @@ dirserv_thinks_router_is_unreliable(time_t now,
 {
   if (need_uptime) {
     if (!enough_mtbf_info) {
-      /* XXX022 Once most authorities are on v3, we should change the rule from
+      /* XXX023 Once most authorities are on v3, we should change the rule from
        * "use uptime if we don't have mtbf data" to "don't advertise Stable on
-       * v3 if we don't have enough mtbf data." */
+       * v3 if we don't have enough mtbf data."  Or maybe not, since if we ever
+       * hit a point where we need to reset a lot of authorities at once,
+       * none of them would be in a position to declare Stable.
+       */
       long uptime = real_uptime(router, now);
       if ((unsigned)uptime < stable_uptime &&
           (unsigned)uptime < UPTIME_TO_GUARANTEE_STABLE)
@@ -1808,6 +1811,9 @@ dirserv_thinks_router_is_hs_dir(routerinfo_t *router, time_t now)
    * bug 1693. In the future, once relays set wants_to_be_hs_dir
    * correctly, we can revert to only checking dir_port if router's
    * version is too old. */
+  /* XXX Unfortunately, we need to keep checking dir_port until all
+   * *clients* suffering from bug 2722 are obsolete.  The first version
+   * to fix the bug was 0.2.2.25-alpha. */
   return (router->wants_to_be_hs_dir && router->dir_port &&
           uptime > get_options()->MinUptimeHidServDirectoryV2 &&
           router->is_running);
@@ -3260,7 +3266,7 @@ lookup_cached_dir_by_fp(const char *fp)
     d = strmap_get(cached_consensuses, "ns");
   else if (memchr(fp, '\0', DIGEST_LEN) && cached_consensuses &&
            (d = strmap_get(cached_consensuses, fp))) {
-    /* this here interface is a nasty hack XXXX022 */;
+    /* this here interface is a nasty hack XXXX023 */;
   } else if (router_digest_is_me(fp) && the_v2_networkstatus)
     d = the_v2_networkstatus;
   else if (cached_v2_networkstatus)

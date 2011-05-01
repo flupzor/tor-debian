@@ -22,6 +22,10 @@
 #include "rephist.h"
 #include "routerlist.h"
 
+static extend_info_t *rend_client_get_random_intro_impl(
+                          const rend_cache_entry_t *rend_query,
+                          const int strict, const int warnings);
+
 /** Called when we've established a circuit to an introduction point:
  * send the introduction request. */
 void
@@ -62,6 +66,50 @@ rend_client_send_establish_rendezvous(origin_circuit_t *circ)
   return 0;
 }
 
+/** Extend the introduction circuit <b>circ</b> to another valid
+ * introduction point for the hidden service it is trying to connect
+ * to, or mark it and launch a new circuit if we can't extend it.
+ * Return 0 on success.  Return -1 and mark the introduction
+ * circuit on failure.
+ *
+ * On failure, the caller is responsible for marking the associated
+ * rendezvous circuit for close. */
+static int
+rend_client_reextend_intro_circuit(origin_circuit_t *circ)
+{
+  extend_info_t *extend_info;
+  int result;
+  extend_info = rend_client_get_random_intro(circ->rend_data);
+  if (!extend_info) {
+    log_warn(LD_REND,
+             "No usable introduction points left for %s. Closing.",
+             safe_str_client(circ->rend_data->onion_address));
+    circuit_mark_for_close(TO_CIRCUIT(circ), END_CIRC_REASON_INTERNAL);
+    return -1;
+  }
+  if (circ->remaining_relay_early_cells) {
+    log_info(LD_REND,
+             "Re-extending circ %d, this time to %s.",
+             circ->_base.n_circ_id, extend_info->nickname);
+    result = circuit_extend_to_new_exit(circ, extend_info);
+  } else {
+    log_info(LD_REND,
+             "Building a new introduction circuit, this time to %s.",
+             extend_info->nickname);
+    circuit_mark_for_close(TO_CIRCUIT(circ), END_CIRC_REASON_FINISHED);
+    if (!circuit_launch_by_extend_info(CIRCUIT_PURPOSE_C_INTRODUCING,
+                                       extend_info,
+                                       CIRCLAUNCH_IS_INTERNAL)) {
+      log_warn(LD_REND, "Building introduction circuit failed.");
+      result = -1;
+    } else {
+      result = 0;
+    }
+  }
+  extend_info_free(extend_info);
+  return result;
+}
+
 /** Called when we're trying to connect an ap conn; sends an INTRODUCE1 cell
  * down introcirc if possible.
  */
@@ -87,13 +135,25 @@ rend_client_send_introduction(origin_circuit_t *introcirc,
 
   if (rend_cache_lookup_entry(introcirc->rend_data->onion_address, -1,
                               &entry) < 1) {
-    log_warn(LD_REND,
-             "query %s didn't have valid rend desc in cache. Failing.",
-             escaped_safe_str_client(introcirc->rend_data->onion_address));
-    goto err;
+    log_info(LD_REND,
+             "query %s didn't have valid rend desc in cache. "
+             "Refetching descriptor.",
+             safe_str_client(introcirc->rend_data->onion_address));
+    rend_client_refetch_v2_renddesc(introcirc->rend_data);
+    {
+      connection_t *conn;
+
+      while ((conn = connection_get_by_type_state_rendquery(CONN_TYPE_AP,
+                       AP_CONN_STATE_CIRCUIT_WAIT,
+                       introcirc->rend_data->onion_address))) {
+        conn->state = AP_CONN_STATE_RENDDESC_WAIT;
+      }
+    }
+
+    return -1;
   }
 
-  /* first 20 bytes of payload are the hash of the intro key */
+  /* first 20 bytes of payload are the hash of Bob's pk */
   intro_key = NULL;
   SMARTLIST_FOREACH(entry->parsed->intro_nodes, rend_intro_point_t *,
                     intro, {
@@ -104,15 +164,22 @@ rend_client_send_introduction(origin_circuit_t *introcirc,
     }
   });
   if (!intro_key) {
-    log_info(LD_REND, "Our introduction point knowledge changed in "
-             "mid-connect! Could not find intro key; we only have a "
-             "v2 rend desc with %d intro points. Giving up.",
+    log_info(LD_REND, "Could not find intro key for %s at %s; we "
+             "have a v2 rend desc with %d intro points. "
+             "Trying a different intro point...",
+             safe_str_client(introcirc->rend_data->onion_address),
+             introcirc->build_state->chosen_exit->nickname,
              smartlist_len(entry->parsed->intro_nodes));
-    goto err;
+
+    if (rend_client_reextend_intro_circuit(introcirc)) {
+      goto perm_err;
+    } else {
+      return -1;
+    }
   }
   if (crypto_pk_get_digest(intro_key, payload)<0) {
     log_warn(LD_BUG, "Internal error: couldn't hash public key.");
-    goto err;
+    goto perm_err;
   }
 
   /* Initialize the pending_final_cpath and start the DH handshake. */
@@ -123,11 +190,11 @@ rend_client_send_introduction(origin_circuit_t *introcirc,
     cpath->magic = CRYPT_PATH_MAGIC;
     if (!(cpath->dh_handshake_state = crypto_dh_new(DH_TYPE_REND))) {
       log_warn(LD_BUG, "Internal error: couldn't allocate DH.");
-      goto err;
+      goto perm_err;
     }
     if (crypto_dh_generate_public(cpath->dh_handshake_state)<0) {
       log_warn(LD_BUG, "Internal error: couldn't generate g^x.");
-      goto err;
+      goto perm_err;
     }
   }
 
@@ -177,7 +244,7 @@ rend_client_send_introduction(origin_circuit_t *introcirc,
   if (crypto_dh_get_public(cpath->dh_handshake_state, tmp+dh_offset,
                            DH_KEY_LEN)<0) {
     log_warn(LD_BUG, "Internal error: couldn't extract g^x.");
-    goto err;
+    goto perm_err;
   }
 
   note_crypto_pk_op(REND_CLIENT);
@@ -190,7 +257,7 @@ rend_client_send_introduction(origin_circuit_t *introcirc,
                                       PK_PKCS1_OAEP_PADDING, 0);
   if (r<0) {
     log_warn(LD_BUG,"Internal error: hybrid pk encrypt failed.");
-    goto err;
+    goto perm_err;
   }
 
   payload_len = DIGEST_LEN + r;
@@ -203,17 +270,18 @@ rend_client_send_introduction(origin_circuit_t *introcirc,
                                    introcirc->cpath->prev)<0) {
     /* introcirc is already marked for close. leave rendcirc alone. */
     log_warn(LD_BUG, "Couldn't send INTRODUCE1 cell");
-    return -1;
+    return -2;
   }
 
   /* Now, we wait for an ACK or NAK on this circuit. */
   introcirc->_base.purpose = CIRCUIT_PURPOSE_C_INTRODUCE_ACK_WAIT;
 
   return 0;
- err:
-  circuit_mark_for_close(TO_CIRCUIT(introcirc), END_CIRC_REASON_INTERNAL);
+perm_err:
+  if (!introcirc->_base.marked_for_close)
+    circuit_mark_for_close(TO_CIRCUIT(introcirc), END_CIRC_REASON_INTERNAL);
   circuit_mark_for_close(TO_CIRCUIT(rendcirc), END_CIRC_REASON_INTERNAL);
-  return -1;
+  return -2;
 }
 
 /** Called when a rendezvous circuit is open; sends a establish
@@ -274,45 +342,16 @@ rend_client_introduction_acked(origin_circuit_t *circ,
      * points. If any remain, extend to a new one and try again.
      * If none remain, refetch the service descriptor.
      */
+    log_info(LD_REND, "Got nack for %s from %s...",
+             safe_str_client(circ->rend_data->onion_address),
+             circ->build_state->chosen_exit->nickname);
     if (rend_client_remove_intro_point(circ->build_state->chosen_exit,
                                        circ->rend_data) > 0) {
       /* There are introduction points left. Re-extend the circuit to
        * another intro point and try again. */
-      extend_info_t *extend_info;
-      int result;
-      extend_info = rend_client_get_random_intro(circ->rend_data);
-      if (!extend_info) {
-        log_warn(LD_REND, "No introduction points left for %s. Closing.",
-                 escaped_safe_str_client(circ->rend_data->onion_address));
-        circuit_mark_for_close(TO_CIRCUIT(circ), END_CIRC_REASON_INTERNAL);
-        return -1;
-      }
-      if (circ->remaining_relay_early_cells) {
-        log_info(LD_REND,
-                 "Got nack for %s from %s. Re-extending circ %d, "
-                 "this time to %s.",
-                 escaped_safe_str_client(circ->rend_data->onion_address),
-                 circ->build_state->chosen_exit->nickname,
-                 circ->_base.n_circ_id, extend_info->nickname);
-        result = circuit_extend_to_new_exit(circ, extend_info);
-      } else {
-        log_info(LD_REND,
-                 "Got nack for %s from %s. Building a new introduction "
-                 "circuit, this time to %s.",
-                 escaped_safe_str_client(circ->rend_data->onion_address),
-                 circ->build_state->chosen_exit->nickname,
-                 extend_info->nickname);
-        circuit_mark_for_close(TO_CIRCUIT(circ), END_CIRC_REASON_FINISHED);
-        if (!circuit_launch_by_extend_info(CIRCUIT_PURPOSE_C_INTRODUCING,
-                                           extend_info,
-                                           CIRCLAUNCH_IS_INTERNAL)) {
-          log_warn(LD_REND, "Building introduction circuit failed.");
-          result = -1;
-        } else {
-          result = 0;
-        }
-      }
-      extend_info_free(extend_info);
+      int result = rend_client_reextend_intro_circuit(circ);
+      /* XXXX If that call failed, should we close the rend circuit,
+       * too? */
       return result;
     }
   }
@@ -522,8 +561,44 @@ rend_client_refetch_v2_renddesc(const rend_data_t *rend_query)
   return;
 }
 
+/** Cancel all rendezvous descriptor fetches currently in progress.
+ */
+void
+rend_client_cancel_descriptor_fetches(void)
+{
+  smartlist_t *connection_array = get_connection_array();
+
+  SMARTLIST_FOREACH_BEGIN(connection_array, connection_t *, conn) {
+    if (conn->type == CONN_TYPE_DIR &&
+        (conn->purpose == DIR_PURPOSE_FETCH_RENDDESC ||
+         conn->purpose == DIR_PURPOSE_FETCH_RENDDESC_V2)) {
+      /* It's a rendezvous descriptor fetch in progress -- cancel it
+       * by marking the connection for close.
+       *
+       * Even if this connection has already reached EOF, this is
+       * enough to make sure that if the descriptor hasn't been
+       * processed yet, it won't be.  See the end of
+       * connection_handle_read; connection_reached_eof (indirectly)
+       * processes whatever response the connection received. */
+
+      const rend_data_t *rd = (TO_DIR_CONN(conn))->rend_data;
+      if (!rd) {
+        log_warn(LD_BUG | LD_REND,
+                 "Marking for close dir conn fetching rendezvous "
+                 "descriptor for unknown service!");
+      } else {
+        log_debug(LD_REND, "Marking for close dir conn fetching "
+                  "rendezvous descriptor for service %s",
+                  safe_str(rd->onion_address));
+      }
+      connection_mark_for_close(conn);
+    }
+  } SMARTLIST_FOREACH_END(conn);
+}
+
 /** Remove failed_intro from ent. If ent now has no intro points, or
  * service is unrecognized, then launch a new renddesc fetch.
+
  *
  * Return -1 if error, 0 if no intro points remain or service
  * unrecognized, 1 if recognized and some intro points remain.
@@ -559,7 +634,7 @@ rend_client_remove_intro_point(extend_info_t *failed_intro,
     }
   }
 
-  if (smartlist_len(ent->parsed->intro_nodes) == 0) {
+  if (! rend_client_any_intro_points_usable(ent)) {
     log_info(LD_REND,
              "No more intro points remain for %s. Re-fetching descriptor.",
              escaped_safe_str_client(rend_query->onion_address));
@@ -599,7 +674,7 @@ rend_client_rendezvous_acked(origin_circuit_t *circ, const uint8_t *request,
   log_info(LD_REND,"Got rendezvous ack. This circuit is now ready for "
            "rendezvous.");
   circ->_base.purpose = CIRCUIT_PURPOSE_C_REND_READY;
-  /* XXXX022 This is a pretty brute-force approach. It'd be better to
+  /* XXXX023 This is a pretty brute-force approach. It'd be better to
    * attach only the connections that are waiting on this circuit, rather
    * than trying to attach them all. See comments bug 743. */
   /* If we already have the introduction circuit built, make sure we send
@@ -669,7 +744,7 @@ rend_client_receive_rendezvous(origin_circuit_t *circ, const uint8_t *request,
 
   onion_append_to_cpath(&circ->cpath, hop);
   circ->build_state->pending_final_cpath = NULL; /* prevent double-free */
-  /* XXXX022 This is a pretty brute-force approach. It'd be better to
+  /* XXXX023 This is a pretty brute-force approach. It'd be better to
    * attach only the connections that are waiting on this circuit, rather
    * than trying to attach them all. See comments bug 743. */
   connection_ap_attach_pending();
@@ -705,7 +780,7 @@ rend_client_desc_trynow(const char *query)
     assert_connection_ok(TO_CONN(conn), now);
     if (rend_cache_lookup_entry(conn->rend_data->onion_address, -1,
                                 &entry) == 1 &&
-        smartlist_len(entry->parsed->intro_nodes) > 0) {
+        rend_client_any_intro_points_usable(entry)) {
       /* either this fetch worked, or it failed but there was a
        * valid entry from before which we should reuse */
       log_info(LD_REND,"Rend desc is usable. Launching circuits.");
@@ -739,24 +814,63 @@ rend_client_desc_trynow(const char *query)
 extend_info_t *
 rend_client_get_random_intro(const rend_data_t *rend_query)
 {
-  int i;
+  extend_info_t *result;
   rend_cache_entry_t *entry;
-  rend_intro_point_t *intro;
-  routerinfo_t *router;
 
   if (rend_cache_lookup_entry(rend_query->onion_address, -1, &entry) < 1) {
-    log_warn(LD_REND,
-             "Query '%s' didn't have valid rend desc in cache. Failing.",
-             safe_str_client(rend_query->onion_address));
+      log_warn(LD_REND,
+               "Query '%s' didn't have valid rend desc in cache. Failing.",
+               safe_str_client(rend_query->onion_address));
     return NULL;
   }
 
- again:
-  if (smartlist_len(entry->parsed->intro_nodes) == 0)
-    return NULL;
+  /* See if we can get a node that complies with ExcludeNodes */
+  if ((result = rend_client_get_random_intro_impl(entry, 1, 1)))
+    return result;
+  /* If not, and StrictNodes is not set, see if we can return any old node
+   */
+  if (!get_options()->StrictNodes)
+    return rend_client_get_random_intro_impl(entry, 0, 1);
+  return NULL;
+}
 
-  i = crypto_rand_int(smartlist_len(entry->parsed->intro_nodes));
-  intro = smartlist_get(entry->parsed->intro_nodes, i);
+/** As rend_client_get_random_intro, except assume that StrictNodes is set
+ * iff <b>strict</b> is true. If <b>warnings</b> is false, don't complain
+ * to the user when we're out of nodes, even if StrictNodes is true.
+ */
+static extend_info_t *
+rend_client_get_random_intro_impl(const rend_cache_entry_t *entry,
+                                  const int strict,
+                                  const int warnings)
+{
+  int i;
+
+  rend_intro_point_t *intro;
+  routerinfo_t *router;
+  or_options_t *options = get_options();
+  smartlist_t *usable_nodes;
+  int n_excluded = 0;
+
+  /* We'll keep a separate list of the usable nodes.  If this becomes empty,
+   * no nodes are usable.  */
+  usable_nodes = smartlist_create();
+  smartlist_add_all(usable_nodes, entry->parsed->intro_nodes);
+
+ again:
+  if (smartlist_len(usable_nodes) == 0) {
+    if (n_excluded && get_options()->StrictNodes && warnings) {
+      /* We only want to warn if StrictNodes is really set. Otherwise
+       * we're just about to retry anyways.
+       */
+      log_warn(LD_REND, "All introduction points for hidden service are "
+               "at excluded relays, and StrictNodes is set. Skipping.");
+    }
+    smartlist_free(usable_nodes);
+    return NULL;
+  }
+
+  i = crypto_rand_int(smartlist_len(usable_nodes));
+  intro = smartlist_get(usable_nodes, i);
   /* Do we need to look up the router or is the extend info complete? */
   if (!intro->extend_info->onion_key) {
     if (tor_digest_is_zero(intro->extend_info->identity_digest))
@@ -766,14 +880,32 @@ rend_client_get_random_intro(const rend_data_t *rend_query)
     if (!router) {
       log_info(LD_REND, "Unknown router with nickname '%s'; trying another.",
                intro->extend_info->nickname);
-      rend_intro_point_free(intro);
-      smartlist_del(entry->parsed->intro_nodes, i);
+      smartlist_del(usable_nodes, i);
       goto again;
     }
     extend_info_free(intro->extend_info);
     intro->extend_info = extend_info_from_router(router);
   }
+  /* Check if we should refuse to talk to this router. */
+  if (options->ExcludeNodes && strict &&
+      routerset_contains_extendinfo(options->ExcludeNodes,
+                                    intro->extend_info)) {
+    n_excluded++;
+    smartlist_del(usable_nodes, i);
+    goto again;
+  }
+
+  smartlist_free(usable_nodes);
   return extend_info_dup(intro->extend_info);
+}
+
+/** Return true iff any introduction points still listed in <b>entry</b> are
+ * usable. */
+int
+rend_client_any_intro_points_usable(const rend_cache_entry_t *entry)
+{
+  return rend_client_get_random_intro_impl(
+          entry, get_options()->StrictNodes, 0) != NULL;
 }
 
 /** Client-side authorizations for hidden services; map of onion address to

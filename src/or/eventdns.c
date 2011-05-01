@@ -1668,7 +1668,7 @@ evdns_server_request_add_reply(struct evdns_server_request *_req, int section, c
 
 /* exported function */
 int
-evdns_server_request_add_a_reply(struct evdns_server_request *req, const char *name, int n, void *addrs, int ttl)
+evdns_server_request_add_a_reply(struct evdns_server_request *req, const char *name, int n, const void *addrs, int ttl)
 {
 	return evdns_server_request_add_reply(
 		  req, EVDNS_ANSWER_SECTION, name, TYPE_A, CLASS_INET,
@@ -1677,7 +1677,7 @@ evdns_server_request_add_a_reply(struct evdns_server_request *req, const char *n
 
 /* exported function */
 int
-evdns_server_request_add_aaaa_reply(struct evdns_server_request *req, const char *name, int n, void *addrs, int ttl)
+evdns_server_request_add_aaaa_reply(struct evdns_server_request *req, const char *name, int n, const void *addrs, int ttl)
 {
 	return evdns_server_request_add_reply(
 		  req, EVDNS_ANSWER_SECTION, name, TYPE_AAAA, CLASS_INET,
@@ -1904,7 +1904,7 @@ server_request_free(struct server_request *req)
 
 	if (req->port) {
 		if (req->port->pending_replies == req) {
-			if (req->next_pending)
+			if (req->next_pending && req->next_pending != req)
 				req->port->pending_replies = req->next_pending;
 			else
 				req->port->pending_replies = NULL;
@@ -1999,7 +1999,7 @@ evdns_request_timeout_callback(int fd, short events, void *arg) {
 		/* retransmit it */
 		/* Stop waiting for the timeout.  No need to do this in
 		 * request_finished; that one already deletes the timeout event.
-		 * XXXX021 port this change to libevent. */
+		 * XXXX023 port this change to libevent. */
 		del_timeout_event(req);
 		evdns_request_transmit(req);
 	}

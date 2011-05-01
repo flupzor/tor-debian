@@ -587,7 +587,7 @@ rep_hist_get_weighted_time_known(const char *id, time_t when)
 int
 rep_hist_have_measured_enough_stability(void)
 {
-  /* XXXX021 This doesn't do so well when we change our opinion
+  /* XXXX022 This doesn't do so well when we change our opinion
    * as to whether we're tracking router stability. */
   return started_tracking_stability < time(NULL) - 4*60*60;
 }
@@ -992,10 +992,10 @@ find_next_with(smartlist_t *sl, int i, const char *prefix)
   return -1;
 }
 
-/** How many bad times has parse_possibly_bad_iso_time parsed? */
+/** How many bad times has parse_possibly_bad_iso_time() parsed? */
 static int n_bogus_times = 0;
 /** Parse the ISO-formatted time in <b>s</b> into *<b>time_out</b>, but
- * rounds any pre-1970 date to Jan 1, 1970. */
+ * round any pre-1970 date to Jan 1, 1970. */
 static int
 parse_possibly_bad_iso_time(const char *s, time_t *time_out)
 {
@@ -1288,7 +1288,7 @@ commit_max(bw_array_t *b)
   b->total_in_period = 0;
 }
 
-/** Shift the current observation time of 'b' forward by one second. */
+/** Shift the current observation time of <b>b</b> forward by one second. */
 static INLINE void
 advance_obs(bw_array_t *b)
 {
@@ -1318,16 +1318,16 @@ advance_obs(bw_array_t *b)
 static INLINE void
 add_obs(bw_array_t *b, time_t when, uint64_t n)
 {
-  /* Don't record data in the past. */
-  if (when<b->cur_obs_time)
-    return;
+  if (when < b->cur_obs_time)
+    return; /* Don't record data in the past. */
+
   /* If we're currently adding observations for an earlier second than
    * 'when', advance b->cur_obs_time and b->cur_obs_idx by an
-   * appropriate number of seconds, and do all the other housekeeping */
-  while (when>b->cur_obs_time) {
+   * appropriate number of seconds, and do all the other housekeeping. */
+  while (when > b->cur_obs_time) {
     /* Doing this one second at a time is potentially inefficient, if we start
        with a state file that is very old.  Fortunately, it doesn't seem to
-       show up in profiles, so we can just ignore it for now.  */
+       show up in profiles, so we can just ignore it for now. */
     advance_obs(b);
   }
 
@@ -1375,7 +1375,7 @@ bw_arrays_init(void)
   dir_write_array = bw_array_new();
 }
 
-/** We read <b>num_bytes</b> more bytes in second <b>when</b>.
+/** Remember that we read <b>num_bytes</b> bytes in second <b>when</b>.
  *
  * Add num_bytes to the current running total for <b>when</b>.
  *
@@ -1396,7 +1396,7 @@ rep_hist_note_bytes_written(size_t num_bytes, time_t when)
   add_obs(write_array, when, num_bytes);
 }
 
-/** We wrote <b>num_bytes</b> more bytes in second <b>when</b>.
+/** Remember that we wrote <b>num_bytes</b> bytes in second <b>when</b>.
  * (like rep_hist_note_bytes_written() above)
  */
 void
@@ -1406,8 +1406,8 @@ rep_hist_note_bytes_read(size_t num_bytes, time_t when)
   add_obs(read_array, when, num_bytes);
 }
 
-/** We wrote <b>num_bytes</b> more directory bytes in second <b>when</b>.
- * (like rep_hist_note_bytes_written() above)
+/** Remember that we wrote <b>num_bytes</b> directory bytes in second
+ * <b>when</b>. (like rep_hist_note_bytes_written() above)
  */
 void
 rep_hist_note_dir_bytes_written(size_t num_bytes, time_t when)
@@ -1415,8 +1415,8 @@ rep_hist_note_dir_bytes_written(size_t num_bytes, time_t when)
   add_obs(dir_write_array, when, num_bytes);
 }
 
-/** We read <b>num_bytes</b> more directory bytes in second <b>when</b>.
- * (like rep_hist_note_bytes_written() above)
+/** Remember that we read <b>num_bytes</b> directory bytes in second
+ * <b>when</b>. (like rep_hist_note_bytes_written() above)
  */
 void
 rep_hist_note_dir_bytes_read(size_t num_bytes, time_t when)
@@ -1511,7 +1511,8 @@ rep_hist_fill_bandwidth_history(char *buf, size_t len, const bw_array_t *b)
 }
 
 /** Allocate and return lines for representing this server's bandwidth
- * history in its descriptor.
+ * history in its descriptor. We publish these lines in our extra-info
+ * descriptor.
  */
 char *
 rep_hist_get_bandwidth_lines(void)
@@ -1524,10 +1525,15 @@ rep_hist_get_bandwidth_lines(void)
   size_t len;
 
   /* opt [dirreq-](read|write)-history yyyy-mm-dd HH:MM:SS (n s) n,n,n... */
-  len = (67+21*NUM_TOTALS)*4;
+/* The n,n,n part above. Largest representation of a uint64_t is 20 chars
+ * long, plus the comma. */
+#define MAX_HIST_VALUE_LEN 21*NUM_TOTALS
+  len = (67+MAX_HIST_VALUE_LEN)*4;
   buf = tor_malloc_zero(len);
   cp = buf;
   for (r=0;r<4;++r) {
+    char tmp[MAX_HIST_VALUE_LEN];
+    size_t slen;
     switch (r) {
       case 0:
         b = write_array;
@@ -1547,11 +1553,16 @@ rep_hist_get_bandwidth_lines(void)
         break;
     }
     tor_assert(b);
+    slen = rep_hist_fill_bandwidth_history(tmp, MAX_HIST_VALUE_LEN, b);
+    /* If we don't have anything to write, skip to the next entry. */
+    if (slen == 0)
+      continue;
     format_iso_time(t, b->next_period-NUM_SECS_BW_SUM_INTERVAL);
     tor_snprintf(cp, len-(cp-buf), "%s %s (%d s) ",
                  desc, t, NUM_SECS_BW_SUM_INTERVAL);
     cp += strlen(cp);
-    cp += rep_hist_fill_bandwidth_history(cp, len-(cp-buf), b);
+    strlcat(cp, tmp, len-(cp-buf));
+    cp += slen;
     strlcat(cp, "\n", len-(cp-buf));
     ++cp;
   }
@@ -1559,7 +1570,7 @@ rep_hist_get_bandwidth_lines(void)
 }
 
 /** Write a single bw_array_t into the Values, Ends, Interval, and Maximum
- * entries of an or_state_t. */
+ * entries of an or_state_t. Done before writing out a new state file. */
 static void
 rep_hist_update_bwhist_state_section(or_state_t *state,
                                      const bw_array_t *b,
@@ -1570,6 +1581,7 @@ rep_hist_update_bwhist_state_section(or_state_t *state,
 {
   char *cp;
   int i,j;
+  uint64_t maxval;
 
   if (*s_values) {
     SMARTLIST_FOREACH(*s_values, char *, val, tor_free(val));
@@ -1603,7 +1615,6 @@ rep_hist_update_bwhist_state_section(or_state_t *state,
   /* Set i to first position in circular array */
   i = (b->num_maxes_set <= b->next_max_idx) ? 0 : b->next_max_idx;
   for (j=0; j < b->num_maxes_set; ++j,++i) {
-    uint64_t maxval;
     if (i >= NUM_TOTALS)
       i = 0;
     tor_asprintf(&cp, U64_FORMAT, U64_PRINTF_ARG(b->totals[i] & ~0x3ff));
@@ -1614,11 +1625,13 @@ rep_hist_update_bwhist_state_section(or_state_t *state,
   }
   tor_asprintf(&cp, U64_FORMAT, U64_PRINTF_ARG(b->total_in_period & ~0x3ff));
   smartlist_add(*s_values, cp);
-  tor_asprintf(&cp, U64_FORMAT, U64_PRINTF_ARG(b->max_total & ~0x3ff));
+  maxval = b->max_total / NUM_SECS_ROLLING_MEASURE;
+  tor_asprintf(&cp, U64_FORMAT, U64_PRINTF_ARG(maxval & ~0x3ff));
   smartlist_add(*s_maxima, cp);
 }
 
-/** Update <b>state</b> with the newest bandwidth history. */
+/** Update <b>state</b> with the newest bandwidth history. Done before
+ * writing out a new state file. */
 void
 rep_hist_update_state(or_state_t *state)
 {
@@ -1642,7 +1655,7 @@ rep_hist_update_state(or_state_t *state)
 }
 
 /** Load a single bw_array_t from its Values, Ends, Maxima, and Interval
- * entries in an or_state_t.  */
+ * entries in an or_state_t. Done while reading the state file. */
 static int
 rep_hist_load_bwhist_state_section(bw_array_t *b,
                                    const smartlist_t *s_values,
@@ -1673,7 +1686,7 @@ rep_hist_load_bwhist_state_section(bw_array_t *b,
           mv *= NUM_SECS_ROLLING_MEASURE;
         } else {
           /* No maxima known; guess average rate to be conservative. */
-          mv = v / s_interval;
+          mv = (v / s_interval) * NUM_SECS_ROLLING_MEASURE;
         }
         if (!ok) {
           retval = -1;
@@ -1686,11 +1699,24 @@ rep_hist_load_bwhist_state_section(bw_array_t *b,
         }
 
         if (start < now) {
-          add_obs(b, start, v);
+          time_t cur_start = start;
+          time_t actual_interval_len = s_interval;
+          uint64_t cur_val = 0;
+          /* Calculate the average per second. This is the best we can do
+           * because our state file doesn't have per-second resolution. */
+          if (start + s_interval > now)
+            actual_interval_len = now - start;
+          cur_val = v / actual_interval_len;
+          /* This is potentially inefficient, but since we don't do it very
+           * often it should be ok. */
+          while (cur_start < start + actual_interval_len) {
+            add_obs(b, cur_start, cur_val);
+            ++cur_start;
+          }
           b->max_total = mv;
           /* This will result in some fairly choppy history if s_interval
-           * is notthe same as NUM_SECS_BW_SUM_INTERVAL. XXXX */
-          start += s_interval;
+           * is not the same as NUM_SECS_BW_SUM_INTERVAL. XXXX */
+          start += actual_interval_len;
         }
     } SMARTLIST_FOREACH_END(cp);
   }
@@ -1704,7 +1730,7 @@ rep_hist_load_bwhist_state_section(bw_array_t *b,
   return retval;
 }
 
-/** Set bandwidth history from our saved state. */
+/** Set bandwidth history from the state file we just loaded. */
 int
 rep_hist_load_state(or_state_t *state, char **err)
 {
@@ -1752,7 +1778,7 @@ static smartlist_t *predicted_ports_times=NULL;
 static void
 add_predicted_port(time_t now, uint16_t port)
 {
-  /* XXXX we could just use uintptr_t here, I think. */
+  /* XXXX we could just use uintptr_t here, I think. -NM */
   uint16_t *tmp_port = tor_malloc(sizeof(uint16_t));
   time_t *tmp_time = tor_malloc(sizeof(time_t));
   *tmp_port = port;
@@ -2330,14 +2356,19 @@ rep_hist_buffer_stats_init(time_t now)
   start_of_buffer_stats_interval = now;
 }
 
+/** Statistics from a single circuit.  Collected when the circuit closes, or
+ * when we flush statistics to disk. */
 typedef struct circ_buffer_stats_t {
-  uint32_t processed_cells;
+  /** Average number of cells in the circuit's queue */
   double mean_num_cells_in_queue;
+  /** Average time a cell waits in the queue. */
   double mean_time_cells_in_queue;
-  uint32_t local_circ_id;
+  /** Total number of cells sent over this circuit */
+  uint32_t processed_cells;
 } circ_buffer_stats_t;
 
-smartlist_t *circuits_for_buffer_stats = NULL;
+/** List of circ_buffer_stats_t. */
+static smartlist_t *circuits_for_buffer_stats = NULL;
 
 /** Remember cell statistics for circuit <b>circ</b> at time
  * <b>end_of_interval</b> and reset cell counters in case the circuit
@@ -2361,6 +2392,8 @@ rep_hist_buffer_stats_add_circ(circuit_t *circ, time_t end_of_interval)
         circ->timestamp_created.tv_sec :
         start_of_buffer_stats_interval;
   interval_length = (int) (end_of_interval - start_of_interval);
+  if (interval_length <= 0)
+    return;
   stat = tor_malloc_zero(sizeof(circ_buffer_stats_t));
   stat->processed_cells = orcirc->processed_cells;
   /* 1000.0 for s -> ms; 2.0 because of app-ward and exit-ward queues */
@@ -2538,5 +2571,11 @@ rep_hist_free_all(void)
   tor_free(exit_streams);
   built_last_stability_doc_at = 0;
   predicted_ports_free();
+  if (circuits_for_buffer_stats) {
+    SMARTLIST_FOREACH(circuits_for_buffer_stats, circ_buffer_stats_t *, s,
+                      tor_free(s));
+    smartlist_free(circuits_for_buffer_stats);
+    circuits_for_buffer_stats = NULL;
+  }
 }
 
