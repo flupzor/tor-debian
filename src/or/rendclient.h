@@ -18,6 +18,7 @@ int rend_client_introduction_acked(origin_circuit_t *circ,
                                    const uint8_t *request,
                                    size_t request_len);
 void rend_client_refetch_v2_renddesc(const rend_data_t *rend_query);
+void rend_client_cancel_descriptor_fetches(void);
 int rend_client_remove_intro_point(extend_info_t *failed_intro,
                                    const rend_data_t *rend_query);
 int rend_client_rendezvous_acked(origin_circuit_t *circ,
@@ -29,6 +30,7 @@ int rend_client_receive_rendezvous(origin_circuit_t *circ,
 void rend_client_desc_trynow(const char *query);
 
 extend_info_t *rend_client_get_random_intro(const rend_data_t *rend_query);
+int rend_client_any_intro_points_usable(const rend_cache_entry_t *entry);
 
 int rend_client_send_introduction(origin_circuit_t *introcirc,
                                   origin_circuit_t *rendcirc);

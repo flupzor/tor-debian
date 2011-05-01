@@ -1818,7 +1818,7 @@ authority_cert_parse_from_string(const char *s, const char **end_of_string)
     struct in_addr in;
     char *address = NULL;
     tor_assert(tok->n_args);
-    /* XXX021 use tor_addr_port_parse() below instead. -RD */
+    /* XXX023 use tor_addr_port_parse() below instead. -RD */
     if (parse_addr_port(LOG_WARN, tok->args[0], &address, NULL,
                         &cert->dir_port)<0 ||
         tor_inet_aton(address, &in) == 0) {
@@ -4357,6 +4357,7 @@ microdescs_parse_from_string(const char *s, const char *eos,
     md = NULL;
   next:
     microdesc_free(md);
+    md = NULL;
 
     memarea_clear(area);
     smartlist_clear(tokens);
@@ -4638,10 +4639,12 @@ rend_parse_v2_service_descriptor(rend_service_descriptor_t **parsed_out,
   else
     eos = eos + 1;
   /* Check length. */
-  if (strlen(desc) > REND_DESC_MAX_SIZE) {
-    log_warn(LD_REND, "Descriptor length is %i which exceeds "
-             "maximum rendezvous descriptor size of %i kilobytes.",
-             (int)strlen(desc), REND_DESC_MAX_SIZE);
+  if (eos-desc > REND_DESC_MAX_SIZE) {
+    /* XXX023 If we are parsing this descriptor as a server, this
+     * should be a protocol warning. */
+    log_warn(LD_REND, "Descriptor length is %d which exceeds "
+             "maximum rendezvous descriptor size of %d bytes.",
+             (int)(eos-desc), REND_DESC_MAX_SIZE);
     goto err;
   }
   /* Tokenize descriptor. */

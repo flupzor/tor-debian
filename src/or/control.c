@@ -1222,7 +1222,9 @@ handle_control_signal(control_connection_t *conn, uint32_t len,
   /* Flush the "done" first if the signal might make us shut down. */
   if (sig == SIGTERM || sig == SIGINT)
     connection_handle_write(TO_CONN(conn), 1);
-  control_signal_act(sig);
+
+  process_signal(sig);
+
   return 0;
 }
 
@@ -1785,12 +1787,12 @@ getinfo_helper_events(control_connection_t *control_conn,
                  "information", question);
       }
     } else if (!strcmp(question, "status/clients-seen")) {
-      const char *bridge_stats = geoip_get_bridge_stats_controller(time(NULL));
+      char *bridge_stats = geoip_get_bridge_stats_controller(time(NULL));
       if (!bridge_stats) {
         *errmsg = "No bridge-client stats available";
         return -1;
       }
-      *answer = tor_strdup(bridge_stats);
+      *answer = bridge_stats;
     } else {
       return 0;
     }

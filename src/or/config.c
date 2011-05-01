@@ -1260,21 +1260,18 @@ options_act(or_options_t *old_options)
   /* Check for transitions that need action. */
   if (old_options) {
     if ((options->UseEntryGuards && !old_options->UseEntryGuards) ||
-        (options->ExcludeNodes &&
-         !routerset_equal(old_options->ExcludeNodes,options->ExcludeNodes)) ||
-        (options->ExcludeExitNodes &&
-         !routerset_equal(old_options->ExcludeExitNodes,
-                          options->ExcludeExitNodes)) ||
-        (options->EntryNodes &&
-         !routerset_equal(old_options->EntryNodes, options->EntryNodes)) ||
-        (options->ExitNodes &&
-         !routerset_equal(old_options->ExitNodes, options->ExitNodes)) ||
+        !routerset_equal(old_options->ExcludeNodes,options->ExcludeNodes) ||
+        !routerset_equal(old_options->ExcludeExitNodes,
+                         options->ExcludeExitNodes) ||
+        !routerset_equal(old_options->EntryNodes, options->EntryNodes) ||
+        !routerset_equal(old_options->ExitNodes, options->ExitNodes) ||
         options->StrictNodes != old_options->StrictNodes) {
       log_info(LD_CIRC,
                "Changed to using entry guards, or changed preferred or "
                "excluded node lists. Abandoning previous circuits.");
       circuit_mark_all_unused_circs();
       circuit_expire_all_dirty_circs();
+      addressmap_clear_excluded_trackexithosts(options);
     }
 
 /* How long should we delay counting bridge stats after becoming a bridge?
@@ -1338,7 +1335,7 @@ options_act(or_options_t *old_options)
        || !geoip_is_loaded())) {
     /* XXXX Don't use this "<default>" junk; make our filename options
      * understand prefixes somehow. -NM */
-    /* XXXX021 Reload GeoIPFile on SIGHUP. -NM */
+    /* XXXX023 Reload GeoIPFile on SIGHUP. -NM */
     char *actual_fname = tor_strdup(options->GeoIPFile);
 #ifdef WIN32
     if (!strcmp(actual_fname, "<default>")) {
@@ -1412,7 +1409,8 @@ options_act(or_options_t *old_options)
   /* Check if we need to parse and add the EntryNodes config option. */
   if (options->EntryNodes &&
       (!old_options ||
-      (!routerset_equal(old_options->EntryNodes,options->EntryNodes))))
+       !routerset_equal(old_options->EntryNodes,options->EntryNodes) ||
+       !routerset_equal(old_options->ExcludeNodes,options->ExcludeNodes)))
     entry_nodes_should_be_added();
 
   /* Since our options changed, we might need to regenerate and upload our
@@ -2483,7 +2481,7 @@ is_local_addr(const tor_addr_t *addr)
   if (get_options()->EnforceDistinctSubnets == 0)
     return 0;
   if (tor_addr_family(addr) == AF_INET) {
-    /*XXXX022 IP6 what corresponds to an /24? */
+    /*XXXX023 IP6 what corresponds to an /24? */
     uint32_t ip = tor_addr_to_ipv4h(addr);
 
     /* It's possible that this next check will hit before the first time
@@ -2498,54 +2496,6 @@ is_local_addr(const tor_addr_t *addr)
       return 1;
   }
   return 0;
-}
-
-/** Called when we don't have a nickname set.  Try to guess a good nickname
- * based on the hostname, and return it in a newly allocated string. If we
- * can't, return NULL and let the caller warn if it wants to. */
-static char *
-get_default_nickname(void)
-{
-  static const char * const bad_default_nicknames[] = {
-    "localhost",
-    NULL,
-  };
-  char localhostname[256];
-  char *cp, *out, *outp;
-  int i;
-
-  if (gethostname(localhostname, sizeof(localhostname)) < 0)
-    return NULL;
-
-  /* Put it in lowercase; stop at the first dot. */
-  if ((cp = strchr(localhostname, '.')))
-    *cp = '\0';
-  tor_strlower(localhostname);
-
-  /* Strip invalid characters. */
-  cp = localhostname;
-  out = outp = tor_malloc(strlen(localhostname) + 1);
-  while (*cp) {
-    if (strchr(LEGAL_NICKNAME_CHARACTERS, *cp))
-      *outp++ = *cp++;
-    else
-      cp++;
-  }
-  *outp = '\0';
-
-  /* Enforce length. */
-  if (strlen(out) > MAX_NICKNAME_LEN)
-    out[MAX_NICKNAME_LEN]='\0';
-
-  /* Check for dumb names. */
-  for (i = 0; bad_default_nicknames[i]; ++i) {
-    if (!strcmp(out, bad_default_nicknames[i])) {
-      tor_free(out);
-      return NULL;
-    }
-  }
-
-  return out;
 }
 
 /** Release storage held by <b>options</b>. */
@@ -2976,14 +2926,7 @@ options_validate(or_options_t *old_options, or_options_t *options,
 
   if (options->Nickname == NULL) {
     if (server_mode(options)) {
-      if (!(options->Nickname = get_default_nickname())) {
-        log_notice(LD_CONFIG, "Couldn't pick a nickname based on "
-                   "our hostname; using %s instead.", UNNAMED_ROUTER_NICKNAME);
         options->Nickname = tor_strdup(UNNAMED_ROUTER_NICKNAME);
-      } else {
-        log_notice(LD_CONFIG, "Choosing default nickname '%s'",
-                   options->Nickname);
-      }
     }
   } else {
     if (!is_legal_nickname(options->Nickname)) {
@@ -3135,6 +3078,10 @@ options_validate(or_options_t *old_options, or_options_t *options,
     REJECT("FetchDirInfoExtraEarly requires that you also set "
            "FetchDirInfoEarly");
 
+  if (options->HSAuthoritativeDir && proxy_mode(options))
+    REJECT("Running as authoritative v0 HS directory, but also configured "
+           "as a client.");
+
   if (options->ConnLimit <= 0) {
     tor_asprintf(msg,
         "ConnLimit must be greater than 0, but was set to %d",
@@ -3242,6 +3189,12 @@ options_validate(or_options_t *old_options, or_options_t *options,
       server_mode(options))
     REJECT("Servers must be able to freely connect to the rest "
            "of the Internet, so they must not set UseBridges.");
+
+  /* If both of these are set, we'll end up with funny behavior where we
+   * demand enough entrynodes be up and running else we won't build
+   * circuits, yet we never actually use them. */
+  if (options->UseBridges && options->EntryNodes)
+    REJECT("You cannot set both UseBridges and EntryNodes.");
 
   options->_AllowInvalid = 0;
   if (options->AllowInvalidNodes) {
@@ -3652,7 +3605,7 @@ options_validate(or_options_t *old_options, or_options_t *options,
              "ignore you.");
   }
 
-  /*XXXX022 checking for defaults manually like this is a bit fragile.*/
+  /*XXXX023 checking for defaults manually like this is a bit fragile.*/
 
   /* Keep changes to hard-coded values synchronous to man page and default
    * values table. */
@@ -4382,11 +4335,13 @@ options_init_logs(or_options_t *options, int validate_only)
     if (smartlist_len(elts) == 2 &&
         !strcasecmp(smartlist_get(elts,0), "file")) {
       if (!validate_only) {
-        if (add_file_log(severity, smartlist_get(elts, 1)) < 0) {
+        char *fname = expand_filename(smartlist_get(elts, 1));
+        if (add_file_log(severity, fname) < 0) {
           log_warn(LD_CONFIG, "Couldn't open file for 'Log %s': %s",
                    opt->value, strerror(errno));
           ok = 0;
         }
+        tor_free(fname);
       }
       goto cleanup;
     }
@@ -5164,8 +5119,25 @@ or_state_load(void)
   return r;
 }
 
+/** Did the last time we tried to write the state file fail? If so, we
+ * should consider disabling such features as preemptive circuit generation
+ * to compute circuit-build-time. */
+static int last_state_file_write_failed = 0;
+
+/** Return whether the state file failed to write last time we tried. */
+int
+did_last_state_file_write_fail(void)
+{
+  return last_state_file_write_failed;
+}
+
 /** If writing the state to disk fails, try again after this many seconds. */
 #define STATE_WRITE_RETRY_INTERVAL 3600
+
+/** If we're a relay, how often should we checkpoint our state file even
+ * if nothing else dirties it? This will checkpoint ongoing stats like
+ * bandwidth used, per-country user stats, etc. */
+#define STATE_RELAY_CHECKPOINT_INTERVAL (12*60*60)
 
 /** Write the persistent state to disk. Return 0 for success, <0 on failure. */
 int
@@ -5188,11 +5160,13 @@ or_state_save(time_t now)
   if (accounting_is_enabled(get_options()))
     accounting_run_housekeeping(now);
 
+  global_state->LastWritten = now;
+
   tor_free(global_state->TorVersion);
   tor_asprintf(&global_state->TorVersion, "Tor %s", get_version());
 
   state = config_dump(&state_format, global_state, 1, 0);
-  format_local_iso_time(tbuf, time(NULL));
+  format_local_iso_time(tbuf, now);
   tor_asprintf(&contents,
                "# Tor state file last generated on %s local time\n"
                "# Other times below are in GMT\n"
@@ -5203,7 +5177,7 @@ or_state_save(time_t now)
   if (write_str_to_file(fname, contents, 0)<0) {
     log_warn(LD_FS, "Unable to write state to file \"%s\"; "
              "will try again later", fname);
-    global_state->LastWritten = -1;
+    last_state_file_write_failed = 1;
     tor_free(fname);
     tor_free(contents);
     /* Try again after STATE_WRITE_RETRY_INTERVAL (or sooner, if the state
@@ -5212,12 +5186,16 @@ or_state_save(time_t now)
     return -1;
   }
 
-  global_state->LastWritten = time(NULL);
+  last_state_file_write_failed = 0;
   log_info(LD_GENERAL, "Saved state to \"%s\"", fname);
   tor_free(fname);
   tor_free(contents);
 
-  global_state->next_write = TIME_MAX;
+  if (server_mode(get_options()))
+    global_state->next_write = now + STATE_RELAY_CHECKPOINT_INTERVAL;
+  else
+    global_state->next_write = TIME_MAX;
+
   return 0;
 }
 

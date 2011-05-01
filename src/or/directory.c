@@ -253,9 +253,12 @@ directories_have_accepted_server_descriptor(void)
 }
 
 /** Start a connection to every suitable directory authority, using
- * connection purpose 'purpose' and uploading the payload 'payload'
- * (length 'payload_len').  dir_purpose should be one of
+ * connection purpose <b>dir_purpose</b> and uploading <b>payload</b>
+ * (of length <b>payload_len</b>). The dir_purpose should be one of
  * 'DIR_PURPOSE_UPLOAD_DIR' or 'DIR_PURPOSE_UPLOAD_RENDDESC'.
+ *
+ * <b>router_purpose</b> describes the type of descriptor we're
+ * publishing, if we're publishing a descriptor -- e.g. general or bridge.
  *
  * <b>type</b> specifies what sort of dir authorities (V1, V2,
  * HIDSERV, BRIDGE) we should upload to.
@@ -272,6 +275,7 @@ directory_post_to_dirservers(uint8_t dir_purpose, uint8_t router_purpose,
                              const char *payload,
                              size_t payload_len, size_t extrainfo_len)
 {
+  or_options_t *options = get_options();
   int post_via_tor;
   smartlist_t *dirservers = router_get_trusted_dir_servers();
   int found = 0;
@@ -286,6 +290,16 @@ directory_post_to_dirservers(uint8_t dir_purpose, uint8_t router_purpose,
 
       if ((type & ds->type) == 0)
         continue;
+
+      if (options->ExcludeNodes && options->StrictNodes &&
+          routerset_contains_routerstatus(options->ExcludeNodes, rs)) {
+        log_warn(LD_DIR, "Wanted to contact authority '%s' for %s, but "
+                 "it's in our ExcludedNodes list and StrictNodes is set. "
+                 "Skipping.",
+                 ds->nickname,
+                 dir_conn_purpose_to_string(dir_purpose));
+        continue;
+      }
 
       found = 1; /* at least one authority of this type was listed */
       if (dir_purpose == DIR_PURPOSE_UPLOAD_DIR)
@@ -372,7 +386,7 @@ directory_get_from_dirserver(uint8_t dir_purpose, uint8_t router_purpose,
   if (!get_via_tor) {
     if (options->UseBridges && type != BRIDGE_AUTHORITY) {
       /* want to ask a running bridge for which we have a descriptor. */
-      /* XXX022 we assume that all of our bridges can answer any
+      /* XXX023 we assume that all of our bridges can answer any
        * possible directory question. This won't be true forever. -RD */
       /* It certainly is not true with conditional consensus downloading,
        * so, for now, never assume the server supports that. */
@@ -496,12 +510,14 @@ directory_initiate_command_routerstatus_rend(routerstatus_t *status,
                                              time_t if_modified_since,
                                              const rend_data_t *rend_query)
 {
+  or_options_t *options = get_options();
   routerinfo_t *router;
   char address_buf[INET_NTOA_BUF_LEN+1];
   struct in_addr in;
   const char *address;
   tor_addr_t addr;
   router = router_get_by_digest(status->identity_digest);
+
   if (!router && anonymized_connection) {
     log_info(LD_DIR, "Not sending anonymized request to directory '%s'; we "
                      "don't have its router descriptor.", status->nickname);
@@ -514,6 +530,17 @@ directory_initiate_command_routerstatus_rend(routerstatus_t *status,
     address = address_buf;
   }
   tor_addr_from_ipv4h(&addr, status->addr);
+
+  if (options->ExcludeNodes && options->StrictNodes &&
+      routerset_contains_routerstatus(options->ExcludeNodes, status)) {
+    log_warn(LD_DIR, "Wanted to contact directory mirror '%s' for %s, but "
+             "it's in our ExcludedNodes list and StrictNodes is set. "
+             "Skipping. This choice might make your Tor not work.",
+             status->nickname,
+             dir_conn_purpose_to_string(dir_purpose));
+    return;
+  }
+
   directory_initiate_command_rend(address, &addr,
                              status->or_port, status->dir_port,
                              status->version_supports_conditional_consensus,
@@ -1539,26 +1566,19 @@ connection_dir_client_reached_eof(dir_connection_t *conn)
   (void) skewed; /* skewed isn't used yet. */
 
   if (status_code == 503) {
-    if (body_len < 16) {
-      routerstatus_t *rs;
-      trusted_dir_server_t *ds;
-      log_info(LD_DIR,"Received http status code %d (%s) from server "
-               "'%s:%d'. I'll try again soon.",
-               status_code, escaped(reason), conn->_base.address,
-               conn->_base.port);
-      if ((rs = router_get_consensus_status_by_id(conn->identity_digest)))
-        rs->last_dir_503_at = now;
-      if ((ds = router_get_trusteddirserver_by_digest(conn->identity_digest)))
-        ds->fake_status.last_dir_503_at = now;
+    routerstatus_t *rs;
+    trusted_dir_server_t *ds;
+    log_info(LD_DIR,"Received http status code %d (%s) from server "
+             "'%s:%d'. I'll try again soon.",
+             status_code, escaped(reason), conn->_base.address,
+             conn->_base.port);
+    if ((rs = router_get_consensus_status_by_id(conn->identity_digest)))
+      rs->last_dir_503_at = now;
+    if ((ds = router_get_trusteddirserver_by_digest(conn->identity_digest)))
+      ds->fake_status.last_dir_503_at = now;
 
-      tor_free(body); tor_free(headers); tor_free(reason);
-      return -1;
-    }
-    /* XXXX022 Remove this once every server with bug 539 is obsolete. */
-    log_info(LD_DIR, "Server at '%s:%d' sent us a 503 response, but included "
-             "a body anyway.  We'll pretend it gave us a 200.",
-             conn->_base.address, conn->_base.port);
-    status_code = 200;
+    tor_free(body); tor_free(headers); tor_free(reason);
+    return -1;
   }
 
   plausible = body_is_plausible(body, body_len, conn->_base.purpose);
@@ -1876,7 +1896,7 @@ connection_dir_client_reached_eof(dir_connection_t *conn)
                        ds->nickname);
               /* XXXX use this information; be sure to upload next one
                * sooner. -NM */
-              /* XXXX021 On further thought, the task above implies that we're
+              /* XXXX023 On further thought, the task above implies that we're
                * basing our regenerate-descriptor time on when we uploaded the
                * last descriptor, not on the published time of the last
                * descriptor.  If those are different, that's a bad thing to
@@ -2706,7 +2726,7 @@ directory_handle_command_get(dir_connection_t *conn, const char *headers,
     ssize_t estimated_len = 0;
     smartlist_t *items = smartlist_create();
     smartlist_t *dir_items = smartlist_create();
-    int lifetime = 60; /* XXXX022 should actually use vote intervals. */
+    int lifetime = 60; /* XXXX023 should actually use vote intervals. */
     url += strlen("/tor/status-vote/");
     current = !strcmpstart(url, "current/");
     url = strchr(url, '/');

@@ -834,6 +834,16 @@ rend_cache_clean(void)
   }
 }
 
+/** Remove ALL entries from the rendezvous service descriptor cache.
+ */
+void
+rend_cache_purge(void)
+{
+  if (rend_cache)
+    strmap_free(rend_cache, _rend_cache_entry_free);
+  rend_cache = strmap_new();
+}
+
 /** Remove all old v2 descriptors and those for which this hidden service
  * directory is not responsible for any more. */
 void
@@ -932,9 +942,9 @@ rend_cache_lookup_entry(const char *query, int version, rend_cache_entry_t **e)
   if (!*e)
     return 0;
   tor_assert((*e)->parsed && (*e)->parsed->intro_nodes);
-  /* XXX022 hack for now, to return "not found" if there are no intro
+  /* XXX023 hack for now, to return "not found" if there are no intro
    * points remaining. See bug 997. */
-  if (smartlist_len((*e)->parsed->intro_nodes) == 0)
+  if (! rend_client_any_intro_points_usable(*e))
     return 0;
   return 1;
 }
