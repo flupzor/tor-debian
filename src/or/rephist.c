@@ -7,7 +7,7 @@
  * \brief Basic history and "reputation" functionality to remember
  *    which servers have worked in the past, how much bandwidth we've
  *    been using, which ports we tend to want, and so on; further,
- *    exit port statistics and cell statistics.
+ *    exit port statistics, cell statistics, and connection statistics.
  **/
 
 #include "or.h"
@@ -15,6 +15,7 @@
 #include "circuituse.h"
 #include "config.h"
 #include "networkstatus.h"
+#include "nodelist.h"
 #include "rephist.h"
 #include "router.h"
 #include "routerlist.h"
@@ -642,7 +643,7 @@ rep_hist_dump_stats(time_t now, int severity)
   size_t len;
   int ret;
   unsigned long upt, downt;
-  routerinfo_t *r;
+  const node_t *node;
 
   rep_history_clean(now - get_options()->RephistTrackTime);
 
@@ -656,8 +657,8 @@ rep_hist_dump_stats(time_t now, int severity)
     digestmap_iter_get(orhist_it, &digest1, &or_history_p);
     or_history = (or_history_t*) or_history_p;
 
-    if ((r = router_get_by_digest(digest1)))
-      name1 = r->nickname;
+    if ((node = node_get_by_id(digest1)) && node_get_nickname(node))
+      name1 = node_get_nickname(node);
     else
       name1 = "(unknown)";
     base16_encode(hexdigest1, sizeof(hexdigest1), digest1, DIGEST_LEN);
@@ -687,8 +688,8 @@ rep_hist_dump_stats(time_t now, int severity)
            lhist_it = digestmap_iter_next(or_history->link_history_map,
                                           lhist_it)) {
         digestmap_iter_get(lhist_it, &digest2, &link_history_p);
-        if ((r = router_get_by_digest(digest2)))
-          name2 = r->nickname;
+        if ((node = node_get_by_id(digest2)) && node_get_nickname(node))
+          name2 = node_get_nickname(node);
         else
           name2 = "(unknown)";
 
@@ -819,7 +820,7 @@ rep_hist_record_mtbf_data(time_t now, int missing_means_down)
     base16_encode(dbuf, sizeof(dbuf), digest, DIGEST_LEN);
 
     if (missing_means_down && hist->start_of_run &&
-        !router_get_by_digest(digest)) {
+        !router_get_by_id_digest(digest)) {
       /* We think this relay is running, but it's not listed in our
        * routerlist. Somehow it fell out without telling us it went
        * down. Complain and also correct it. */
@@ -934,28 +935,32 @@ rep_hist_get_router_stability_doc(time_t now)
   }
 
   DIGESTMAP_FOREACH(history_map, id, or_history_t *, hist) {
-    routerinfo_t *ri;
+    const node_t *node;
     char dbuf[BASE64_DIGEST_LEN+1];
     char header_buf[512];
     char *info;
     digest_to_base64(dbuf, id);
-    ri = router_get_by_digest(id);
-    if (ri) {
-      char *ip = tor_dup_ip(ri->addr);
+    node = node_get_by_id(id);
+    if (node) {
+      char ip[INET_NTOA_BUF_LEN+1];
       char tbuf[ISO_TIME_LEN+1];
-      format_iso_time(tbuf, ri->cache_info.published_on);
+      time_t published = node_get_published_on(node);
+      node_get_address_string(node,ip,sizeof(ip));
+      if (published > 0)
+        format_iso_time(tbuf, published);
+      else
+        strlcpy(tbuf, "???", sizeof(tbuf));
       tor_snprintf(header_buf, sizeof(header_buf),
                    "router %s %s %s\n"
                    "published %s\n"
                    "relevant-flags %s%s%s\n"
                    "declared-uptime %ld\n",
-                   dbuf, ri->nickname, ip,
+                   dbuf, node_get_nickname(node), ip,
                    tbuf,
-                   ri->is_running ? "Running " : "",
-                   ri->is_valid ? "Valid " : "",
-                   ri->is_hibernating ? "Hibernating " : "",
-                   ri->uptime);
-      tor_free(ip);
+                   node->is_running ? "Running " : "",
+                   node->is_valid ? "Valid " : "",
+                   node->ri && node->ri->is_hibernating ? "Hibernating " : "",
+                   node_get_declared_uptime(node));
     } else {
       tor_snprintf(header_buf, sizeof(header_buf),
                    "router %s {no descriptor}\n", dbuf);
@@ -1766,10 +1771,13 @@ rep_hist_load_state(or_state_t *state, char **err)
 
 /*********************************************************************/
 
+typedef struct predicted_port_t {
+  uint16_t port;
+  time_t time;
+} predicted_port_t;
+
 /** A list of port numbers that have been used recently. */
 static smartlist_t *predicted_ports_list=NULL;
-/** The corresponding most recently used time for each port. */
-static smartlist_t *predicted_ports_times=NULL;
 
 /** We just got an application request for a connection with
  * port <b>port</b>. Remember it for the future, so we can keep
@@ -1778,14 +1786,11 @@ static smartlist_t *predicted_ports_times=NULL;
 static void
 add_predicted_port(time_t now, uint16_t port)
 {
-  /* XXXX we could just use uintptr_t here, I think. -NM */
-  uint16_t *tmp_port = tor_malloc(sizeof(uint16_t));
-  time_t *tmp_time = tor_malloc(sizeof(time_t));
-  *tmp_port = port;
-  *tmp_time = now;
-  rephist_total_alloc += sizeof(uint16_t) + sizeof(time_t);
-  smartlist_add(predicted_ports_list, tmp_port);
-  smartlist_add(predicted_ports_times, tmp_time);
+  predicted_port_t *pp = tor_malloc(sizeof(predicted_port_t));
+  pp->port = port;
+  pp->time = now;
+  rephist_total_alloc += sizeof(*pp);
+  smartlist_add(predicted_ports_list, pp);
 }
 
 /** Initialize whatever memory and structs are needed for predicting
@@ -1796,7 +1801,6 @@ static void
 predicted_ports_init(void)
 {
   predicted_ports_list = smartlist_create();
-  predicted_ports_times = smartlist_create();
   add_predicted_port(time(NULL), 80); /* add one to kickstart us */
 }
 
@@ -1806,12 +1810,11 @@ predicted_ports_init(void)
 static void
 predicted_ports_free(void)
 {
-  rephist_total_alloc -= smartlist_len(predicted_ports_list)*sizeof(uint16_t);
-  SMARTLIST_FOREACH(predicted_ports_list, char *, cp, tor_free(cp));
+  rephist_total_alloc -=
+    smartlist_len(predicted_ports_list)*sizeof(predicted_port_t);
+  SMARTLIST_FOREACH(predicted_ports_list, predicted_port_t *,
+                    pp, tor_free(pp));
   smartlist_free(predicted_ports_list);
-  rephist_total_alloc -= smartlist_len(predicted_ports_times)*sizeof(time_t);
-  SMARTLIST_FOREACH(predicted_ports_times, char *, cp, tor_free(cp));
-  smartlist_free(predicted_ports_times);
 }
 
 /** Remember that <b>port</b> has been asked for as of time <b>now</b>.
@@ -1821,24 +1824,17 @@ predicted_ports_free(void)
 void
 rep_hist_note_used_port(time_t now, uint16_t port)
 {
-  int i;
-  uint16_t *tmp_port;
-  time_t *tmp_time;
-
   tor_assert(predicted_ports_list);
-  tor_assert(predicted_ports_times);
 
   if (!port) /* record nothing */
     return;
 
-  for (i = 0; i < smartlist_len(predicted_ports_list); ++i) {
-    tmp_port = smartlist_get(predicted_ports_list, i);
-    tmp_time = smartlist_get(predicted_ports_times, i);
-    if (*tmp_port == port) {
-      *tmp_time = now;
+  SMARTLIST_FOREACH_BEGIN(predicted_ports_list, predicted_port_t *, pp) {
+    if (pp->port == port) {
+      pp->time = now;
       return;
     }
-  }
+  } SMARTLIST_FOREACH_END(pp);
   /* it's not there yet; we need to add it */
   add_predicted_port(now, port);
 }
@@ -1847,36 +1843,28 @@ rep_hist_note_used_port(time_t now, uint16_t port)
  * we'll want to make connections to the same port in the future.  */
 #define PREDICTED_CIRCS_RELEVANCE_TIME (60*60)
 
-/** Return a pointer to the list of port numbers that
+/** Return a newly allocated pointer to a list of uint16_t * for ports that
  * are likely to be asked for in the near future.
- *
- * The caller promises not to mess with it.
  */
 smartlist_t *
 rep_hist_get_predicted_ports(time_t now)
 {
-  int i;
-  uint16_t *tmp_port;
-  time_t *tmp_time;
-
+  smartlist_t *out = smartlist_create();
   tor_assert(predicted_ports_list);
-  tor_assert(predicted_ports_times);
 
   /* clean out obsolete entries */
-  for (i = 0; i < smartlist_len(predicted_ports_list); ++i) {
-    tmp_time = smartlist_get(predicted_ports_times, i);
-    if (*tmp_time + PREDICTED_CIRCS_RELEVANCE_TIME < now) {
-      tmp_port = smartlist_get(predicted_ports_list, i);
-      log_debug(LD_CIRC, "Expiring predicted port %d", *tmp_port);
-      smartlist_del(predicted_ports_list, i);
-      smartlist_del(predicted_ports_times, i);
-      rephist_total_alloc -= sizeof(uint16_t)+sizeof(time_t);
-      tor_free(tmp_port);
-      tor_free(tmp_time);
-      i--;
+  SMARTLIST_FOREACH_BEGIN(predicted_ports_list, predicted_port_t *, pp) {
+    if (pp->time + PREDICTED_CIRCS_RELEVANCE_TIME < now) {
+      log_debug(LD_CIRC, "Expiring predicted port %d", pp->port);
+
+      rephist_total_alloc -= sizeof(predicted_port_t);
+      tor_free(pp);
+      SMARTLIST_DEL_CURRENT(predicted_ports_list, pp);
+    } else {
+      smartlist_add(out, tor_memdup(&pp->port, sizeof(uint16_t)));
     }
-  }
-  return predicted_ports_list;
+  } SMARTLIST_FOREACH_END(pp);
+  return out;
 }
 
 /** The user asked us to do a resolve. Rather than keeping track of
@@ -2112,7 +2100,9 @@ rep_hist_exit_stats_term(void)
   tor_free(exit_streams);
 }
 
-/** Helper for qsort: compare two ints. */
+/** Helper for qsort: compare two ints.  Does not handle overflow properly,
+ * but works fine for sorting an array of port numbers, which is what we use
+ * it for. */
 static int
 _compare_int(const void *x, const void *y)
 {
@@ -2387,8 +2377,8 @@ rep_hist_buffer_stats_add_circ(circuit_t *circ, time_t end_of_interval)
     return;
   if (!circuits_for_buffer_stats)
     circuits_for_buffer_stats = smartlist_create();
-  start_of_interval = circ->timestamp_created.tv_sec >
-      start_of_buffer_stats_interval ?
+  start_of_interval = (circ->timestamp_created.tv_sec >
+                       start_of_buffer_stats_interval) ?
         circ->timestamp_created.tv_sec :
         start_of_buffer_stats_interval;
   interval_length = (int) (end_of_interval - start_of_interval);
@@ -2557,6 +2547,227 @@ rep_hist_buffer_stats_write(time_t now)
   return start_of_buffer_stats_interval + WRITE_STATS_INTERVAL;
 }
 
+/*** Connection statistics ***/
+
+/** Start of the current connection stats interval or 0 if we're not
+ * collecting connection statistics. */
+static time_t start_of_conn_stats_interval;
+
+/** Initialize connection stats. */
+void
+rep_hist_conn_stats_init(time_t now)
+{
+  start_of_conn_stats_interval = now;
+}
+
+/* Count connections that we read and wrote less than these many bytes
+ * from/to as below threshold. */
+#define BIDI_THRESHOLD 20480
+
+/* Count connections that we read or wrote at least this factor as many
+ * bytes from/to than we wrote or read to/from as mostly reading or
+ * writing. */
+#define BIDI_FACTOR 10
+
+/* Interval length in seconds for considering read and written bytes for
+ * connection stats. */
+#define BIDI_INTERVAL 10
+
+/* Start of next BIDI_INTERVAL second interval. */
+static time_t bidi_next_interval = 0;
+
+/* Number of connections that we read and wrote less than BIDI_THRESHOLD
+ * bytes from/to in BIDI_INTERVAL seconds. */
+static uint32_t below_threshold = 0;
+
+/* Number of connections that we read at least BIDI_FACTOR times more
+ * bytes from than we wrote to in BIDI_INTERVAL seconds. */
+static uint32_t mostly_read = 0;
+
+/* Number of connections that we wrote at least BIDI_FACTOR times more
+ * bytes to than we read from in BIDI_INTERVAL seconds. */
+static uint32_t mostly_written = 0;
+
+/* Number of connections that we read and wrote at least BIDI_THRESHOLD
+ * bytes from/to, but not BIDI_FACTOR times more in either direction in
+ * BIDI_INTERVAL seconds. */
+static uint32_t both_read_and_written = 0;
+
+/* Entry in a map from connection ID to the number of read and written
+ * bytes on this connection in a BIDI_INTERVAL second interval. */
+typedef struct bidi_map_entry_t {
+  HT_ENTRY(bidi_map_entry_t) node;
+  uint64_t conn_id; /**< Connection ID */
+  size_t read; /**< Number of read bytes */
+  size_t written; /**< Number of written bytes */
+} bidi_map_entry_t;
+
+/** Map of OR connections together with the number of read and written
+ * bytes in the current BIDI_INTERVAL second interval. */
+static HT_HEAD(bidimap, bidi_map_entry_t) bidi_map =
+     HT_INITIALIZER();
+
+static int
+bidi_map_ent_eq(const bidi_map_entry_t *a, const bidi_map_entry_t *b)
+{
+  return a->conn_id == b->conn_id;
+}
+
+static unsigned
+bidi_map_ent_hash(const bidi_map_entry_t *entry)
+{
+  return (unsigned) entry->conn_id;
+}
+
+HT_PROTOTYPE(bidimap, bidi_map_entry_t, node, bidi_map_ent_hash,
+             bidi_map_ent_eq);
+HT_GENERATE(bidimap, bidi_map_entry_t, node, bidi_map_ent_hash,
+            bidi_map_ent_eq, 0.6, malloc, realloc, free);
+
+static void
+bidi_map_free(void)
+{
+  bidi_map_entry_t **ptr, **next, *ent;
+  for (ptr = HT_START(bidimap, &bidi_map); ptr; ptr = next) {
+    ent = *ptr;
+    next = HT_NEXT_RMV(bidimap, &bidi_map, ptr);
+    tor_free(ent);
+  }
+  HT_CLEAR(bidimap, &bidi_map);
+}
+
+/** Reset counters for conn statistics. */
+void
+rep_hist_reset_conn_stats(time_t now)
+{
+  start_of_conn_stats_interval = now;
+  below_threshold = 0;
+  mostly_read = 0;
+  mostly_written = 0;
+  both_read_and_written = 0;
+  bidi_map_free();
+}
+
+/** Stop collecting connection stats in a way that we can re-start doing
+ * so in rep_hist_conn_stats_init(). */
+void
+rep_hist_conn_stats_term(void)
+{
+  rep_hist_reset_conn_stats(0);
+}
+
+/** We read <b>num_read</b> bytes and wrote <b>num_written</b> from/to OR
+ * connection <b>conn_id</b> in second <b>when</b>. If this is the first
+ * observation in a new interval, sum up the last observations. Add bytes
+ * for this connection. */
+void
+rep_hist_note_or_conn_bytes(uint64_t conn_id, size_t num_read,
+                            size_t num_written, time_t when)
+{
+  if (!start_of_conn_stats_interval)
+    return;
+  /* Initialize */
+  if (bidi_next_interval == 0)
+    bidi_next_interval = when + BIDI_INTERVAL;
+  /* Sum up last period's statistics */
+  if (when >= bidi_next_interval) {
+    bidi_map_entry_t **ptr, **next, *ent;
+    for (ptr = HT_START(bidimap, &bidi_map); ptr; ptr = next) {
+      ent = *ptr;
+      if (ent->read + ent->written < BIDI_THRESHOLD)
+        below_threshold++;
+      else if (ent->read >= ent->written * BIDI_FACTOR)
+        mostly_read++;
+      else if (ent->written >= ent->read * BIDI_FACTOR)
+        mostly_written++;
+      else
+        both_read_and_written++;
+      next = HT_NEXT_RMV(bidimap, &bidi_map, ptr);
+      tor_free(ent);
+    }
+    while (when >= bidi_next_interval)
+      bidi_next_interval += BIDI_INTERVAL;
+    log_info(LD_GENERAL, "%d below threshold, %d mostly read, "
+             "%d mostly written, %d both read and written.",
+             below_threshold, mostly_read, mostly_written,
+             both_read_and_written);
+  }
+  /* Add this connection's bytes. */
+  if (num_read > 0 || num_written > 0) {
+    bidi_map_entry_t *entry, lookup;
+    lookup.conn_id = conn_id;
+    entry = HT_FIND(bidimap, &bidi_map, &lookup);
+    if (entry) {
+      entry->written += num_written;
+      entry->read += num_read;
+    } else {
+      entry = tor_malloc_zero(sizeof(bidi_map_entry_t));
+      entry->conn_id = conn_id;
+      entry->written = num_written;
+      entry->read = num_read;
+      HT_INSERT(bidimap, &bidi_map, entry);
+    }
+  }
+}
+
+/** Return a newly allocated string containing the connection statistics
+ * until <b>now</b>, or NULL if we're not collecting conn stats. */
+char *
+rep_hist_format_conn_stats(time_t now)
+{
+  char *result, written[ISO_TIME_LEN+1];
+
+  if (!start_of_conn_stats_interval)
+    return NULL; /* Not initialized. */
+
+  format_iso_time(written, now);
+  tor_asprintf(&result, "conn-bi-direct %s (%d s) %d,%d,%d,%d\n",
+               written,
+               (unsigned) (now - start_of_conn_stats_interval),
+               below_threshold,
+               mostly_read,
+               mostly_written,
+               both_read_and_written);
+  return result;
+}
+
+/** If 24 hours have passed since the beginning of the current conn stats
+ * period, write conn stats to $DATADIR/stats/conn-stats (possibly
+ * overwriting an existing file) and reset counters.  Return when we would
+ * next want to write conn stats or 0 if we never want to write. */
+time_t
+rep_hist_conn_stats_write(time_t now)
+{
+  char *statsdir = NULL, *filename = NULL, *str = NULL;
+
+  if (!start_of_conn_stats_interval)
+    return 0; /* Not initialized. */
+  if (start_of_conn_stats_interval + WRITE_STATS_INTERVAL > now)
+    goto done; /* Not ready to write */
+
+  /* Generate history string. */
+  str = rep_hist_format_conn_stats(now);
+
+  /* Reset counters. */
+  rep_hist_reset_conn_stats(now);
+
+  /* Try to write to disk. */
+  statsdir = get_datadir_fname("stats");
+  if (check_private_dir(statsdir, CPD_CREATE) < 0) {
+    log_warn(LD_HIST, "Unable to create stats/ directory!");
+    goto done;
+  }
+  filename = get_datadir_fname2("stats", "conn-stats");
+  if (write_str_to_file(filename, str, 0) < 0)
+    log_warn(LD_HIST, "Unable to write conn stats to disk!");
+
+ done:
+  tor_free(str);
+  tor_free(filename);
+  tor_free(statsdir);
+  return start_of_conn_stats_interval + WRITE_STATS_INTERVAL;
+}
+
 /** Free all storage held by the OR/link history caches, by the
  * bandwidth history arrays, by the port history, or by statistics . */
 void
@@ -2571,6 +2782,8 @@ rep_hist_free_all(void)
   tor_free(exit_streams);
   built_last_stability_doc_at = 0;
   predicted_ports_free();
+  bidi_map_free();
+
   if (circuits_for_buffer_stats) {
     SMARTLIST_FOREACH(circuits_for_buffer_stats, circ_buffer_stats_t *, s,
                       tor_free(s));

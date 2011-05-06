@@ -313,7 +313,7 @@ tor_addr_is_internal(const tor_addr_t *addr, int for_listening)
  *  brackets.
  */
 const char *
-tor_addr_to_str(char *dest, const tor_addr_t *addr, int len, int decorate)
+tor_addr_to_str(char *dest, const tor_addr_t *addr, size_t len, int decorate)
 {
   const char *ptr;
   tor_assert(addr && dest);
@@ -929,6 +929,19 @@ fmt_addr(const tor_addr_t *addr)
   static char buf[TOR_ADDR_BUF_LEN];
   if (!addr) return "<null>";
   tor_addr_to_str(buf, addr, sizeof(buf), 0);
+  return buf;
+}
+
+/** Like fmt_addr(), but takes <b>addr</b> as a host-order IPv4
+ * addresses. Also not thread-safe, also clobbers its return buffer on
+ * repeated calls. */
+const char *
+fmt_addr32(uint32_t addr)
+{
+  static char buf[INET_NTOA_BUF_LEN];
+  struct in_addr in;
+  in.s_addr = htonl(addr);
+  tor_inet_ntoa(&in, buf, sizeof(buf));
   return buf;
 }
 

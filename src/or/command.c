@@ -25,6 +25,7 @@
 #include "control.h"
 #include "cpuworker.h"
 #include "hibernate.h"
+#include "nodelist.h"
 #include "onion.h"
 #include "relay.h"
 #include "router.h"
@@ -267,15 +268,18 @@ command_process_create_cell(cell_t *cell, or_connection_t *conn)
   }
 
   if (circuit_id_in_use_on_orconn(cell->circ_id, conn)) {
-    routerinfo_t *router = router_get_by_digest(conn->identity_digest);
+    const node_t *node = node_get_by_id(conn->identity_digest);
     log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
            "Received CREATE cell (circID %d) for known circ. "
            "Dropping (age %d).",
            cell->circ_id, (int)(time(NULL) - conn->_base.timestamp_created));
-    if (router)
+    if (node) {
+      char *p = esc_for_log(node_get_platform(node));
       log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
              "Details: nickname \"%s\", platform %s.",
-             router->nickname, escaped(router->platform));
+             node_get_nickname(node), p);
+      tor_free(p);
+    }
     return;
   }
 
@@ -620,7 +624,7 @@ command_process_netinfo_cell(cell_t *cell, or_connection_t *conn)
   /** Warn when we get a netinfo skew with at least this value. */
 #define NETINFO_NOTICE_SKEW 3600
   if (labs(apparent_skew) > NETINFO_NOTICE_SKEW &&
-      router_get_by_digest(conn->identity_digest)) {
+      router_get_by_id_digest(conn->identity_digest)) {
     char dbuf[64];
     int severity;
     /*XXXX be smarter about when everybody says we are skewed. */

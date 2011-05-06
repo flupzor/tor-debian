@@ -51,6 +51,8 @@
 #include <netinet6/in6.h>
 #endif
 
+#include <stdio.h>
+
 #if defined (WINCE)
 #include <fcntl.h>
 #include <io.h>
@@ -367,6 +369,9 @@ struct tm *tor_gmtime_r(const time_t *timep, struct tm *result);
 #endif
 
 /* ===== File compatibility */
+int tor_open_cloexec(const char *path, int flags, unsigned mode);
+FILE *tor_fopen_cloexec(const char *path, const char *mode);
+
 int replace_file(const char *from, const char *to);
 int touch_file(const char *fname);
 
@@ -565,6 +570,8 @@ void spawn_exit(void) ATTR_NORETURN;
 #else
 #undef TOR_IS_MULTITHREADED
 #endif
+
+int compute_num_cpus(void);
 
 /* Because we use threads instead of processes on most platforms (Windows,
  * Linux, etc), we need locking for them.  On platforms with poor thread

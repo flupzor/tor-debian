@@ -23,6 +23,7 @@
 #include "dirserv.h"
 #include "hibernate.h"
 #include "main.h"
+#include "nodelist.h"
 #include "policies.h"
 #include "reasons.h"
 #include "relay.h"
@@ -90,8 +91,8 @@ _connection_mark_unattached_ap(edge_connection_t *conn, int endreason,
       conn->socks_request->has_finished = 1;
   }
 
-  _connection_mark_for_close(TO_CONN(conn), line, file);
-  conn->_base.hold_open_until_flushed = 1;
+  _connection_mark_and_flush(TO_CONN(conn), line, file);
+
   conn->end_reason = endreason;
 }
 
@@ -100,7 +101,7 @@ _connection_mark_unattached_ap(edge_connection_t *conn, int endreason,
 int
 connection_edge_reached_eof(edge_connection_t *conn)
 {
-  if (buf_datalen(conn->_base.inbuf) &&
+  if (connection_get_inbuf_len(TO_CONN(conn)) &&
       connection_state_is_open(TO_CONN(conn))) {
     /* it still has stuff to process. don't let it die yet. */
     return 0;
@@ -191,8 +192,7 @@ connection_edge_destroy(circid_t circ_id, edge_connection_t *conn)
       conn->edge_has_sent_end = 1;
       conn->end_reason = END_STREAM_REASON_DESTROY;
       conn->end_reason |= END_STREAM_REASON_FLAG_ALREADY_SENT_CLOSED;
-      connection_mark_for_close(TO_CONN(conn));
-      conn->_base.hold_open_until_flushed = 1;
+      connection_mark_and_flush(TO_CONN(conn));
     }
   }
   conn->cpath_layer = NULL;
@@ -336,7 +336,6 @@ connection_edge_finished_flushing(edge_connection_t *conn)
   switch (conn->_base.state) {
     case AP_CONN_STATE_OPEN:
     case EXIT_CONN_STATE_OPEN:
-      connection_stop_writing(TO_CONN(conn));
       connection_edge_consider_sending_sendme(conn);
       return 0;
     case AP_CONN_STATE_SOCKS_WAIT:
@@ -345,7 +344,7 @@ connection_edge_finished_flushing(edge_connection_t *conn)
     case AP_CONN_STATE_CIRCUIT_WAIT:
     case AP_CONN_STATE_CONNECT_WAIT:
     case AP_CONN_STATE_CONTROLLER_WAIT:
-      connection_stop_writing(TO_CONN(conn));
+    case AP_CONN_STATE_RESOLVE_WAIT:
       return 0;
     default:
       log_warn(LD_BUG, "Called in unexpected state %d.",conn->_base.state);
@@ -375,8 +374,9 @@ connection_edge_finished_connecting(edge_connection_t *edge_conn)
   rep_hist_note_exit_stream_opened(conn->port);
 
   conn->state = EXIT_CONN_STATE_OPEN;
-  connection_watch_events(conn, READ_EVENT); /* stop writing, keep reading */
-  if (connection_wants_to_flush(conn)) /* in case there are any queued relay
+  IF_HAS_NO_BUFFEREVENT(conn)
+    connection_watch_events(conn, READ_EVENT); /* stop writing, keep reading */
+  if (connection_get_outbuf_len(conn)) /* in case there are any queued relay
                                         * cells */
     connection_start_writing(conn);
   /* deliver a 'connected' relay cell back through the circuit. */
@@ -605,7 +605,7 @@ void
 circuit_discard_optional_exit_enclaves(extend_info_t *info)
 {
   edge_connection_t *edge_conn;
-  routerinfo_t *r1, *r2;
+  const node_t *r1, *r2;
 
   smartlist_t *conns = get_connection_array();
   SMARTLIST_FOREACH_BEGIN(conns, connection_t *, conn) {
@@ -617,8 +617,8 @@ circuit_discard_optional_exit_enclaves(extend_info_t *info)
     if (!edge_conn->chosen_exit_optional &&
         !edge_conn->chosen_exit_retries)
       continue;
-    r1 = router_get_by_nickname(edge_conn->chosen_exit_name, 0);
-    r2 = router_get_by_digest(info->identity_digest);
+    r1 = node_get_by_nickname(edge_conn->chosen_exit_name, 0);
+    r2 = node_get_by_id(info->identity_digest);
     if (!r1 || !r2 || r1 != r2)
       continue;
     tor_assert(edge_conn->socks_request);
@@ -828,7 +828,7 @@ addressmap_clear_excluded_trackexithosts(or_options_t *options)
     size_t len;
     const char *target = ent->new_address, *dot;
     char *nodename;
-    routerinfo_t *ri; /* XXX023 Use node_t. */
+    const node_t *node;
 
     if (strcmpend(target, ".exit")) {
       /* Not a .exit mapping */
@@ -847,11 +847,11 @@ addressmap_clear_excluded_trackexithosts(or_options_t *options)
     } else {
       nodename = tor_strndup(dot+1, strlen(dot+1)-5);
     }
-    ri = router_get_by_nickname(nodename, 0);
+    node = node_get_by_nickname(nodename, 0);
     tor_free(nodename);
-    if (!ri ||
-        (allow_nodes && !routerset_contains_router(allow_nodes, ri)) ||
-        routerset_contains_router(exclude_nodes, ri)) {
+    if (!node ||
+        (allow_nodes && !routerset_contains_node(allow_nodes, node)) ||
+        routerset_contains_node(exclude_nodes, node)) {
       /* We don't know this one, or we want to be rid of it. */
       addressmap_ent_remove(address, ent);
       MAP_DEL_CURRENT(address);
@@ -1268,7 +1268,6 @@ static char *
 addressmap_get_virtual_address(int type)
 {
   char buf[64];
-  struct in_addr in;
   tor_assert(addressmap);
 
   if (type == RESOLVED_TYPE_HOSTNAME) {
@@ -1282,6 +1281,7 @@ addressmap_get_virtual_address(int type)
   } else if (type == RESOLVED_TYPE_IPV4) {
     // This is an imperfect estimate of how many addresses are available, but
     // that's ok.
+    struct in_addr in;
     uint32_t available = 1u << (32-virtual_addr_netmask_bits);
     while (available) {
       /* Don't hand out any .0 or .255 address. */
@@ -1666,15 +1666,14 @@ connection_ap_handshake_rewrite_and_attach(edge_connection_t *conn,
     /* If StrictNodes is not set, then .exit overrides ExcludeNodes. */
     routerset_t *excludeset = options->StrictNodes ?
       options->_ExcludeExitNodesUnion : options->ExcludeExitNodes;
-    /*XXX023 make this a node_t. */
-    routerinfo_t *router;
+    const node_t *node;
 
     tor_assert(!automap);
     if (s) {
       /* The address was of the form "(stuff).(name).exit */
       if (s[1] != '\0') {
         conn->chosen_exit_name = tor_strdup(s+1);
-        router = router_get_by_nickname(conn->chosen_exit_name, 1);
+        node = node_get_by_nickname(conn->chosen_exit_name, 1);
         if (remapped_to_exit) /* 5 tries before it expires the addressmap */
           conn->chosen_exit_retries = TRACKHOSTEXITS_RETRIES;
         *s = 0;
@@ -1689,15 +1688,16 @@ connection_ap_handshake_rewrite_and_attach(edge_connection_t *conn,
       }
     } else {
       /* It looks like they just asked for "foo.exit". */
+
       conn->chosen_exit_name = tor_strdup(socks->address);
-      router = router_get_by_nickname(conn->chosen_exit_name, 1);
-      if (router) {
+      node = node_get_by_nickname(conn->chosen_exit_name, 1);
+      if (node) {
         *socks->address = 0;
-        strlcpy(socks->address, router->address, sizeof(socks->address));
+        node_get_address_string(node, socks->address, sizeof(socks->address));
       }
     }
     /* Now make sure that the chosen exit exists... */
-    if (!router) {
+    if (!node) {
       log_warn(LD_APP,
                "Unrecognized relay in exit address '%s.exit'. Refusing.",
                safe_str_client(socks->address));
@@ -1705,7 +1705,7 @@ connection_ap_handshake_rewrite_and_attach(edge_connection_t *conn,
       return -1;
     }
     /* ...and make sure that it isn't excluded. */
-    if (routerset_contains_router(excludeset, router)) {
+    if (routerset_contains_node(excludeset, node)) {
       log_warn(LD_APP,
                "Excluded relay in exit address '%s.exit'. Refusing.",
                safe_str_client(socks->address));
@@ -1780,16 +1780,16 @@ connection_ap_handshake_rewrite_and_attach(edge_connection_t *conn,
 
       if (!conn->use_begindir && !conn->chosen_exit_name && !circ) {
         /* see if we can find a suitable enclave exit */
-        routerinfo_t *r =
+        const node_t *r =
           router_find_exact_exit_enclave(socks->address, socks->port);
         if (r) {
           log_info(LD_APP,
                    "Redirecting address %s to exit at enclave router %s",
-                   safe_str_client(socks->address), r->nickname);
+                   safe_str_client(socks->address), node_get_nickname(r));
           /* use the hex digest, not nickname, in case there are two
              routers with this nickname */
           conn->chosen_exit_name =
-            tor_strdup(hex_str(r->cache_info.identity_digest, DIGEST_LEN));
+            tor_strdup(hex_str(r->identity, DIGEST_LEN));
           conn->chosen_exit_optional = 1;
         }
       }
@@ -1904,10 +1904,10 @@ get_pf_socket(void)
 
 #ifdef OPENBSD
   /* only works on OpenBSD */
-  pf = open("/dev/pf", O_RDONLY);
+  pf = tor_open_cloexec("/dev/pf", O_RDONLY, 0);
 #else
   /* works on NetBSD and FreeBSD */
-  pf = open("/dev/pf", O_RDWR);
+  pf = tor_open_cloexec("/dev/pf", O_RDWR, 0);
 #endif
 
   if (pf < 0) {
@@ -2044,8 +2044,14 @@ connection_ap_handshake_process_socks(edge_connection_t *conn)
 
   log_debug(LD_APP,"entered.");
 
-  sockshere = fetch_from_buf_socks(conn->_base.inbuf, socks,
-                                   options->TestSocks, options->SafeSocks);
+  IF_HAS_BUFFEREVENT(TO_CONN(conn), {
+    struct evbuffer *input = bufferevent_get_input(conn->_base.bufev);
+    sockshere = fetch_from_evbuffer_socks(input, socks,
+                                     options->TestSocks, options->SafeSocks);
+  }) ELSE_IF_NO_BUFFEREVENT {
+    sockshere = fetch_from_buf_socks(conn->_base.inbuf, socks,
+                                     options->TestSocks, options->SafeSocks);
+  };
   if (sockshere == 0) {
     if (socks->replylen) {
       connection_write_to_buf(socks->reply, socks->replylen, TO_CONN(conn));
@@ -2146,7 +2152,7 @@ connection_ap_process_natd(edge_connection_t *conn)
 
   /* look for LF-terminated "[DEST ip_addr port]"
    * where ip_addr is a dotted-quad and port is in string form */
-  err = fetch_from_buf_line(conn->_base.inbuf, tmp_buf, &tlen);
+  err = connection_fetch_from_buf_line(TO_CONN(conn), tmp_buf, &tlen);
   if (err == 0)
     return 0;
   if (err < 0) {
@@ -2259,8 +2265,10 @@ connection_ap_handshake_send_begin(edge_connection_t *ap_conn)
                ap_conn->socks_request->port);
   payload_len = (int)strlen(payload)+1;
 
-  log_debug(LD_APP,
-            "Sending relay cell to begin stream %d.", ap_conn->stream_id);
+  log_info(LD_APP,
+           "Sending relay cell %d to begin stream %d.",
+           (int)ap_conn->use_begindir,
+           ap_conn->stream_id);
 
   begin_type = ap_conn->use_begindir ?
                  RELAY_COMMAND_BEGIN_DIR : RELAY_COMMAND_BEGIN;
@@ -2373,9 +2381,11 @@ connection_ap_handshake_send_resolve(edge_connection_t *ap_conn)
  * and call connection_ap_handshake_attach_circuit(conn) on it.
  *
  * Return the other end of the linked connection pair, or -1 if error.
+ * DOCDOC partner.
  */
 edge_connection_t *
-connection_ap_make_link(char *address, uint16_t port,
+connection_ap_make_link(connection_t *partner,
+                        char *address, uint16_t port,
                         const char *digest, int use_begindir, int want_onehop)
 {
   edge_connection_t *conn;
@@ -2409,6 +2419,8 @@ connection_ap_make_link(char *address, uint16_t port,
   conn->_base.address = tor_strdup("(Tor_internal)");
   tor_addr_make_unspec(&conn->_base.addr);
   conn->_base.port = 0;
+
+  connection_link_connections(partner, TO_CONN(conn));
 
   if (connection_add(TO_CONN(conn)) < 0) { /* no space, forget it */
     connection_free(TO_CONN(conn));
@@ -2446,13 +2458,11 @@ tell_controller_about_resolved_result(edge_connection_t *conn,
                    answer_type == RESOLVED_TYPE_HOSTNAME)) {
     return; /* we already told the controller. */
   } else if (answer_type == RESOLVED_TYPE_IPV4 && answer_len >= 4) {
-    struct in_addr in;
-    char buf[INET_NTOA_BUF_LEN];
-    in.s_addr = get_uint32(answer);
-    tor_inet_ntoa(&in, buf, sizeof(buf));
+    char *cp = tor_dup_ip(get_uint32(answer));
     control_event_address_mapped(conn->socks_request->address,
-                                 buf, expires, NULL);
-  } else if (answer_type == RESOLVED_TYPE_HOSTNAME && answer_len <256) {
+                                 cp, expires, NULL);
+    tor_free(cp);
+  } else if (answer_type == RESOLVED_TYPE_HOSTNAME && answer_len < 256) {
     char *cp = tor_strndup(answer, answer_len);
     control_event_address_mapped(conn->socks_request->address,
                                  cp, expires, NULL);
@@ -2931,12 +2941,13 @@ connection_exit_connect(edge_connection_t *edge_conn)
   }
 
   conn->state = EXIT_CONN_STATE_OPEN;
-  if (connection_wants_to_flush(conn)) {
+  if (connection_get_outbuf_len(conn)) {
     /* in case there are any queued data cells */
     log_warn(LD_BUG,"newly connected conn had data waiting!");
 //    connection_start_writing(conn);
   }
-  connection_watch_events(conn, READ_EVENT);
+  IF_HAS_NO_BUFFEREVENT(conn)
+    connection_watch_events(conn, READ_EVENT);
 
   /* also, deliver a 'connected' cell back through the circuit. */
   if (connection_edge_is_rendezvous_stream(edge_conn)) {
@@ -3046,7 +3057,7 @@ connection_edge_is_rendezvous_stream(edge_connection_t *conn)
  * resolved.)
  */
 int
-connection_ap_can_use_exit(edge_connection_t *conn, routerinfo_t *exit)
+connection_ap_can_use_exit(edge_connection_t *conn, const node_t *exit)
 {
   or_options_t *options = get_options();
 
@@ -3059,10 +3070,10 @@ connection_ap_can_use_exit(edge_connection_t *conn, routerinfo_t *exit)
    * make sure the exit node of the existing circuit matches exactly.
    */
   if (conn->chosen_exit_name) {
-    routerinfo_t *chosen_exit =
-      router_get_by_nickname(conn->chosen_exit_name, 1);
-    if (!chosen_exit || memcmp(chosen_exit->cache_info.identity_digest,
-                               exit->cache_info.identity_digest, DIGEST_LEN)) {
+    const node_t *chosen_exit =
+      node_get_by_nickname(conn->chosen_exit_name, 1);
+    if (!chosen_exit || memcmp(chosen_exit->identity,
+                               exit->identity, DIGEST_LEN)) {
       /* doesn't match */
 //      log_debug(LD_APP,"Requested node '%s', considering node '%s'. No.",
 //                conn->chosen_exit_name, exit->nickname);
@@ -3077,8 +3088,7 @@ connection_ap_can_use_exit(edge_connection_t *conn, routerinfo_t *exit)
     addr_policy_result_t r;
     if (tor_inet_aton(conn->socks_request->address, &in))
       addr = ntohl(in.s_addr);
-    r = compare_addr_to_addr_policy(addr, conn->socks_request->port,
-                                    exit->exit_policy);
+    r = compare_addr_to_node_policy(addr, conn->socks_request->port, exit);
     if (r == ADDR_POLICY_REJECTED)
       return 0; /* We know the address, and the exit policy rejects it. */
     if (r == ADDR_POLICY_PROBABLY_REJECTED && !conn->chosen_exit_name)
@@ -3086,17 +3096,12 @@ connection_ap_can_use_exit(edge_connection_t *conn, routerinfo_t *exit)
                  * addresses with this port. Since the user didn't ask for
                  * this node, err on the side of caution. */
   } else if (SOCKS_COMMAND_IS_RESOLVE(conn->socks_request->command)) {
-    /* Can't support reverse lookups without eventdns. */
-    if (conn->socks_request->command == SOCKS_COMMAND_RESOLVE_PTR &&
-        exit->has_old_dnsworkers)
-      return 0;
-
     /* Don't send DNS requests to non-exit servers by default. */
-    if (!conn->chosen_exit_name && policy_is_reject_star(exit->exit_policy))
+    if (!conn->chosen_exit_name && node_exit_policy_rejects_all(exit))
       return 0;
   }
   if (options->_ExcludeExitNodesUnion &&
-      routerset_contains_router(options->_ExcludeExitNodesUnion, exit)) {
+      routerset_contains_node(options->_ExcludeExitNodesUnion, exit)) {
     /* Not a suitable exit. Refuse it. */
     return 0;
   }

@@ -16,6 +16,7 @@
 #include "connection_edge.h"
 #include "directory.h"
 #include "main.h"
+#include "nodelist.h"
 #include "relay.h"
 #include "rendclient.h"
 #include "rendcommon.h"
@@ -401,10 +402,10 @@ lookup_last_hid_serv_request(routerstatus_t *hs_dir,
  * it does not contain requests older than REND_HID_SERV_DIR_REQUERY_PERIOD
  * seconds any more. */
 static void
-directory_clean_last_hid_serv_requests(void)
+directory_clean_last_hid_serv_requests(time_t now)
 {
   strmap_iter_t *iter;
-  time_t cutoff = time(NULL) - REND_HID_SERV_DIR_REQUERY_PERIOD;
+  time_t cutoff = now - REND_HID_SERV_DIR_REQUERY_PERIOD;
   if (!last_hid_serv_requests)
     last_hid_serv_requests = strmap_new();
   for (iter = strmap_iter_init(last_hid_serv_requests);
@@ -449,12 +450,14 @@ directory_get_from_hs_dir(const char *desc_id, const rend_data_t *rend_query)
 
   /* Only select those hidden service directories to which we did not send
    * a request recently and for which we have a router descriptor here. */
-  directory_clean_last_hid_serv_requests(); /* Clean request history first. */
+
+  /* Clean request history first. */
+  directory_clean_last_hid_serv_requests(now);
 
   SMARTLIST_FOREACH(responsible_dirs, routerstatus_t *, dir, {
     if (lookup_last_hid_serv_request(dir, desc_id_base32, 0, 0) +
             REND_HID_SERV_DIR_REQUERY_PERIOD >= now ||
-        !router_get_by_digest(dir->identity_digest))
+        !router_get_by_id_digest(dir->identity_digest))
       SMARTLIST_DEL_CURRENT(responsible_dirs, dir);
   });
 
@@ -846,7 +849,6 @@ rend_client_get_random_intro_impl(const rend_cache_entry_t *entry,
   int i;
 
   rend_intro_point_t *intro;
-  routerinfo_t *router;
   or_options_t *options = get_options();
   smartlist_t *usable_nodes;
   int n_excluded = 0;
@@ -873,18 +875,19 @@ rend_client_get_random_intro_impl(const rend_cache_entry_t *entry,
   intro = smartlist_get(usable_nodes, i);
   /* Do we need to look up the router or is the extend info complete? */
   if (!intro->extend_info->onion_key) {
+    const node_t *node;
     if (tor_digest_is_zero(intro->extend_info->identity_digest))
-      router = router_get_by_hexdigest(intro->extend_info->nickname);
+      node = node_get_by_hex_id(intro->extend_info->nickname);
     else
-      router = router_get_by_digest(intro->extend_info->identity_digest);
-    if (!router) {
+      node = node_get_by_id(intro->extend_info->identity_digest);
+    if (!node) {
       log_info(LD_REND, "Unknown router with nickname '%s'; trying another.",
                intro->extend_info->nickname);
       smartlist_del(usable_nodes, i);
       goto again;
     }
     extend_info_free(intro->extend_info);
-    intro->extend_info = extend_info_from_router(router);
+    intro->extend_info = extend_info_from_node(node);
   }
   /* Check if we should refuse to talk to this router. */
   if (options->ExcludeNodes && strict &&

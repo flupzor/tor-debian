@@ -371,6 +371,13 @@ Other options can be specified either on the command-line (--option
     on Windows; instead you should use the --service command-line option.
     (Default: 0)
 
+**LogTimeGranularity** __NUM__::
+    Set the resolution of timestamps in Tor's logs to NUM milliseconds.
+    NUM must be positive and either a divisor or a multiple of 1 second.
+    Note that this option only controls the granularity written by Tor to
+    a file or console log.  Tor does not (for example) "batch up" log
+    messages to affect times logged by a controller, times attached to
+    syslog messages, or the mtime fields on log files.  (Default: 1 second)
 
 **SafeLogging** **0**|**1**|**relay**::
     Tor can scrub potentially sensitive strings from log messages (e.g.
@@ -424,6 +431,17 @@ Other options can be specified either on the command-line (--option
     all, we use the behavior recommended in the current consensus
     networkstatus. This is an advanced option; you generally shouldn't have
     to mess with it. (Default: not set.)
+
+**DisableIOCP** **0**|**1**::
+    If Tor was built to use the Libevent's "bufferevents" networking code
+    and you're running on Windows, setting this option to 1 will tell Libevent
+    not to use the Windows IOCP networking API.  (Default: 1)
+
+**CountPrivateBandwidth** **0**|**1**::
+    If this option is set, then Tor's rate-limiting applies not only to
+    remote connections, but also to connections to private addresses like
+    127.0.0.1 or 10.0.0.1.  This is mostly useful for debugging
+    rate-limiting.  (Default: 0)
 
 CLIENT OPTIONS
 --------------
@@ -513,7 +531,6 @@ The following options are useful only for clients (that is, if
     node listed in ExcludeNodes is automatically considered to be part of this
     list too.  See also the caveats on the "ExitNodes" option below.
 
-
 **ExitNodes** __node__,__node__,__...__::
     A list of identity fingerprints, nicknames, country codes and address
     patterns of nodes to use as exit node---that is, a
@@ -538,9 +555,9 @@ The following options are useful only for clients (that is, if
     this option.
 
 **EntryNodes** __node__,__node__,__...__::
-    A list of identity fingerprints and nicknames of nodes
-    to use for the first hop in your normal circuits.  (Country codes and
-    address patterns are not yet supported.)  Normal circuits include all
+    A list of identity fingerprints, nicknames, and country codes of nodes
+    to use for the first hop in your normal circuits.
+    Normal circuits include all
     circuits except for direct connections to directory servers.  The Bridge
     option overrides this option; if you have configured bridges and
     UseBridges is 1, the Bridges are used as your entry nodes. +
@@ -640,7 +657,8 @@ The following options are useful only for clients (that is, if
     constitute a "family" of similar or co-administered servers, so never use
     any two of them in the same circuit. Defining a NodeFamily is only needed
     when a server doesn't list the family itself (with MyFamily). This option
-    can be used multiple times.
+    can be used multiple times.  In addition to nodes, you can also list
+    IP address and ranges and country codes in {curly braces}.
 
 **EnforceDistinctSubnets** **0**|**1**::
     If 1, Tor will not put two servers whose IP addresses are "too close" on
@@ -943,7 +961,9 @@ is non-zero):
     characters inclusive, and must contain only the characters [a-zA-Z0-9].
 
 **NumCPUs** __num__::
-    How many processes to use at once for decrypting onionskins. (Default: 1)
+    How many processes to use at once for decrypting onionskins and other
+    parallelizable operations.  If this is set to 0, Tor will try to detect
+    how many CPUs you have, defaulting to 1 if it can't tell.  (Default: 0)
 
 **ORPort** __PORT__::
     Advertise this port to listen for connections from Tor clients and servers.
@@ -953,6 +973,18 @@ is non-zero):
     servers. If you specify a port, bind to this port rather than the one
     specified in ORPort. (Default: 0.0.0.0) This directive can be specified
     multiple times to bind to multiple addresses/ports.
+
+**PortForwarding** **0**|**1**::
+    Attempt to automatically forward the DirPort and ORPort on a NAT router
+    connecting this Tor server to the Internet. If set, Tor will try both
+    NAT-PMP (common on Apple routers) and UPnP (common on routers from other
+    manufacturers). (Default: 0)
+
+**PortForwardingHelper** __filename__|__pathname__::
+    If PortForwarding is set, use this executable to configure the forwarding.
+    If set to a filename, the system path will be searched for the executable.
+    If set to a path, only the specified path will be executed.
+    (Default: tor-fw-helper)
 
 **PublishServerDescriptor** **0**|**1**|**v1**|**v2**|**v3**|**bridge**,**...**::
     This option specifies which descriptors Tor will publish when acting as
@@ -973,6 +1005,11 @@ is non-zero):
     seconds, we exit. If we get a second SIGINT, we exit immedi-
     ately. (Default: 30 seconds)
 
+**HeartbeatPeriod**  __N__ **minutes**|**hours**|**days**|**weeks**::
+    Log a heartbeat message every **HeartbeatPeriod** seconds. This is
+    a log level __info__ message, designed to let you know your Tor
+    server is still alive and doing useful things. Settings this
+    to 0 will disable the heartbeat. (Default: 6 hours)
 
 **AccountingMax** __N__ **bytes**|**KB**|**MB**|**GB**|**TB**::
     Never send more than the specified number of bytes in a given accounting
@@ -1080,6 +1117,10 @@ is non-zero):
 **ExitPortStatistics** **0**|**1**::
     When this option is enabled, Tor writes statistics on the number of relayed
     bytes and opened stream per exit port to disk every 24 hours. (Default: 0)
+
+**ConnDirectionStatistics** **0**|**1**::
+    When this option is enabled, Tor writes statistics on the bidirectional use
+    of connections to disk every 24 hours. (Default: 0)
 
 **ExtraInfoStatistics** **0**|**1**::
     When this option is enabled, Tor includes previously gathered statistics in
@@ -1253,6 +1294,11 @@ DIRECTORY AUTHORITY SERVER OPTIONS
     Authoritative directories only. Like AuthDirMaxServersPerAddr, but applies
     to addresses shared with directory authorities. (Default: 5)
 
+**BridgePassword** __Password__::
+    If set, contains an HTTP authenticator that tells a bridge authority to
+    serve all requested bridge information.  Used for debugging.  (Default:
+    not set.)
+
 **V3AuthVotingInterval** __N__ **minutes**|**hours**::
     V3 authoritative directories only. Configures the server's preferred voting
     interval. Note that voting will __actually__ happen at an interval chosen
@@ -1284,6 +1330,17 @@ DIRECTORY AUTHORITY SERVER OPTIONS
     V3 authoritative directories only. Configures the location of the
     bandiwdth-authority generated file storing information on relays' measured
     bandwidth capacities. (Default: unset.)
+
+**V3AuthUseLegacyKey** **0**|**1**::
+    If set, the directory authority will sign consensuses not only with its
+    own signing key, but also with a "legacy" key and certificate with a
+    different identity.  This feature is used to migrate directory authority
+    keys in the event of a compromise.  (Default: 0.)
+
+**RephistTrackTime** __N__ **seconds**|**minutes**|**hours**|**days**|**weeks**::
+    Tells an authority, or other node tracking node reliability and history,
+    that fine-grained information about nodes can be discarded when it hasn't
+    changed for a given amount of time.  (Default: 24 hours)
 
 HIDDEN SERVICE OPTIONS
 ----------------------
@@ -1350,6 +1407,7 @@ The following options are used for running a testing Tor network.
        AuthDirMaxServersPerAuthAddr 0
        ClientDNSRejectInternalAddresses 0
        ClientRejectInternalAddresses 0
+       CountPrivateBandwidth 1
        ExitPolicyRejectPrivate 0
        V3AuthVotingInterval 5 minutes
        V3AuthVoteDelay 20 seconds

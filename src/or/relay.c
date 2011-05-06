@@ -24,6 +24,7 @@
 #include "main.h"
 #include "mempool.h"
 #include "networkstatus.h"
+#include "nodelist.h"
 #include "policies.h"
 #include "reasons.h"
 #include "relay.h"
@@ -704,7 +705,7 @@ connection_ap_process_end_not_open(
     edge_connection_t *conn, crypt_path_t *layer_hint)
 {
   struct in_addr in;
-  routerinfo_t *exitrouter;
+  node_t *exitrouter;
   int reason = *(cell->payload+RELAY_HEADER_SIZE);
   int control_reason = reason | END_STREAM_REASON_FLAG_REMOTE;
   (void) layer_hint; /* unused */
@@ -712,11 +713,12 @@ connection_ap_process_end_not_open(
   if (rh->length > 0 && edge_reason_is_retriable(reason) &&
       !connection_edge_is_rendezvous_stream(conn)  /* avoid retry if rend */
       ) {
+    const char *chosen_exit_digest =
+      circ->build_state->chosen_exit->identity_digest;
     log_info(LD_APP,"Address '%s' refused due to '%s'. Considering retrying.",
              safe_str(conn->socks_request->address),
              stream_end_reason_to_string(reason));
-    exitrouter =
-      router_get_by_digest(circ->build_state->chosen_exit->identity_digest);
+    exitrouter = node_get_mutable_by_id(chosen_exit_digest);
     switch (reason) {
       case END_STREAM_REASON_EXITPOLICY:
         if (rh->length >= 5) {
@@ -751,8 +753,8 @@ connection_ap_process_end_not_open(
           log_info(LD_APP,
                  "Exitrouter '%s' seems to be more restrictive than its exit "
                  "policy. Not using this router as exit for now.",
-                 exitrouter->nickname);
-          policies_set_router_exitpolicy_to_reject_all(exitrouter);
+                 node_get_nickname(exitrouter));
+          policies_set_node_exitpolicy_to_reject_all(exitrouter);
         }
         /* rewrite it to an IP if we learned one. */
         if (addressmap_rewrite(conn->socks_request->address,
@@ -817,7 +819,7 @@ connection_ap_process_end_not_open(
       case END_STREAM_REASON_HIBERNATING:
       case END_STREAM_REASON_RESOURCELIMIT:
         if (exitrouter) {
-          policies_set_router_exitpolicy_to_reject_all(exitrouter);
+          policies_set_node_exitpolicy_to_reject_all(exitrouter);
         }
         if (conn->chosen_exit_optional) {
           /* stop wanting a specific exit */
@@ -900,12 +902,8 @@ connection_edge_process_relay_cell_not_open(
       int ttl;
       if (!addr || (get_options()->ClientDNSRejectInternalAddresses &&
                     is_internal_IP(addr, 0))) {
-        char buf[INET_NTOA_BUF_LEN];
-        struct in_addr a;
-        a.s_addr = htonl(addr);
-        tor_inet_ntoa(&a, buf, sizeof(buf));
-        log_info(LD_APP,
-                 "...but it claims the IP address was %s. Closing.", buf);
+        log_info(LD_APP, "...but it claims the IP address was %s. Closing.",
+                 fmt_addr32(addr));
         connection_edge_end(conn, END_STREAM_REASON_TORPROTOCOL);
         connection_mark_unattached_ap(conn, END_STREAM_REASON_TORPROTOCOL);
         return 0;
@@ -982,11 +980,8 @@ connection_edge_process_relay_cell_not_open(
       uint32_t addr = ntohl(get_uint32(cell->payload+RELAY_HEADER_SIZE+2));
       if (get_options()->ClientDNSRejectInternalAddresses &&
           is_internal_IP(addr, 0)) {
-        char buf[INET_NTOA_BUF_LEN];
-        struct in_addr a;
-        a.s_addr = htonl(addr);
-        tor_inet_ntoa(&a, buf, sizeof(buf));
-        log_info(LD_APP,"Got a resolve with answer %s.  Rejecting.", buf);
+        log_info(LD_APP,"Got a resolve with answer %s. Rejecting.",
+                 fmt_addr32(addr));
         connection_ap_handshake_socks_resolved(conn,
                                                RESOLVED_TYPE_ERROR_TRANSIENT,
                                                0, NULL, 0, TIME_MAX);
@@ -1038,6 +1033,9 @@ connection_edge_process_relay_cell(cell_t *cell, circuit_t *circ,
   relay_header_t rh;
   unsigned domain = layer_hint?LD_APP:LD_EXIT;
   int reason;
+  int optimistic_data = 0; /* Set to 1 if we receive data on a stream
+                            * that's in the EXIT_CONN_STATE_RESOLVING
+                            * or EXIT_CONN_STATE_CONNECTING states. */
 
   tor_assert(cell);
   tor_assert(circ);
@@ -1057,9 +1055,20 @@ connection_edge_process_relay_cell(cell_t *cell, circuit_t *circ,
   /* either conn is NULL, in which case we've got a control cell, or else
    * conn points to the recognized stream. */
 
-  if (conn && !connection_state_is_open(TO_CONN(conn)))
-    return connection_edge_process_relay_cell_not_open(
-             &rh, cell, circ, conn, layer_hint);
+  if (conn && !connection_state_is_open(TO_CONN(conn))) {
+    if (conn->_base.type == CONN_TYPE_EXIT &&
+        (conn->_base.state == EXIT_CONN_STATE_CONNECTING ||
+         conn->_base.state == EXIT_CONN_STATE_RESOLVING) &&
+        rh.command == RELAY_COMMAND_DATA) {
+      /* Allow DATA cells to be delivered to an exit node in state
+       * EXIT_CONN_STATE_CONNECTING or EXIT_CONN_STATE_RESOLVING.
+       * This speeds up HTTP, for example. */
+      optimistic_data = 1;
+    } else {
+      return connection_edge_process_relay_cell_not_open(
+               &rh, cell, circ, conn, layer_hint);
+    }
+  }
 
   switch (rh.command) {
     case RELAY_COMMAND_DROP:
@@ -1126,7 +1135,14 @@ connection_edge_process_relay_cell(cell_t *cell, circuit_t *circ,
       stats_n_data_bytes_received += rh.length;
       connection_write_to_buf((char*)(cell->payload + RELAY_HEADER_SIZE),
                               rh.length, TO_CONN(conn));
-      connection_edge_consider_sending_sendme(conn);
+
+      if (!optimistic_data) {
+        /* Only send a SENDME if we're not getting optimistic data; otherwise
+         * a SENDME could arrive before the CONNECTED.
+         */
+        connection_edge_consider_sending_sendme(conn);
+      }
+
       return 0;
     case RELAY_COMMAND_END:
       reason = rh.length > 0 ?
@@ -1151,8 +1167,7 @@ connection_edge_process_relay_cell(cell_t *cell, circuit_t *circ,
       if (!conn->_base.marked_for_close) {
         /* only mark it if not already marked. it's possible to
          * get the 'end' right around when the client hangs up on us. */
-        connection_mark_for_close(TO_CONN(conn));
-        conn->_base.hold_open_until_flushed = 1;
+        connection_mark_and_flush(TO_CONN(conn));
       }
       return 0;
     case RELAY_COMMAND_EXTEND:
@@ -1359,7 +1374,7 @@ connection_edge_package_raw_inbuf(edge_connection_t *conn, int package_partial,
     return 0;
   }
 
-  amount_to_process = buf_datalen(conn->_base.inbuf);
+  amount_to_process = connection_get_inbuf_len(TO_CONN(conn));
 
   if (!amount_to_process)
     return 0;
@@ -1378,7 +1393,7 @@ connection_edge_package_raw_inbuf(edge_connection_t *conn, int package_partial,
   connection_fetch_from_buf(payload, length, TO_CONN(conn));
 
   log_debug(domain,"(%d) Packaging %d bytes (%d waiting).", conn->_base.s,
-            (int)length, (int)buf_datalen(conn->_base.inbuf));
+            (int)length, (int)connection_get_inbuf_len(TO_CONN(conn)));
 
   if (connection_edge_send_command(conn, RELAY_COMMAND_DATA,
                                    payload, length) < 0 )
@@ -1531,7 +1546,7 @@ circuit_resume_edge_reading_helper(edge_connection_t *first_conn,
     if (!layer_hint || conn->cpath_layer == layer_hint) {
       connection_start_reading(TO_CONN(conn));
 
-      if (buf_datalen(conn->_base.inbuf) > 0)
+      if (connection_get_inbuf_len(TO_CONN(conn)) > 0)
         ++n_packaging_streams;
     }
   }
@@ -1542,7 +1557,7 @@ circuit_resume_edge_reading_helper(edge_connection_t *first_conn,
     if (!layer_hint || conn->cpath_layer == layer_hint) {
       connection_start_reading(TO_CONN(conn));
 
-      if (buf_datalen(conn->_base.inbuf) > 0)
+      if (connection_get_inbuf_len(TO_CONN(conn)) > 0)
         ++n_packaging_streams;
     }
   }
@@ -1581,7 +1596,7 @@ circuit_resume_edge_reading_helper(edge_connection_t *first_conn,
       }
 
       /* If there's still data to read, we'll be coming back to this stream. */
-      if (buf_datalen(conn->_base.inbuf))
+      if (connection_get_inbuf_len(TO_CONN(conn)))
           ++n_streams_left;
 
       /* If the circuit won't accept any more data, return without looking
@@ -2245,7 +2260,7 @@ set_streams_blocked_on_circ(circuit_t *circ, or_connection_t *orconn,
       edge->edge_blocked_on_circ = block;
     }
 
-    if (!conn->read_event) {
+    if (!conn->read_event && !HAS_BUFFEREVENT(conn)) {
       /* This connection is a placeholder for something; probably a DNS
        * request.  It can't actually stop or start reading.*/
       continue;
@@ -2446,7 +2461,7 @@ append_cell_to_circuit_queue(circuit_t *circ, or_connection_t *orconn,
     make_circuit_active_on_conn(circ, orconn);
   }
 
-  if (! buf_datalen(orconn->_base.outbuf)) {
+  if (! connection_get_outbuf_len(TO_CONN(orconn))) {
     /* There is no data at all waiting to be sent on the outbuf.  Add a
      * cell, so that we can notice when it gets flushed, flushed_some can
      * get called, and we can start putting more data onto the buffer then.

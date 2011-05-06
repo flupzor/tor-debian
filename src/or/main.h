@@ -14,7 +14,9 @@
 
 extern int can_complete_circuit;
 
-int connection_add(connection_t *conn);
+int connection_add_impl(connection_t *conn, int is_connecting);
+#define connection_add(conn) connection_add_impl((conn), 0)
+#define connection_add_connecting(conn) connection_add_impl((conn), 1)
 int connection_remove(connection_t *conn);
 void connection_unregister_events(connection_t *conn);
 int connection_in_array(connection_t *conn);
@@ -22,10 +24,13 @@ void add_connection_to_closeable_list(connection_t *conn);
 int connection_is_on_closeable_list(connection_t *conn);
 
 smartlist_t *get_connection_array(void);
+uint64_t get_bytes_read(void);
+uint64_t get_bytes_written(void);
 
 /** Bitmask for events that we can turn on and off with
  * connection_watch_events. */
 typedef enum watchable_events {
+  /* Yes, it is intentional that these match Libevent's EV_READ and EV_WRITE */
   READ_EVENT=0x02, /**< We want to know when a connection is readable */
   WRITE_EVENT=0x04 /**< We want to know when a connection is writable */
 } watchable_events_t;
@@ -45,6 +50,8 @@ void directory_info_has_arrived(time_t now, int from_cache);
 
 void ip_address_changed(int at_interface);
 void dns_servers_relaunch_checks(void);
+
+long get_uptime(void);
 
 void handle_signals(int is_parent);
 void process_signal(uintptr_t sig);

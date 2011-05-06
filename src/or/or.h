@@ -83,6 +83,13 @@
 #define snprintf _snprintf
 #endif
 
+#ifdef USE_BUFFEREVENTS
+#include <event2/bufferevent.h>
+#include <event2/buffer.h>
+#include <event2/util.h>
+#endif
+
+#include "crypto.h"
 #include "tortls.h"
 #include "../common/torlog.h"
 #include "container.h"
@@ -384,7 +391,9 @@ typedef enum {
 /** A connection to a hidden service directory server: download a v2 rendezvous
  * descriptor. */
 #define DIR_PURPOSE_FETCH_RENDDESC_V2 18
-#define _DIR_PURPOSE_MAX 18
+/** A connection to a directory server: download a microdescriptor. */
+#define DIR_PURPOSE_FETCH_MICRODESC 19
+#define _DIR_PURPOSE_MAX 19
 
 /** True iff <b>p</b> is a purpose corresponding to uploading data to a
  * directory server. */
@@ -805,6 +814,9 @@ typedef enum {
  * Tor 0.1.2.x is obsolete, we can remove this. */
 #define DEFAULT_CLIENT_NICKNAME "client"
 
+/** Name chosen by routers that don't configure nicknames */
+#define UNNAMED_ROUTER_NICKNAME "Unnamed"
+
 /** Number of bytes in a SOCKS4 header. */
 #define SOCKS4_NETWORK_LEN 8
 
@@ -855,7 +867,7 @@ typedef struct var_cell_t {
   /** Number of bytes actually stored in <b>payload</b> */
   uint16_t payload_len;
   /** Payload of this cell */
-  uint8_t payload[1];
+  uint8_t payload[FLEXIBLE_ARRAY_MEMBER];
 } var_cell_t;
 
 /** A cell as packed for writing to the network. */
@@ -972,6 +984,7 @@ typedef struct connection_t {
   /** Our socket; -1 if this connection is closed, or has no socket. */
   evutil_socket_t s;
   int conn_array_index; /**< Index into the global connection array. */
+
   struct event *read_event; /**< Libevent event structure. */
   struct event *write_event; /**< Libevent event structure. */
   buf_t *inbuf; /**< Buffer holding data read over this connection. */
@@ -982,6 +995,11 @@ typedef struct connection_t {
                               * read? */
   time_t timestamp_lastwritten; /**< When was the last time libevent said we
                                  * could write? */
+
+#ifdef USE_BUFFEREVENTS
+  struct bufferevent *bufev; /**< A Libevent buffered IO structure. */
+#endif
+
   time_t timestamp_created; /**< When was this connection_t created? */
 
   /* XXXX_IP6 make this IPv6-capable */
@@ -1081,10 +1099,16 @@ typedef struct or_connection_t {
   /* bandwidth* and *_bucket only used by ORs in OPEN state: */
   int bandwidthrate; /**< Bytes/s added to the bucket. (OPEN ORs only.) */
   int bandwidthburst; /**< Max bucket size for this conn. (OPEN ORs only.) */
+#ifndef USE_BUFFEREVENTS
   int read_bucket; /**< When this hits 0, stop receiving. Every second we
                     * add 'bandwidthrate' to this, capping it at
                     * bandwidthburst. (OPEN ORs only) */
   int write_bucket; /**< When this hits 0, stop writing. Like read_bucket. */
+#else
+  /** DOCDOC */
+  /* XXXX we could share this among all connections. */
+  struct ev_token_bucket_cfg *bucket_cfg;
+#endif
   int n_circuits; /**< How many circuits use this connection as p_conn or
                    * n_conn ? */
 
@@ -1199,8 +1223,13 @@ typedef struct edge_connection_t {
 typedef struct dir_connection_t {
   connection_t _base;
 
-  char *requested_resource; /**< Which 'resource' did we ask the directory
-                             * for? */
+ /** Which 'resource' did we ask the directory for? This is typically the part
+  * of the URL string that defines, relative to the directory conn purpose,
+  * what thing we want.  For example, in router descriptor downloads by
+  * descriptor digest, it contains "d/", then one ore more +-separated
+  * fingerprints.
+  **/
+  char *requested_resource;
   unsigned int dirconn_direct:1; /**< Is this dirconn direct, or via Tor? */
 
   /* Used only for server sides of some dir connections, to implement
@@ -1290,6 +1319,51 @@ static INLINE control_connection_t *TO_CONTROL_CONN(connection_t *c)
   tor_assert(c->magic == CONTROL_CONNECTION_MAGIC);
   return DOWNCAST(control_connection_t, c);
 }
+
+/* Conditional macros to help write code that works whether bufferevents are
+   disabled or not.
+
+   We can't just write:
+      if (conn->bufev) {
+        do bufferevent stuff;
+      } else {
+        do other stuff;
+      }
+   because the bufferevent stuff won't even compile unless we have a fairly
+   new version of Libevent.  Instead, we say:
+      IF_HAS_BUFFEREVENT(conn, { do_bufferevent_stuff } );
+   or:
+      IF_HAS_BUFFEREVENT(conn, {
+        do bufferevent stuff;
+      }) ELSE_IF_NO_BUFFEREVENT {
+        do non-bufferevent stuff;
+      }
+   If we're compiling with bufferevent support, then the macros expand more or
+   less to:
+      if (conn->bufev) {
+        do_bufferevent_stuff;
+      } else {
+        do non-bufferevent stuff;
+      }
+   and if we aren't using bufferevents, they expand more or less to:
+      { do non-bufferevent stuff; }
+*/
+#ifdef USE_BUFFEREVENTS
+#define HAS_BUFFEREVENT(c) (((c)->bufev) != NULL)
+#define IF_HAS_BUFFEREVENT(c, stmt)                \
+  if ((c)->bufev) do {                             \
+      stmt ;                                       \
+  } while (0)
+#define ELSE_IF_NO_BUFFEREVENT ; else
+#define IF_HAS_NO_BUFFEREVENT(c)                   \
+  if (NULL == (c)->bufev)
+#else
+#define HAS_BUFFEREVENT(c) (0)
+#define IF_HAS_BUFFEREVENT(c, stmt) (void)0
+#define ELSE_IF_NO_BUFFEREVENT ;
+#define IF_HAS_NO_BUFFEREVENT(c)                \
+  if (1)
+#endif
 
 /** What action type does an address policy indicate: accept or reject? */
 typedef enum {
@@ -1454,59 +1528,49 @@ typedef struct {
   char *contact_info; /**< Declared contact info for this router. */
   unsigned int is_hibernating:1; /**< Whether the router claims to be
                                   * hibernating */
-  unsigned int has_old_dnsworkers:1; /**< Whether the router is using
-                                      * dnsworker code. */
-  unsigned int caches_extra_info:1; /**< Whether the router caches and serves
-                                     * extrainfo documents. */
-  unsigned int allow_single_hop_exits:1;  /**< Whether the router allows
-                                     * single hop exits. */
+  unsigned int caches_extra_info:1; /**< Whether the router says it caches and
+                                     * serves extrainfo documents. */
+  unsigned int allow_single_hop_exits:1;  /**< Whether the router says
+                                           * it allows single hop exits. */
 
-  /* local info */
-  unsigned int is_running:1; /**< As far as we know, is this OR currently
-                              * running? */
-  unsigned int is_valid:1; /**< Has a trusted dirserver validated this OR?
-                               *  (For Authdir: Have we validated this OR?)
-                               */
-  unsigned int is_named:1; /**< Do we believe the nickname that this OR gives
-                            * us? */
-  unsigned int is_fast:1; /** Do we think this is a fast OR? */
-  unsigned int is_stable:1; /** Do we think this is a stable OR? */
-  unsigned int is_possible_guard:1; /**< Do we think this is an OK guard? */
-  unsigned int is_exit:1; /**< Do we think this is an OK exit? */
-  unsigned int is_bad_exit:1; /**< Do we think this exit is censored, borked,
-                               * or otherwise nasty? */
-  unsigned int is_bad_directory:1; /**< Do we think this directory is junky,
-                                    * underpowered, or otherwise useless? */
   unsigned int wants_to_be_hs_dir:1; /**< True iff this router claims to be
                                       * a hidden service directory. */
-  unsigned int is_hs_dir:1; /**< True iff this router is a hidden service
-                             * directory according to the authorities. */
   unsigned int policy_is_reject_star:1; /**< True iff the exit policy for this
                                          * router rejects everything. */
   /** True if, after we have added this router, we should re-launch
    * tests for it. */
   unsigned int needs_retest_if_added:1;
 
-/** Tor can use this router for general positions in circuits. */
+/** Tor can use this router for general positions in circuits; we got it
+ * from a directory server as usual, or we're an authority and a server
+ * uploaded it. */
 #define ROUTER_PURPOSE_GENERAL 0
-/** Tor should avoid using this router for circuit-building. */
+/** Tor should avoid using this router for circuit-building: we got it
+ * from a crontroller.  If the controller wants to use it, it'll have to
+ * ask for it by identity. */
 #define ROUTER_PURPOSE_CONTROLLER 1
-/** Tor should use this router only for bridge positions in circuits. */
+/** Tor should use this router only for bridge positions in circuits: we got
+ * it via a directory request from the bridge itself, or a bridge
+ * authority. x*/
 #define ROUTER_PURPOSE_BRIDGE 2
 /** Tor should not use this router; it was marked in cached-descriptors with
  * a purpose we didn't recognize. */
 #define ROUTER_PURPOSE_UNKNOWN 255
 
-  uint8_t purpose; /** What positions in a circuit is this router good for? */
+  /* In what way did we find out about this router?  One of ROUTER_PURPOSE_*.
+   * Routers of different purposes are kept segregated and used for different
+   * things; see notes on ROUTER_PURPOSE_* macros above.
+   */
+  uint8_t purpose;
 
   /* The below items are used only by authdirservers for
    * reachability testing. */
+
   /** When was the last time we could reach this OR? */
   time_t last_reachable;
   /** When did we start testing reachability for this OR? */
   time_t testing_since;
-  /** According to the geoip db what country is this router in? */
-  country_t country;
+
 } routerinfo_t;
 
 /** Information needed to keep and cache a signed extra-info document. */
@@ -1532,8 +1596,9 @@ typedef struct routerstatus_t {
                                       * has. */
   char identity_digest[DIGEST_LEN]; /**< Digest of the router's identity
                                      * key. */
-  char descriptor_digest[DIGEST_LEN]; /**< Digest of the router's most recent
-                                       * descriptor. */
+  /** Digest of the router's most recent descriptor or microdescriptor.
+   * If it's a descriptor, we only use the first DIGEST_LEN bytes. */
+  char descriptor_digest[DIGEST256_LEN];
   uint32_t addr; /**< IPv4 address for this router. */
   uint16_t or_port; /**< OR port for this router. */
   uint16_t dir_port; /**< Directory port for this router. */
@@ -1541,7 +1606,11 @@ typedef struct routerstatus_t {
   unsigned int is_exit:1; /**< True iff this router is a good exit. */
   unsigned int is_stable:1; /**< True iff this router stays up a long time. */
   unsigned int is_fast:1; /**< True iff this router has good bandwidth. */
-  unsigned int is_running:1; /**< True iff this router is up. */
+  /** True iff this router is called 'running' in the consensus. We give it
+   * this funny name so that we don't accidentally use this bit as a view of
+   * whether we think the router is *currently* running.  If that's what you
+   * want to know, look at is_running in node_t. */
+  unsigned int is_flagged_running:1;
   unsigned int is_named:1; /**< True iff "nickname" belongs to this router. */
   unsigned int is_unnamed:1; /**< True iff "nickname" belongs to another
                               * router. */
@@ -1593,14 +1662,30 @@ typedef struct routerstatus_t {
    * from this authority.)  Applies in v2 networkstatus document only.
    */
   unsigned int need_to_mirror:1;
-  unsigned int name_lookup_warned:1; /**< Have we warned the user for referring
-                                      * to this (unnamed) router by nickname?
-                                      */
   time_t last_dir_503_at; /**< When did this router last tell us that it
                            * was too busy to serve directory info? */
   download_status_t dl_status;
 
 } routerstatus_t;
+
+/** A single entry in a parsed policy summary, describing a range of ports. */
+typedef struct short_policy_entry_t {
+  uint16_t min_port, max_port;
+} short_policy_entry_t;
+
+/** A short_poliy_t is the parsed version of a policy summary. */
+typedef struct short_policy_t {
+  /** True if the members of 'entries' are port ranges to accept; false if
+   * they are port ranges to reject */
+  unsigned int is_accept : 1;
+  /** The actual number of values in 'entries'. */
+  unsigned int n_entries : 31;
+  /** An array of 0 or more short_policy_entry_t values, each describing a
+   * range of ports that this policy accepts or rejects (depending on the
+   * value of is_accept).
+   */
+  short_policy_entry_t entries[FLEXIBLE_ARRAY_MEMBER];
+} short_policy_t;
 
 /** A microdescriptor is the smallest amount of information needed to build a
  * circuit through a router.  They are generated by the directory authorities,
@@ -1643,14 +1728,82 @@ typedef struct microdesc_t {
   crypto_pk_env_t *onion_pkey;
   /** As routerinfo_t.family */
   smartlist_t *family;
-  /** Encoded exit policy summary */
-  char *exitsummary; /**< exit policy summary -
-                      * XXX this probably should not stay a string. */
+  /** Exit policy summary */
+  short_policy_t *exit_policy;
 } microdesc_t;
+
+/** A node_t represents a Tor router.
+ *
+ * Specifically, a node_t is a Tor router as we are using it: a router that
+ * we are considering for circuits, connections, and so on.  A node_t is a
+ * thin wrapper around the routerstatus, routerinfo, and microdesc for a
+ * single wrapper, and provides a consistent interface for all of them.
+ *
+ * Also, a node_t has mutable state.  While a routerinfo, a routerstatus,
+ * and a microdesc have[*] only the information read from a router
+ * descriptor, a consensus entry, and a microdescriptor (respectively)...
+ * a node_t has flags based on *our own current opinion* of the node.
+ *
+ * [*] Actually, there is some leftover information in each that is mutable.
+ *  We should try to excise that.
+ */
+typedef struct node_t {
+  /* Indexing information */
+
+  /** Used to look up the node_t by its identity digest. */
+  HT_ENTRY(node_t) ht_ent;
+  /** Position of the node within the list of nodes */
+  int nodelist_idx;
+
+  /** The identity digest of this node_t.  No more than one node_t per
+   * identity may exist at a time. */
+  char identity[DIGEST_LEN];
+
+  microdesc_t *md;
+  routerinfo_t *ri;
+  routerstatus_t *rs;
+
+  /* local info: copied from routerstatus, then possibly frobbed based
+   * on experience.  Authorities set this stuff directly. */
+
+  unsigned int is_running:1; /**< As far as we know, is this OR currently
+                              * running? */
+  unsigned int is_valid:1; /**< Has a trusted dirserver validated this OR?
+                               *  (For Authdir: Have we validated this OR?)
+                               */
+  unsigned int is_fast:1; /** Do we think this is a fast OR? */
+  unsigned int is_stable:1; /** Do we think this is a stable OR? */
+  unsigned int is_possible_guard:1; /**< Do we think this is an OK guard? */
+  unsigned int is_exit:1; /**< Do we think this is an OK exit? */
+  unsigned int is_bad_exit:1; /**< Do we think this exit is censored, borked,
+                               * or otherwise nasty? */
+  unsigned int is_bad_directory:1; /**< Do we think this directory is junky,
+                                    * underpowered, or otherwise useless? */
+  unsigned int is_hs_dir:1; /**< True iff this router is a hidden service
+                             * directory according to the authorities. */
+
+  /* Local info: warning state. */
+
+  unsigned int name_lookup_warned:1; /**< Have we warned the user for referring
+                                      * to this (unnamed) router by nickname?
+                                      */
+
+  /** Local info: we treat this node as if it rejects everything */
+  unsigned int rejects_all:1;
+
+  /* Local info: derived. */
+
+  /** According to the geoip db what country is this router in? */
+  country_t country;
+} node_t;
 
 /** How many times will we try to download a router's descriptor before giving
  * up? */
 #define MAX_ROUTERDESC_DOWNLOAD_FAILURES 8
+
+/** How many times will we try to download a microdescriptor before giving
+ * up? */
+#define MAX_MICRODESC_DOWNLOAD_FAILURES 8
 
 /** Contents of a v2 (non-consensus, non-vote) network status object. */
 typedef struct networkstatus_v2_t {
@@ -2133,7 +2286,10 @@ typedef struct circuit_t {
     * length ONIONSKIN_CHALLENGE_LEN. */
   char *n_conn_onionskin;
 
-  struct timeval timestamp_created; /**< When was the circuit created? */
+  /** When was this circuit created?  We keep this timestamp with a higher
+   * resolution than most so that the circuit-build-time tracking code can
+   * get millisecond resolution. */
+  struct timeval timestamp_created;
   /** When the circuit was first used, or 0 if the circuit is clean.
    *
    * XXXX023 Note that some code will artifically adjust this value backward
@@ -2366,6 +2522,7 @@ typedef struct {
 
   config_line_t *Logs; /**< New-style list of configuration lines
                         * for logs */
+  int LogTimeGranularity; /**< Log resolution in milliseconds. */
 
   int LogMessageDomains; /**< Boolean: Should we log the domain(s) in which
                           * each log message occurs? */
@@ -2588,6 +2745,9 @@ typedef struct {
                                * authorizations for hidden services */
   char *ContactInfo; /**< Contact info to be published in the directory. */
 
+  int HeartbeatPeriod; /**< Log heartbeat messages after this many seconds
+                        * have passed. */
+
   char *HTTPProxy; /**< hostname[:port] to use as http proxy, if any. */
   tor_addr_t HTTPProxyAddr; /**< Parsed IPv4 addr for http proxy, if any. */
   uint16_t HTTPProxyPort; /**< Parsed port for http proxy, if any. */
@@ -2625,7 +2785,8 @@ typedef struct {
 
   char *MyFamily; /**< Declared family for this OR. */
   config_line_t *NodeFamilies; /**< List of config lines for
-                                       * node families */
+                                * node families */
+  smartlist_t *NodeFamilySets; /**< List of parsed NodeFamilies values. */
   config_line_t *AuthDirBadDir; /**< Address policy for descriptors to
                                  * mark as bad dir mirrors. */
   config_line_t *AuthDirBadExit; /**< Address policy for descriptors to
@@ -2720,7 +2881,9 @@ typedef struct {
   /** Boolean: if set, we start even if our resolv.conf file is missing
    * or broken. */
   int ServerDNSAllowBrokenConfig;
-
+  /** Boolean: if set, then even connections to private addresses will get
+   * rate-limited. */
+  int CountPrivateBandwidth;
   smartlist_t *ServerDNSTestAddresses; /**< A list of addresses that definitely
                                         * should be resolvable. Used for
                                         * testing our DNS server. */
@@ -2730,6 +2893,10 @@ typedef struct {
                        * possible. */
   int PreferTunneledDirConns; /**< If true, avoid dirservers that don't
                                * support BEGIN_DIR, when possible. */
+  int PortForwarding; /**< If true, use NAT-PMP or UPnP to automatically
+                       * forward the DirPort and ORPort on the NAT device */
+  char *PortForwardingHelper; /** < Filename or full path of the port
+                                  forwarding helper executable */
   int AllowNonRFC953Hostnames; /**< If true, we allow connections to hostnames
                                 * with weird characters. */
   /** If true, we try resolving hostnames with weird characters. */
@@ -2766,6 +2933,9 @@ typedef struct {
 
   /** If true, the user wants us to collect statistics on port usage. */
   int ExitPortStatistics;
+
+  /** If true, the user wants us to collect connection statistics. */
+  int ConnDirectionStatistics;
 
   /** If true, the user wants us to collect cell statistics. */
   int CellStatistics;
@@ -2862,6 +3032,12 @@ typedef struct {
    * according to either Tor or a parameter set in the consensus.
    */
   double CircuitPriorityHalflife;
+
+  /** If true, do not enable IOCP on windows with bufferevents, even if
+   * we think we could. */
+  int DisableIOCP;
+  /** For testing only: will go away in 0.2.3.x. */
+  int _UseFilteringSSLBufferevents;
 
   /** Set to true if the TestingTorNetwork configuration option is set.
    * This is used so that options_validate() has a chance to realize that
@@ -2981,8 +3157,6 @@ struct socks_request_t {
                               * make sure we send back a socks reply for
                               * every connection. */
 };
-
-/* all the function prototypes go here */
 
 /********************************* circuitbuild.c **********************/
 
@@ -3391,7 +3565,7 @@ typedef enum {
   ADDR_POLICY_PROBABLY_ACCEPTED=1,
   /** Part of the address was unknown, but as far as we can tell, it was
    * rejected. */
-  ADDR_POLICY_PROBABLY_REJECTED=2
+  ADDR_POLICY_PROBABLY_REJECTED=2,
 } addr_policy_result_t;
 
 /********************************* rephist.c ***************************/
@@ -3522,6 +3696,8 @@ typedef struct trusted_dir_server_t {
  *  fetches to _any_ single directory server.]
  */
 #define PDS_NO_EXISTING_SERVERDESC_FETCH (1<<3)
+#define PDS_NO_EXISTING_MICRODESC_FETCH (1<<4)
+
 #define _PDS_PREFER_TUNNELED_DIR_CONNS (1<<16)
 
 /** Possible ways to weight routers when choosing one randomly.  See
@@ -3539,7 +3715,8 @@ typedef enum {
   CRN_NEED_GUARD = 1<<2,
   CRN_ALLOW_INVALID = 1<<3,
   /* XXXX not used, apparently. */
-  CRN_WEIGHT_AS_EXIT = 1<<5
+  CRN_WEIGHT_AS_EXIT = 1<<5,
+  CRN_NEED_DESC = 1<<6
 } router_crn_flags_t;
 
 /** Return value for router_add_to_routerlist() and dirserv_add_descriptor() */

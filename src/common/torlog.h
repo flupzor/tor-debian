@@ -92,8 +92,10 @@
 #define LD_HIST     (1u<<18)
 /** OR handshaking */
 #define LD_HANDSHAKE (1u<<19)
+/** Heartbeat messages */
+#define LD_HEARTBEAT (1u<<20)
 /** Number of logging domains in the code. */
-#define N_LOGGING_DOMAINS 20
+#define N_LOGGING_DOMAINS 21
 
 /** This log message is not safe to send to a callback-based logger
  * immediately.  Used as a flag, not a log domain. */
@@ -145,6 +147,7 @@ void change_callback_log_severity(int loglevelMin, int loglevelMax,
                                   log_callback cb);
 void flush_pending_log_callbacks(void);
 void log_set_application_name(const char *name);
+void set_log_time_granularity(int granularity_msec);
 
 /* Outputs a message to stdout */
 void tor_log(int severity, log_domain_mask_t domain, const char *format, ...)
