@@ -30,7 +30,8 @@ int connection_edge_finished_connecting(edge_connection_t *conn);
 int connection_ap_handshake_send_begin(edge_connection_t *ap_conn);
 int connection_ap_handshake_send_resolve(edge_connection_t *ap_conn);
 
-edge_connection_t  *connection_ap_make_link(char *address, uint16_t port,
+edge_connection_t  *connection_ap_make_link(connection_t *partner,
+                                            char *address, uint16_t port,
                                             const char *digest,
                                             int use_begindir, int want_onehop);
 void connection_ap_handshake_socks_reply(edge_connection_t *conn, char *reply,
@@ -47,7 +48,8 @@ int connection_exit_begin_conn(cell_t *cell, circuit_t *circ);
 int connection_exit_begin_resolve(cell_t *cell, or_circuit_t *circ);
 void connection_exit_connect(edge_connection_t *conn);
 int connection_edge_is_rendezvous_stream(edge_connection_t *conn);
-int connection_ap_can_use_exit(edge_connection_t *conn, routerinfo_t *exit);
+int connection_ap_can_use_exit(edge_connection_t *conn,
+                               const node_t *exit);
 void connection_ap_expire_beginning(void);
 void connection_ap_attach_pending(void);
 void connection_ap_fail_onehop(const char *failed_digest,

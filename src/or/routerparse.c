@@ -70,7 +70,6 @@ typedef enum {
   K_V,
   K_W,
   K_M,
-  K_EVENTDNS,
   K_EXTRA_INFO,
   K_EXTRA_INFO_DIGEST,
   K_CACHES_EXTRA_INFO,
@@ -287,7 +286,6 @@ static token_rule_t routerdesc_token_table[] = {
 
   T01("family",              K_FAMILY,              ARGS,    NO_OBJ ),
   T01("caches-extra-info",   K_CACHES_EXTRA_INFO,   NO_ARGS, NO_OBJ ),
-  T01("eventdns",            K_EVENTDNS,            ARGS,    NO_OBJ ),
 
   T0N("opt",                 K_OPT,             CONCAT_ARGS, OBJ_OK ),
   T1( "bandwidth",           K_BANDWIDTH,           GE(3),   NO_OBJ ),
@@ -1357,7 +1355,6 @@ router_parse_entry_from_string(const char *s, const char *end,
   tor_assert(tok->n_args >= 5);
 
   router = tor_malloc_zero(sizeof(routerinfo_t));
-  router->country = -1;
   router->cache_info.routerlist_index = -1;
   router->cache_info.annotations_len = s-start_of_annotations + prepend_len;
   router->cache_info.signed_descriptor_len = end-s;
@@ -1498,13 +1495,6 @@ router_parse_entry_from_string(const char *s, const char *end,
     router->contact_info = tor_strdup(tok->args[0]);
   }
 
-  if ((tok = find_opt_by_keyword(tokens, K_EVENTDNS))) {
-    router->has_old_dnsworkers = tok->n_args && !strcmp(tok->args[0], "0");
-  } else if (router->platform) {
-    if (! tor_version_as_new_as(router->platform, "0.1.2.2-alpha"))
-      router->has_old_dnsworkers = 1;
-  }
-
   if (find_opt_by_keyword(tokens, K_REJECT6) ||
       find_opt_by_keyword(tokens, K_ACCEPT6)) {
     log_warn(LD_DIR, "Rejecting router with reject6/accept6 line: they crash "
@@ -1568,8 +1558,6 @@ router_parse_entry_from_string(const char *s, const char *end,
   if (check_signature_token(digest, DIGEST_LEN, tok, router->identity_pkey, 0,
                             "router descriptor") < 0)
     goto err;
-
-  routerinfo_set_country(router);
 
   if (!router->or_port) {
     log_warn(LD_DIR,"or_port unreadable or 0. Failing.");
@@ -1970,6 +1958,7 @@ routerstatus_parse_entry_from_string(memarea_t *area,
 
   if (!consensus_method)
     flav = FLAV_NS;
+  tor_assert(flav == FLAV_NS || flav == FLAV_MICRODESC);
 
   eos = find_start_of_next_routerstatus(*s);
 
@@ -1982,15 +1971,16 @@ routerstatus_parse_entry_from_string(memarea_t *area,
     goto err;
   }
   tok = find_by_keyword(tokens, K_R);
-  tor_assert(tok->n_args >= 7);
+  tor_assert(tok->n_args >= 7); /* guaranteed by GE(7) in K_R setup */
   if (flav == FLAV_NS) {
     if (tok->n_args < 8) {
       log_warn(LD_DIR, "Too few arguments to r");
       goto err;
     }
-  } else {
-    offset = -1;
+  } else if (flav == FLAV_MICRODESC) {
+    offset = -1; /* There is no identity digest */
   }
+
   if (vote_rs) {
     rs = &vote_rs->status;
   } else {
@@ -2064,7 +2054,7 @@ routerstatus_parse_entry_from_string(memarea_t *area,
       else if (!strcmp(tok->args[i], "Fast"))
         rs->is_fast = 1;
       else if (!strcmp(tok->args[i], "Running"))
-        rs->is_running = 1;
+        rs->is_flagged_running = 1;
       else if (!strcmp(tok->args[i], "Named"))
         rs->is_named = 1;
       else if (!strcmp(tok->args[i], "Valid"))
@@ -2166,6 +2156,16 @@ routerstatus_parse_entry_from_string(memarea_t *area,
         vote_rs->microdesc = line;
       }
     } SMARTLIST_FOREACH_END(t);
+  } else if (flav == FLAV_MICRODESC) {
+    tok = find_opt_by_keyword(tokens, K_M);
+    if (tok) {
+      tor_assert(tok->n_args);
+      if (digest256_from_base64(rs->descriptor_digest, tok->args[0])) {
+        log_warn(LD_DIR, "Error decoding microdescriptor digest %s",
+                 escaped(tok->args[0]));
+        goto err;
+      }
+    }
   }
 
   if (!strcasecmp(rs->nickname, UNNAMED_ROUTER_NICKNAME))
@@ -4347,7 +4347,7 @@ microdescs_parse_from_string(const char *s, const char *eos,
     }
 
     if ((tok = find_opt_by_keyword(tokens, K_P))) {
-      md->exitsummary = tor_strdup(tok->args[0]);
+      md->exit_policy = parse_short_policy(tok->args[0]);
     }
 
     crypto_digest256(md->digest, md->body, md->bodylen, DIGEST_SHA256);

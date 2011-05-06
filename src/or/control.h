@@ -53,7 +53,7 @@ int control_event_my_descriptor_changed(void);
 int control_event_networkstatus_changed(smartlist_t *statuses);
 
 int control_event_newconsensus(const networkstatus_t *consensus);
-int control_event_networkstatus_changed_single(routerstatus_t *rs);
+int control_event_networkstatus_changed_single(const routerstatus_t *rs);
 int control_event_general_status(int severity, const char *format, ...)
   CHECK_PRINTF(2,3);
 int control_event_client_status(int severity, const char *format, ...)
@@ -64,6 +64,7 @@ int control_event_guard(const char *nickname, const char *digest,
                         const char *status);
 int control_event_buildtimeout_set(const circuit_build_times_t *cbt,
                                    buildtimeout_set_event_t type);
+int control_event_signal(uintptr_t signal);
 
 int init_cookie_authentication(int enabled);
 smartlist_t *decode_hashed_passwords(config_line_t *passwords);

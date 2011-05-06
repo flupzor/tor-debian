@@ -19,6 +19,7 @@
 #include "connection_or.h"
 #include "control.h"
 #include "networkstatus.h"
+#include "nodelist.h"
 #include "onion.h"
 #include "relay.h"
 #include "rendclient.h"
@@ -86,10 +87,7 @@ orconn_circid_circuit_map_t *_last_circid_orconn_ent = NULL;
 /** Implementation helper for circuit_set_{p,n}_circid_orconn: A circuit ID
  * and/or or_connection for circ has just changed from <b>old_conn, old_id</b>
  * to <b>conn, id</b>.  Adjust the conn,circid map as appropriate, removing
- * the old entry (if any) and adding a new one.  If <b>active</b> is true,
- * remove the circuit from the list of active circuits on old_conn and add it
- * to the list of active circuits on conn.
- * XXX "active" isn't an arg anymore */
+ * the old entry (if any) and adding a new one. */
 static void
 circuit_set_circid_orconn_helper(circuit_t *circ, int direction,
                                  circid_t id,
@@ -1005,15 +1003,15 @@ circuit_find_to_cannibalize(uint8_t purpose, extend_info_t *info,
         if (info) {
           /* need to make sure we don't duplicate hops */
           crypt_path_t *hop = circ->cpath;
-          routerinfo_t *ri1 = router_get_by_digest(info->identity_digest);
+          const node_t *ri1 = node_get_by_id(info->identity_digest);
           do {
-            routerinfo_t *ri2;
+            const node_t *ri2;
             if (!memcmp(hop->extend_info->identity_digest,
                         info->identity_digest, DIGEST_LEN))
               goto next;
             if (ri1 &&
-                (ri2 = router_get_by_digest(hop->extend_info->identity_digest))
-                && routers_in_same_family(ri1, ri2))
+                (ri2 = node_get_by_id(hop->extend_info->identity_digest))
+                && nodes_in_same_family(ri1, ri2))
               goto next;
             hop=hop->next;
           } while (hop!=circ->cpath);

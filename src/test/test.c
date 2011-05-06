@@ -119,30 +119,46 @@ get_fname(const char *name)
   return buf;
 }
 
-/** Remove all files stored under the temporary directory, and the directory
- * itself.  Called by atexit(). */
+/* Remove a directory and all of its subdirectories */
 static void
-remove_directory(void)
+rm_rf(const char *dir)
 {
+  struct stat st;
   smartlist_t *elements;
-  if (getpid() != temp_dir_setup_in_pid) {
-    /* Only clean out the tempdir when the main process is exiting. */
-    return;
-  }
-  elements = tor_listdir(temp_dir);
+
+  elements = tor_listdir(dir);
   if (elements) {
     SMARTLIST_FOREACH(elements, const char *, cp,
        {
-         size_t len = strlen(cp)+strlen(temp_dir)+16;
-         char *tmp = tor_malloc(len);
-         tor_snprintf(tmp, len, "%s"PATH_SEPARATOR"%s", temp_dir, cp);
-         unlink(tmp);
+         char *tmp = NULL;
+         tor_asprintf(&tmp, "%s"PATH_SEPARATOR"%s", dir, cp);
+         if (0 == stat(tmp,&st) && (st.st_mode & S_IFDIR)) {
+           rm_rf(tmp);
+         } else {
+           if (unlink(tmp)) {
+             fprintf(stderr, "Error removing %s: %s\n", tmp, strerror(errno));
+           }
+         }
          tor_free(tmp);
        });
     SMARTLIST_FOREACH(elements, char *, cp, tor_free(cp));
     smartlist_free(elements);
   }
-  rmdir(temp_dir);
+  if (rmdir(dir))
+    fprintf(stderr, "Error removing directory %s: %s\n", dir, strerror(errno));
+}
+
+/** Remove all files stored under the temporary directory, and the directory
+ * itself.  Called by atexit(). */
+static void
+remove_directory(void)
+{
+  if (getpid() != temp_dir_setup_in_pid) {
+    /* Only clean out the tempdir when the main process is exiting. */
+    return;
+  }
+
+  rm_rf(temp_dir);
 }
 
 /** Define this if unit tests spend too much time generating public keys*/
@@ -566,6 +582,7 @@ test_policy_summary_helper(const char *policy_str,
   smartlist_t *policy = smartlist_create();
   char *summary = NULL;
   int r;
+  short_policy_t *short_policy = NULL;
 
   line.key = (char*)"foo";
   line.value = (char *)policy_str;
@@ -578,10 +595,14 @@ test_policy_summary_helper(const char *policy_str,
   test_assert(summary != NULL);
   test_streq(summary, expected_summary);
 
+  short_policy = parse_short_policy(summary);
+  tt_assert(short_policy);
+
  done:
   tor_free(summary);
   if (policy)
     addr_policy_list_free(policy);
+  short_policy_free(short_policy);
 }
 
 /** Run unit tests for generating summary lines of exit policies */
@@ -1089,7 +1110,8 @@ test_stats(void)
   char *s = NULL;
   int i;
 
-  /* We shouldn't collect exit stats without initializing them. */
+  /* Start with testing exit port statistics; we shouldn't collect exit
+   * stats without initializing them. */
   rep_hist_note_exit_stream_opened(80);
   rep_hist_note_exit_bytes(80, 100, 10000);
   s = rep_hist_format_exit_stats(now + 86400);
@@ -1134,7 +1156,7 @@ test_stats(void)
   test_assert(!s);
 
   /* Re-start stats, add some bytes, reset stats, and see what history we
-   *  get when observing no streams or bytes at all. */
+   * get when observing no streams or bytes at all. */
   rep_hist_exit_stats_init(now);
   rep_hist_note_exit_stream_opened(80);
   rep_hist_note_exit_bytes(80, 100, 10000);
@@ -1144,6 +1166,41 @@ test_stats(void)
              "exit-kibibytes-written other=0\n"
              "exit-kibibytes-read other=0\n"
              "exit-streams-opened other=0\n", s);
+  tor_free(s);
+
+  /* Continue with testing connection statistics; we shouldn't collect
+   * conn stats without initializing them. */
+  rep_hist_note_or_conn_bytes(1, 20, 400, now);
+  s = rep_hist_format_conn_stats(now + 86400);
+  test_assert(!s);
+
+  /* Initialize stats, note bytes, and generate history string. */
+  rep_hist_conn_stats_init(now);
+  rep_hist_note_or_conn_bytes(1, 30000, 400000, now);
+  rep_hist_note_or_conn_bytes(1, 30000, 400000, now + 5);
+  rep_hist_note_or_conn_bytes(2, 400000, 30000, now + 10);
+  rep_hist_note_or_conn_bytes(2, 400000, 30000, now + 15);
+  s = rep_hist_format_conn_stats(now + 86400);
+  test_streq("conn-bi-direct 2010-08-12 13:27:30 (86400 s) 0,0,1,0\n", s);
+  tor_free(s);
+
+  /* Stop collecting stats, add some bytes, and ensure we don't generate
+   * a history string. */
+  rep_hist_conn_stats_term();
+  rep_hist_note_or_conn_bytes(2, 400000, 30000, now + 15);
+  s = rep_hist_format_conn_stats(now + 86400);
+  test_assert(!s);
+
+  /* Re-start stats, add some bytes, reset stats, and see what history we
+   * get when observing no bytes at all. */
+  rep_hist_conn_stats_init(now);
+  rep_hist_note_or_conn_bytes(1, 30000, 400000, now);
+  rep_hist_note_or_conn_bytes(1, 30000, 400000, now + 5);
+  rep_hist_note_or_conn_bytes(2, 400000, 30000, now + 10);
+  rep_hist_note_or_conn_bytes(2, 400000, 30000, now + 15);
+  rep_hist_reset_conn_stats(now);
+  s = rep_hist_format_conn_stats(now + 86400);
+  test_streq("conn-bi-direct 2010-08-12 13:27:30 (86400 s) 0,0,0,0\n", s);
 
  done:
   tor_free(s);
@@ -1203,6 +1260,7 @@ extern struct testcase_t crypto_tests[];
 extern struct testcase_t container_tests[];
 extern struct testcase_t util_tests[];
 extern struct testcase_t dir_tests[];
+extern struct testcase_t microdesc_tests[];
 
 static struct testgroup_t testgroups[] = {
   { "", test_array },
@@ -1211,6 +1269,7 @@ static struct testgroup_t testgroups[] = {
   { "container/", container_tests },
   { "util/", util_tests },
   { "dir/", dir_tests },
+  { "dir/md/", microdesc_tests },
   END_OF_GROUPS
 };
 

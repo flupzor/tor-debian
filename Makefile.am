@@ -3,15 +3,22 @@
 # Copyright (c) 2007-2011, The Tor Project, Inc.
 # See LICENSE for licensing information
 
+# "foreign" means we don't follow GNU package layout standards
+# 1.7 means we require automake vesion 1.7
 AUTOMAKE_OPTIONS = foreign 1.7
- # else it keeps trying to put COPYING back in
 
 SUBDIRS = src doc contrib
 
 DIST_SUBDIRS = src doc contrib
 
-EXTRA_DIST = INSTALL README LICENSE ChangeLog          \
-             ReleaseNotes tor.spec tor.spec.in
+EXTRA_DIST = \
+	ChangeLog					\
+	INSTALL						\
+	LICENSE						\
+	README						\
+	ReleaseNotes					\
+	tor.spec					\
+	tor.spec.in
 
 #install-data-local:
 #	$(INSTALL) -m 755 -d $(LOCALSTATEDIR)/lib/tor
@@ -47,9 +54,13 @@ test: all
 check-spaces:
 	./contrib/checkSpace.pl -C                    \
 	        src/common/*.h                        \
-		src/common/[^asO]*.c src/common/address.c \
-		src/or/[^e]*.[ch] src/or/eventdns_tor.h \
-		src/test/test*.[ch] src/tools/*.[ch]
+		src/common/[^asO]*.c                  \
+                src/common/address.c                  \
+		src/or/[^e]*.[ch]                     \
+                src/or/eventdns_tor.h                 \
+		src/test/test*.[ch]                   \
+                src/tools/*.[ch]                      \
+		src/tools/tor-fw-helper/*.[ch]
 
 check-docs:
 	./contrib/checkOptionDocs.pl

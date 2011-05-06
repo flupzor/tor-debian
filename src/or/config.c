@@ -44,6 +44,8 @@ typedef enum config_type_t {
   CONFIG_TYPE_FILENAME,     /**< A filename: some prefixes get expanded. */
   CONFIG_TYPE_UINT,         /**< A non-negative integer less than MAX_INT */
   CONFIG_TYPE_INTERVAL,     /**< A number of seconds, with optional units*/
+  CONFIG_TYPE_MSEC_INTERVAL,/**< A number of milliseconds, with optional
+                              * units */
   CONFIG_TYPE_MEMUNIT,      /**< A number of bytes, with optional units*/
   CONFIG_TYPE_DOUBLE,       /**< A floating-point value */
   CONFIG_TYPE_BOOL,         /**< A boolean value, expressed as 0 or 1. */
@@ -199,6 +201,7 @@ static config_var_t _option_vars[] = {
   V(ClientOnly,                  BOOL,     "0"),
   V(ConsensusParams,             STRING,   NULL),
   V(ConnLimit,                   UINT,     "1000"),
+  V(ConnDirectionStatistics,     BOOL,     "0"),
   V(ConstrainedSockets,          BOOL,     "0"),
   V(ConstrainedSockSize,         MEMUNIT,  "8192"),
   V(ContactInfo,                 STRING,   NULL),
@@ -208,6 +211,7 @@ static config_var_t _option_vars[] = {
   V(CookieAuthentication,        BOOL,     "0"),
   V(CookieAuthFileGroupReadable, BOOL,     "0"),
   V(CookieAuthFile,              STRING,   NULL),
+  V(CountPrivateBandwidth,       BOOL,     "0"),
   V(DataDirectory,               FILENAME, NULL),
   OBSOLETE("DebugLogFile"),
   V(DirAllowPrivateAddresses,    BOOL,     NULL),
@@ -222,9 +226,10 @@ static config_var_t _option_vars[] = {
   OBSOLETE("DirRecordUsageGranularity"),
   OBSOLETE("DirRecordUsageRetainIPs"),
   OBSOLETE("DirRecordUsageSaveInterval"),
-  V(DirReqStatistics,            BOOL,     "0"),
+  V(DirReqStatistics,            BOOL,     "1"),
   VAR("DirServer",               LINELIST, DirServers, NULL),
   V(DisableAllSwap,              BOOL,     "0"),
+  V(DisableIOCP,                 BOOL,     "1"),
   V(DNSPort,                     UINT,     "0"),
   V(DNSListenAddress,            LINELIST, NULL),
   V(DownloadExtraInfo,           BOOL,     "0"),
@@ -239,7 +244,7 @@ static config_var_t _option_vars[] = {
   V(ExitPolicy,                  LINELIST, NULL),
   V(ExitPolicyRejectPrivate,     BOOL,     "1"),
   V(ExitPortStatistics,          BOOL,     "0"),
-  V(ExtraInfoStatistics,         BOOL,     "0"),
+  V(ExtraInfoStatistics,         BOOL,     "1"),
 
 #if defined (WINCE)
   V(FallbackNetworkstatusFile,   FILENAME, "fallback-consensus"),
@@ -263,6 +268,7 @@ static config_var_t _option_vars[] = {
 #endif
   OBSOLETE("Group"),
   V(HardwareAccel,               BOOL,     "0"),
+  V(HeartbeatPeriod,             INTERVAL, "6 hours"),
   V(AccelName,                   STRING,   NULL),
   V(AccelDir,                    FILENAME, NULL),
   V(HashedControlPassword,       LINELIST, NULL),
@@ -292,6 +298,7 @@ static config_var_t _option_vars[] = {
   OBSOLETE("LinkPadding"),
   OBSOLETE("LogLevel"),
   OBSOLETE("LogFile"),
+  V(LogTimeGranularity,          MSEC_INTERVAL, "1 second"),
   V(LongLivedPorts,              CSV,
                          "21,22,706,1863,5050,5190,5222,5223,6667,6697,8300"),
   VAR("MapAddress",              LINELIST, AddressMap,           NULL),
@@ -308,7 +315,7 @@ static config_var_t _option_vars[] = {
   V(WarnUnsafeSocks,              BOOL,     "1"),
   OBSOLETE("NoPublish"),
   VAR("NodeFamily",              LINELIST, NodeFamilies,         NULL),
-  V(NumCPUs,                     UINT,     "1"),
+  V(NumCPUs,                     UINT,     "0"),
   V(NumEntryGuards,              UINT,     "3"),
   V(ORListenAddress,             LINELIST, NULL),
   V(ORPort,                      UINT,     "0"),
@@ -318,6 +325,8 @@ static config_var_t _option_vars[] = {
   V(PerConnBWRate,               MEMUNIT,  "0"),
   V(PidFile,                     STRING,   NULL),
   V(TestingTorNetwork,           BOOL,     "0"),
+  V(PortForwarding,              BOOL,     "0"),
+  V(PortForwardingHelper,        FILENAME, "tor-fw-helper"),
   V(PreferTunneledDirConns,      BOOL,     "1"),
   V(ProtocolWarnings,            BOOL,     "0"),
   V(PublishServerDescriptor,     CSV,      "1"),
@@ -386,6 +395,7 @@ static config_var_t _option_vars[] = {
   VAR("VersioningAuthoritativeDirectory",BOOL,VersioningAuthoritativeDir, "0"),
   V(VirtualAddrNetwork,          STRING,   "127.192.0.0/10"),
   V(WarnPlaintextPorts,          CSV,      "23,109,110,143"),
+  V(_UseFilteringSSLBufferevents, BOOL,    "0"),
   VAR("__ReloadTorrcOnSIGHUP",   BOOL,  ReloadTorrcOnSIGHUP,      "1"),
   VAR("__AllDirActionsPrivate",  BOOL,  AllDirActionsPrivate,     "0"),
   VAR("__DisablePredictedCircuits",BOOL,DisablePredictedCircuits, "0"),
@@ -409,6 +419,7 @@ static config_var_t testing_tor_network_defaults[] = {
   V(AuthDirMaxServersPerAuthAddr,UINT,     "0"),
   V(ClientDNSRejectInternalAddresses, BOOL,"0"),
   V(ClientRejectInternalAddresses, BOOL,   "0"),
+  V(CountPrivateBandwidth,       BOOL,     "1"),
   V(ExitPolicyRejectPrivate,     BOOL,     "0"),
   V(V3AuthVotingInterval,        INTERVAL, "5 minutes"),
   V(V3AuthVoteDelay,             INTERVAL, "20 seconds"),
@@ -420,6 +431,7 @@ static config_var_t testing_tor_network_defaults[] = {
   V(TestingEstimatedDescriptorPropagationTime, INTERVAL, "0 minutes"),
   V(MinUptimeHidServDirectoryV2, INTERVAL, "0 minutes"),
   V(_UsingTestNetworkDefaults,   BOOL,     "1"),
+
   { NULL, CONFIG_TYPE_OBSOLETE, 0, NULL }
 };
 #undef VAR
@@ -564,8 +576,9 @@ static int is_listening_on_low_port(uint16_t port_option,
                                     const config_line_t *listen_options);
 
 static uint64_t config_parse_memunit(const char *s, int *ok);
+static int config_parse_msec_interval(const char *s, int *ok);
 static int config_parse_interval(const char *s, int *ok);
-static void init_libevent(void);
+static void init_libevent(const or_options_t *options);
 static int opt_streq(const char *s1, const char *s2);
 
 /** Magic value for or_options_t. */
@@ -699,6 +712,11 @@ or_options_free(or_options_t *options)
     return;
 
   routerset_free(options->_ExcludeExitNodesUnion);
+  if (options->NodeFamilySets) {
+    SMARTLIST_FOREACH(options->NodeFamilySets, routerset_t *,
+                      rs, routerset_free(rs));
+    smartlist_free(options->NodeFamilySets);
+  }
   config_free(&options_format, options);
 }
 
@@ -966,7 +984,7 @@ options_act_reversible(or_options_t *old_options, char **msg)
     /* Set up libevent.  (We need to do this before we can register the
      * listeners as listeners.) */
     if (running_tor && !libevent_initialized) {
-      init_libevent();
+      init_libevent(options);
       libevent_initialized = 1;
     }
 
@@ -1242,6 +1260,17 @@ options_act(or_options_t *old_options)
   if (accounting_is_enabled(options))
     configure_accounting(time(NULL));
 
+#ifdef USE_BUFFEREVENTS
+  /* If we're using the bufferevents implementation and our rate limits
+   * changed, we need to tell the rate-limiting system about it. */
+  if (!old_options ||
+      old_options->BandwidthRate != options->BandwidthRate ||
+      old_options->BandwidthBurst != options->BandwidthBurst ||
+      old_options->RelayBandwidthRate != options->RelayBandwidthRate ||
+      old_options->RelayBandwidthBurst != options->RelayBandwidthBurst)
+    connection_bucket_init();
+#endif
+
   /* parse RefuseUnknownExits tristate */
   if (!strcmp(options->RefuseUnknownExits, "0"))
     options->RefuseUnknownExits_ = 0;
@@ -1350,44 +1379,54 @@ options_act(or_options_t *old_options)
     tor_free(actual_fname);
   }
 
-  if (options->DirReqStatistics && !geoip_is_loaded()) {
-    /* Check if GeoIP database could be loaded. */
-    log_warn(LD_CONFIG, "Configured to measure directory request "
-             "statistics, but no GeoIP database found!");
-    return -1;
-  }
-
-  if (options->EntryStatistics) {
-    if (should_record_bridge_info(options)) {
-      /* Don't allow measuring statistics on entry guards when configured
-       * as bridge. */
-      log_warn(LD_CONFIG, "Bridges cannot be configured to measure "
-               "additional GeoIP statistics as entry guards.");
-      return -1;
-    } else if (!geoip_is_loaded()) {
-      /* Check if GeoIP database could be loaded. */
-      log_warn(LD_CONFIG, "Configured to measure entry node statistics, "
-               "but no GeoIP database found!");
-      return -1;
-    }
-  }
-
   if (options->CellStatistics || options->DirReqStatistics ||
-      options->EntryStatistics || options->ExitPortStatistics) {
+      options->EntryStatistics || options->ExitPortStatistics ||
+      options->ConnDirectionStatistics) {
     time_t now = time(NULL);
+    int print_notice = 0;
     if ((!old_options || !old_options->CellStatistics) &&
-        options->CellStatistics)
+        options->CellStatistics) {
       rep_hist_buffer_stats_init(now);
+      print_notice = 1;
+    }
     if ((!old_options || !old_options->DirReqStatistics) &&
-        options->DirReqStatistics)
-      geoip_dirreq_stats_init(now);
+        options->DirReqStatistics) {
+      if (geoip_is_loaded()) {
+        geoip_dirreq_stats_init(now);
+        print_notice = 1;
+      } else {
+        options->DirReqStatistics = 0;
+        /* Don't warn Tor clients, they don't use statistics */
+        if (options->ORPort)
+          log_notice(LD_CONFIG, "Configured to measure directory request "
+                                "statistics, but no GeoIP database found. "
+                                "Please specify a GeoIP database using the "
+                                "GeoIPFile option.");
+      }
+    }
     if ((!old_options || !old_options->EntryStatistics) &&
-        options->EntryStatistics)
-      geoip_entry_stats_init(now);
+        options->EntryStatistics && !should_record_bridge_info(options)) {
+      if (geoip_is_loaded()) {
+        geoip_entry_stats_init(now);
+        print_notice = 1;
+      } else {
+        options->EntryStatistics = 0;
+        log_notice(LD_CONFIG, "Configured to measure entry node "
+                              "statistics, but no GeoIP database found. "
+                              "Please specify a GeoIP database using the "
+                              "GeoIPFile option.");
+      }
+    }
     if ((!old_options || !old_options->ExitPortStatistics) &&
-        options->ExitPortStatistics)
+        options->ExitPortStatistics) {
       rep_hist_exit_stats_init(now);
-    if (!old_options)
+      print_notice = 1;
+    }
+    if ((!old_options || !old_options->ConnDirectionStatistics) &&
+        options->ConnDirectionStatistics) {
+      rep_hist_conn_stats_init(now);
+    }
+    if (print_notice)
       log_notice(LD_CONFIG, "Configured to measure statistics. Look for "
                  "the *-stats files that will first be written to the "
                  "data directory in 24 hours from now.");
@@ -1405,6 +1444,9 @@ options_act(or_options_t *old_options)
   if (old_options && old_options->ExitPortStatistics &&
       !options->ExitPortStatistics)
     rep_hist_exit_stats_term();
+  if (old_options && old_options->ConnDirectionStatistics &&
+      !options->ConnDirectionStatistics)
+    rep_hist_conn_stats_term();
 
   /* Check if we need to parse and add the EntryNodes config option. */
   if (options->EntryNodes &&
@@ -1711,6 +1753,18 @@ config_assign_value(config_format_t *fmt, or_options_t *options,
     break;
   }
 
+  case CONFIG_TYPE_MSEC_INTERVAL: {
+    i = config_parse_msec_interval(c->value, &ok);
+    if (!ok) {
+      tor_asprintf(msg,
+          "Msec interval '%s %s' is malformed or out of bounds.",
+          c->key, c->value);
+      return -1;
+    }
+    *(int *)lvalue = i;
+    break;
+  }
+
   case CONFIG_TYPE_MEMUNIT: {
     uint64_t u64 = config_parse_memunit(c->value, &ok);
     if (!ok) {
@@ -1998,6 +2052,7 @@ get_assigned_option(config_format_t *fmt, void *options,
       escape_val = 0; /* Can't need escape. */
       break;
     case CONFIG_TYPE_INTERVAL:
+    case CONFIG_TYPE_MSEC_INTERVAL:
     case CONFIG_TYPE_UINT:
       /* This means every or_options_t uint or bool element
        * needs to be an int. Not, say, a uint16_t or char. */
@@ -2225,6 +2280,7 @@ option_clear(config_format_t *fmt, or_options_t *options, config_var_t *var)
       *(time_t*)lvalue = 0;
       break;
     case CONFIG_TYPE_INTERVAL:
+    case CONFIG_TYPE_MSEC_INTERVAL:
     case CONFIG_TYPE_UINT:
     case CONFIG_TYPE_BOOL:
       *(int*)lvalue = 0;
@@ -2331,7 +2387,7 @@ resolve_my_address(int warn_severity, or_options_t *options,
   int explicit_ip=1;
   int explicit_hostname=1;
   int from_interface=0;
-  char tmpbuf[INET_NTOA_BUF_LEN];
+  char *addr_string = NULL;
   const char *address = options->Address;
   int notice_severity = warn_severity <= LOG_NOTICE ?
                           LOG_NOTICE : warn_severity;
@@ -2373,48 +2429,43 @@ resolve_my_address(int warn_severity, or_options_t *options,
         return -1;
       }
       from_interface = 1;
-      in.s_addr = htonl(interface_ip);
-      tor_inet_ntoa(&in,tmpbuf,sizeof(tmpbuf));
+      addr = interface_ip;
       log_fn(notice_severity, LD_CONFIG, "Learned IP address '%s' for "
-             "local interface. Using that.", tmpbuf);
+             "local interface. Using that.", fmt_addr32(addr));
       strlcpy(hostname, "<guessed from interfaces>", sizeof(hostname));
     } else { /* resolved hostname into addr */
-      in.s_addr = htonl(addr);
-
       if (!explicit_hostname &&
-          is_internal_IP(ntohl(in.s_addr), 0)) {
+          is_internal_IP(addr, 0)) {
         uint32_t interface_ip;
 
-        tor_inet_ntoa(&in,tmpbuf,sizeof(tmpbuf));
         log_fn(notice_severity, LD_CONFIG, "Guessed local hostname '%s' "
-               "resolves to a private IP address (%s).  Trying something "
-               "else.", hostname, tmpbuf);
+               "resolves to a private IP address (%s). Trying something "
+               "else.", hostname, fmt_addr32(addr));
 
         if (get_interface_address(warn_severity, &interface_ip)) {
           log_fn(warn_severity, LD_CONFIG,
                  "Could not get local interface IP address. Too bad.");
         } else if (is_internal_IP(interface_ip, 0)) {
-          struct in_addr in2;
-          in2.s_addr = htonl(interface_ip);
-          tor_inet_ntoa(&in2,tmpbuf,sizeof(tmpbuf));
           log_fn(notice_severity, LD_CONFIG,
                  "Interface IP address '%s' is a private address too. "
-                 "Ignoring.", tmpbuf);
+                 "Ignoring.", fmt_addr32(interface_ip));
         } else {
           from_interface = 1;
-          in.s_addr = htonl(interface_ip);
-          tor_inet_ntoa(&in,tmpbuf,sizeof(tmpbuf));
+          addr = interface_ip;
           log_fn(notice_severity, LD_CONFIG,
                  "Learned IP address '%s' for local interface."
-                 " Using that.", tmpbuf);
+                 " Using that.", fmt_addr32(addr));
           strlcpy(hostname, "<guessed from interfaces>", sizeof(hostname));
         }
       }
     }
+  } else {
+    addr = ntohl(in.s_addr); /* set addr so that addr_string is not
+                              * illformed */
   }
 
-  tor_inet_ntoa(&in,tmpbuf,sizeof(tmpbuf));
-  if (is_internal_IP(ntohl(in.s_addr), 0)) {
+  addr_string = tor_dup_ip(addr);
+  if (is_internal_IP(addr, 0)) {
     /* make sure we're ok with publishing an internal IP */
     if (!options->DirServers && !options->AlternateDirAuthority) {
       /* if they are using the default dirservers, disallow internal IPs
@@ -2422,7 +2473,8 @@ resolve_my_address(int warn_severity, or_options_t *options,
       log_fn(warn_severity, LD_CONFIG,
              "Address '%s' resolves to private IP address '%s'. "
              "Tor servers that use the default DirServers must have public "
-             "IP addresses.", hostname, tmpbuf);
+             "IP addresses.", hostname, addr_string);
+      tor_free(addr_string);
       return -1;
     }
     if (!explicit_ip) {
@@ -2430,19 +2482,20 @@ resolve_my_address(int warn_severity, or_options_t *options,
        * they're using an internal address. */
       log_fn(warn_severity, LD_CONFIG, "Address '%s' resolves to private "
              "IP address '%s'. Please set the Address config option to be "
-             "the IP address you want to use.", hostname, tmpbuf);
+             "the IP address you want to use.", hostname, addr_string);
+      tor_free(addr_string);
       return -1;
     }
   }
 
-  log_debug(LD_CONFIG, "Resolved Address to '%s'.", tmpbuf);
-  *addr_out = ntohl(in.s_addr);
+  log_debug(LD_CONFIG, "Resolved Address to '%s'.", fmt_addr32(addr));
+  *addr_out = addr;
   if (last_resolved_addr && last_resolved_addr != *addr_out) {
     /* Leave this as a notice, regardless of the requested severity,
      * at least until dynamic IP address support becomes bulletproof. */
     log_notice(LD_NET,
                "Your IP address seems to have changed to %s. Updating.",
-               tmpbuf);
+               addr_string);
     ip_address_changed(0);
   }
   if (last_resolved_addr != *addr_out) {
@@ -2461,11 +2514,12 @@ resolve_my_address(int warn_severity, or_options_t *options,
     }
     control_event_server_status(LOG_NOTICE,
                                 "EXTERNAL_ADDRESS ADDRESS=%s METHOD=%s %s%s",
-                                tmpbuf, method, h?"HOSTNAME=":"", h);
+                                addr_string, method, h?"HOSTNAME=":"", h);
   }
   last_resolved_addr = *addr_out;
   if (hostname_out)
     *hostname_out = tor_strdup(hostname);
+  tor_free(addr_string);
   return 0;
 }
 
@@ -2824,6 +2878,10 @@ compute_publishserverdescriptor(or_options_t *options)
  * will generate too many circuits and potentially overload the network. */
 #define MIN_CIRCUIT_STREAM_TIMEOUT 10
 
+/** Lowest allowable value for HeartbeatPeriod; if this is too low, we might
+ * expose more information than we're comfortable with. */
+#define MIN_HEARTBEAT_PERIOD (30*60)
+
 /** Return 0 if every setting in <b>options</b> is reasonable, and a
  * permissible transition from <b>old_options</b>. Else return -1.
  * Should have no side effects, except for normalizing the contents of
@@ -3017,15 +3075,22 @@ options_validate(or_options_t *old_options, or_options_t *options,
     routerset_union(options->_ExcludeExitNodesUnion,options->ExcludeNodes);
   }
 
+  if (options->NodeFamilies) {
+    options->NodeFamilySets = smartlist_create();
+    for (cl = options->NodeFamilies; cl; cl = cl->next) {
+      routerset_t *rs = routerset_new();
+      if (routerset_parse(rs, cl->value, cl->key) == 0) {
+        smartlist_add(options->NodeFamilySets, rs);
+      } else {
+        routerset_free(rs);
+      }
+    }
+  }
+
   if (options->ExcludeNodes && options->StrictNodes) {
     COMPLAIN("You have asked to exclude certain relays from all positions "
              "in your circuits. Expect hidden services and other Tor "
              "features to be broken in unpredictable ways.");
-  }
-
-  if (options->EntryNodes && !routerset_is_list(options->EntryNodes)) {
-    /* XXXX fix this; see entry_guards_prepend_from_config(). */
-    REJECT("IPs or countries are not yet supported in EntryNodes.");
   }
 
   if (options->AuthoritativeDir) {
@@ -3282,6 +3347,13 @@ options_validate(or_options_t *old_options, or_options_t *options,
     options->CircuitStreamTimeout = MIN_CIRCUIT_STREAM_TIMEOUT;
   }
 
+  if (options->HeartbeatPeriod &&
+      options->HeartbeatPeriod < MIN_HEARTBEAT_PERIOD) {
+    log_warn(LD_CONFIG, "HeartbeatPeriod option is too short; "
+             "raising to %d seconds.", MIN_HEARTBEAT_PERIOD);
+    options->HeartbeatPeriod = MIN_HEARTBEAT_PERIOD;
+  }
+
   if (options->KeepalivePeriod < 1)
     REJECT("KeepalivePeriod option must be positive.");
 
@@ -3488,10 +3560,9 @@ options_validate(or_options_t *old_options, or_options_t *options,
   }
 
   if (options->CookieAuthFileGroupReadable && !options->CookieAuthFile) {
-    log_warn(LD_CONFIG, "You set the CookieAuthFileGroupReadable but did "
-             "not configure a the path for the cookie file via "
-             "CookieAuthFile. This means your cookie will not be group "
-             "readable.");
+    log_warn(LD_CONFIG, "CookieAuthFileGroupReadable is set, but will have "
+             "no effect: you must specify an explicit CookieAuthFile to "
+             "have it group-readable.");
   }
 
   if (options->UseEntryGuards && ! options->NumEntryGuards)
@@ -3500,8 +3571,12 @@ options_validate(or_options_t *old_options, or_options_t *options,
   if (check_nickname_list(options->MyFamily, "MyFamily", msg))
     return -1;
   for (cl = options->NodeFamilies; cl; cl = cl->next) {
-    if (check_nickname_list(cl->value, "NodeFamily", msg))
+    routerset_t *rs = routerset_new();
+    if (routerset_parse(rs, cl->value, cl->key)) {
+      routerset_free(rs);
       return -1;
+    }
+    routerset_free(rs);
   }
 
   if (validate_addr_policies(options, msg) < 0)
@@ -3996,6 +4071,8 @@ load_torrc_from_disk(int argc, char **argv)
           "Unable to open configuration file \"%s\".", fname);
       goto err;
     }
+  } else {
+    log(LOG_NOTICE, LD_CONFIG, "Read configuration file \"%s\".", fname);
   }
 
   return cf;
@@ -4283,6 +4360,35 @@ options_init_logs(or_options_t *options, int validate_only)
 #else
                options->RunAsDaemon;
 #endif
+
+  if (options->LogTimeGranularity <= 0) {
+    log_warn(LD_CONFIG, "Log time granularity '%d' has to be positive.",
+             options->LogTimeGranularity);
+    return -1;
+  } else if (1000 % options->LogTimeGranularity != 0 &&
+             options->LogTimeGranularity % 1000 != 0) {
+    int granularity = options->LogTimeGranularity;
+    if (granularity < 40) {
+      do granularity++;
+      while (1000 % granularity != 0);
+    } else if (granularity < 1000) {
+      granularity = 1000 / granularity;
+      while (1000 % granularity != 0)
+        granularity--;
+      granularity = 1000 / granularity;
+    } else {
+      granularity = 1000 * ((granularity / 1000) + 1);
+    }
+    log_warn(LD_CONFIG, "Log time granularity '%d' has to be either a "
+                        "divisor or a multiple of 1 second. Changing to "
+                        "'%d'.",
+             options->LogTimeGranularity, granularity);
+    if (!validate_only)
+      set_log_time_granularity(granularity);
+  } else {
+    if (!validate_only)
+      set_log_time_granularity(options->LogTimeGranularity);
+  }
 
   ok = 1;
   elts = smartlist_create();
@@ -4777,6 +4883,26 @@ static struct unit_table_t time_units[] = {
   { NULL, 0 },
 };
 
+/** Table to map the names of time units to the number of milliseconds
+ * they contain. */
+static struct unit_table_t time_msec_units[] = {
+  { "",         1 },
+  { "msec",     1 },
+  { "millisecond", 1 },
+  { "milliseconds", 1 },
+  { "second",   1000 },
+  { "seconds",  1000 },
+  { "minute",   60*1000 },
+  { "minutes",  60*1000 },
+  { "hour",     60*60*1000 },
+  { "hours",    60*60*1000 },
+  { "day",      24*60*60*1000 },
+  { "days",     24*60*60*1000 },
+  { "week",     7*24*60*60*1000 },
+  { "weeks",    7*24*60*60*1000 },
+  { NULL, 0 },
+};
+
 /** Parse a string <b>val</b> containing a number, zero or more
  * spaces, and an optional unit string.  If the unit appears in the
  * table <b>u</b>, then multiply the number by the unit multiplier.
@@ -4840,6 +4966,25 @@ config_parse_memunit(const char *s, int *ok)
   return u;
 }
 
+/** Parse a string in the format "number unit", where unit is a unit of
+ * time in milliseconds.  On success, set *<b>ok</b> to true and return
+ * the number of milliseconds in the provided interval.  Otherwise, set
+ * *<b>ok</b> to 0 and return -1. */
+static int
+config_parse_msec_interval(const char *s, int *ok)
+{
+  uint64_t r;
+  r = config_parse_units(s, time_msec_units, ok);
+  if (!ok)
+    return -1;
+  if (r > INT_MAX) {
+    log_warn(LD_CONFIG, "Msec interval '%s' is too long", s);
+    *ok = 0;
+    return -1;
+  }
+  return (int)r;
+}
+
 /** Parse a string in the format "number unit", where unit is a unit of time.
  * On success, set *<b>ok</b> to true and return the number of seconds in
  * the provided interval.  Otherwise, set *<b>ok</b> to 0 and return -1.
@@ -4859,13 +5004,29 @@ config_parse_interval(const char *s, int *ok)
   return (int)r;
 }
 
+/** Return the number of cpus configured in <b>options</b>.  If we are
+ * told to auto-detect the number of cpus, return the auto-detected number. */
+int
+get_num_cpus(const or_options_t *options)
+{
+  if (options->NumCPUs == 0) {
+    int n = compute_num_cpus();
+    return (n >= 1) ? n : 1;
+  } else {
+    return options->NumCPUs;
+  }
+}
+
 /**
  * Initialize the libevent library.
  */
 static void
-init_libevent(void)
+init_libevent(const or_options_t *options)
 {
   const char *badness=NULL;
+  tor_libevent_cfg cfg;
+
+  tor_assert(options);
 
   configure_libevent_logging();
   /* If the kernel complains that some method (say, epoll) doesn't
@@ -4875,7 +5036,11 @@ init_libevent(void)
 
   tor_check_libevent_header_compatibility();
 
-  tor_libevent_initialize();
+  memset(&cfg, 0, sizeof(cfg));
+  cfg.disable_iocp = options->DisableIOCP;
+  cfg.num_cpus = get_num_cpus(options);
+
+  tor_libevent_initialize(&cfg);
 
   suppress_libevent_log_msg(NULL);
 
@@ -5239,6 +5404,7 @@ getinfo_helper_config(control_connection_t *conn,
         case CONFIG_TYPE_FILENAME: type = "Filename"; break;
         case CONFIG_TYPE_UINT: type = "Integer"; break;
         case CONFIG_TYPE_INTERVAL: type = "TimeInterval"; break;
+        case CONFIG_TYPE_MSEC_INTERVAL: type = "TimeMsecInterval"; break;
         case CONFIG_TYPE_MEMUNIT: type = "DataSize"; break;
         case CONFIG_TYPE_DOUBLE: type = "Float"; break;
         case CONFIG_TYPE_BOOL: type = "Boolean"; break;

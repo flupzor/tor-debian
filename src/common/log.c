@@ -154,6 +154,17 @@ log_set_application_name(const char *name)
   appname = name ? tor_strdup(name) : NULL;
 }
 
+/** Log time granularity in milliseconds. */
+static int log_time_granularity = 1;
+
+/** Define log time granularity for all logs to be <b>granularity_msec</b>
+ * milliseconds. */
+void
+set_log_time_granularity(int granularity_msec)
+{
+  log_time_granularity = granularity_msec;
+}
+
 /** Helper: Write the standard prefix for log lines to a
  * <b>buf_len</b> character buffer in <b>buf</b>.
  */
@@ -164,14 +175,22 @@ _log_prefix(char *buf, size_t buf_len, int severity)
   struct timeval now;
   struct tm tm;
   size_t n;
-  int r;
+  int r, ms;
 
   tor_gettimeofday(&now);
   t = (time_t)now.tv_sec;
+  ms = (int)now.tv_usec / 1000;
+  if (log_time_granularity >= 1000) {
+    t -= t % (log_time_granularity / 1000);
+    ms = 0;
+  } else {
+    ms -= ((int)now.tv_usec / 1000) % log_time_granularity;
+  }
 
   n = strftime(buf, buf_len, "%b %d %H:%M:%S", tor_localtime_r(&t, &tm));
-  r = tor_snprintf(buf+n, buf_len-n, ".%.3i [%s] ",
-                   (int)now.tv_usec / 1000, sev_to_string(severity));
+  r = tor_snprintf(buf+n, buf_len-n, ".%.3i [%s] ", ms,
+                   sev_to_string(severity));
+
   if (r<0)
     return buf_len-1;
   else
@@ -703,7 +722,7 @@ change_callback_log_severity(int loglevelMin, int loglevelMax,
   UNLOCK_LOGS();
 }
 
-/** If there are any log messages that were genered with LD_NOCB waiting to
+/** If there are any log messages that were generated with LD_NOCB waiting to
  * be sent to callback-based loggers, send them now. */
 void
 flush_pending_log_callbacks(void)
@@ -803,7 +822,7 @@ add_file_log(const log_severity_list_t *severity, const char *filename)
   int fd;
   logfile_t *lf;
 
-  fd = open(filename, O_WRONLY|O_CREAT|O_APPEND, 0644);
+  fd = tor_open_cloexec(filename, O_WRONLY|O_CREAT|O_APPEND, 0644);
   if (fd<0)
     return -1;
   if (tor_fd_seekend(fd)<0)

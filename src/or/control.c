@@ -26,11 +26,17 @@
 #include "hibernate.h"
 #include "main.h"
 #include "networkstatus.h"
+#include "nodelist.h"
 #include "policies.h"
 #include "reasons.h"
 #include "router.h"
 #include "routerlist.h"
 #include "routerparse.h"
+
+#ifndef MS_WINDOWS
+#include <pwd.h>
+#include <sys/resource.h>
+#endif
 
 /** Yield true iff <b>s</b> is the state of a control_connection_t that has
  * finished authentication and is accepting commands. */
@@ -64,7 +70,8 @@
 #define EVENT_CLIENTS_SEEN     0x0015
 #define EVENT_NEWCONSENSUS     0x0016
 #define EVENT_BUILDTIMEOUT_SET     0x0017
-#define _EVENT_MAX             0x0017
+#define EVENT_SIGNAL           0x0018
+#define _EVENT_MAX             0x0018
 /* If _EVENT_MAX ever hits 0x0020, we need to make the mask wider. */
 
 /** Bitfield: The bit 1&lt;&lt;e is set if <b>any</b> open control
@@ -945,6 +952,8 @@ handle_control_setevents(control_connection_t *conn, uint32_t len,
         event_code = EVENT_NEWCONSENSUS;
       else if (!strcasecmp(ev, "BUILDTIMEOUT_SET"))
         event_code = EVENT_BUILDTIMEOUT_SET;
+      else if (!strcasecmp(ev, "SIGNAL"))
+        event_code = EVENT_SIGNAL;
       else {
         connection_printf_to_buf(conn, "552 Unrecognized event \"%s\"\r\n",
                                  ev);
@@ -1343,10 +1352,65 @@ getinfo_helper_misc(control_connection_t *conn, const char *question,
       return -1;
     }
     *answer = tor_dup_ip(addr);
+  } else if (!strcmp(question, "traffic/read")) {
+    tor_asprintf(answer, U64_FORMAT, U64_PRINTF_ARG(get_bytes_read()));
+  } else if (!strcmp(question, "traffic/written")) {
+    tor_asprintf(answer, U64_FORMAT, U64_PRINTF_ARG(get_bytes_written()));
+  } else if (!strcmp(question, "process/pid")) {
+    int myPid = -1;
+
+    #ifdef MS_WINDOWS
+      myPid = _getpid();
+    #else
+      myPid = getpid();
+    #endif
+
+    tor_asprintf(answer, "%d", myPid);
+  } else if (!strcmp(question, "process/uid")) {
+    #ifdef MS_WINDOWS
+      *answer = tor_strdup("-1");
+    #else
+      int myUid = geteuid();
+      tor_asprintf(answer, "%d", myUid);
+    #endif
+  } else if (!strcmp(question, "process/user")) {
+    #ifdef MS_WINDOWS
+      *answer = tor_strdup("");
+    #else
+      int myUid = geteuid();
+      struct passwd *myPwEntry = getpwuid(myUid);
+
+      if (myPwEntry) {
+        *answer = tor_strdup(myPwEntry->pw_name);
+      } else {
+        *answer = tor_strdup("");
+      }
+    #endif
+  } else if (!strcmp(question, "process/descriptor-limit")) {
+    /** platform specifc limits are from the set_max_file_descriptors function
+      * of src/common/compat.c */
+    /* XXXX023 This is duplicated code from compat.c; it should turn into a
+     * function.  */
+    #ifdef HAVE_GETRLIMIT
+      struct rlimit descriptorLimit;
+
+      if (getrlimit(RLIMIT_NOFILE, &descriptorLimit) == 0) {
+        tor_asprintf(answer, U64_FORMAT,
+                     U64_PRINTF_ARG(descriptorLimit.rlim_max));
+      } else {
+        *answer = tor_strdup("-1");
+      }
+    #elif defined(CYGWIN) || defined(__CYGWIN__)
+      *answer = tor_strdup("3200");
+    #elif defined(MS_WINDOWS)
+      *answer = tor_strdup("15000");
+    #else
+      *answer = tor_strdup("15000");
+    #endif
   } else if (!strcmp(question, "dir-usage")) {
     *answer = directory_dump_request_log();
   } else if (!strcmp(question, "fingerprint")) {
-    routerinfo_t *me = router_get_my_routerinfo();
+    const routerinfo_t *me = router_get_my_routerinfo();
     if (!me) {
       *errmsg = "No routerdesc known; am I really a server?";
       return -1;
@@ -1368,8 +1432,9 @@ getinfo_helper_misc(control_connection_t *conn, const char *question,
  * NOTE: <b>ri_body</b> is as returned by signed_descriptor_get_body: it might
  * not be NUL-terminated. */
 static char *
-munge_extrainfo_into_routerinfo(const char *ri_body, signed_descriptor_t *ri,
-                                signed_descriptor_t *ei)
+munge_extrainfo_into_routerinfo(const char *ri_body,
+                                const signed_descriptor_t *ri,
+                                const signed_descriptor_t *ei)
 {
   char *out = NULL, *outp;
   int i;
@@ -1414,16 +1479,17 @@ getinfo_helper_dir(control_connection_t *control_conn,
                    const char *question, char **answer,
                    const char **errmsg)
 {
+  const routerinfo_t *ri;
   (void) control_conn;
   if (!strcmpstart(question, "desc/id/")) {
-    routerinfo_t *ri = router_get_by_hexdigest(question+strlen("desc/id/"));
+    ri = router_get_by_hexdigest(question+strlen("desc/id/"));
     if (ri) {
       const char *body = signed_descriptor_get_body(&ri->cache_info);
       if (body)
         *answer = tor_strndup(body, ri->cache_info.signed_descriptor_len);
     }
   } else if (!strcmpstart(question, "desc/name/")) {
-    routerinfo_t *ri = router_get_by_nickname(question+strlen("desc/name/"),1);
+    ri = router_get_by_nickname(question+strlen("desc/name/"),1);
     if (ri) {
       const char *body = signed_descriptor_get_body(&ri->cache_info);
       if (body)
@@ -1433,7 +1499,7 @@ getinfo_helper_dir(control_connection_t *control_conn,
     routerlist_t *routerlist = router_get_routerlist();
     smartlist_t *sl = smartlist_create();
     if (routerlist && routerlist->routers) {
-      SMARTLIST_FOREACH(routerlist->routers, routerinfo_t *, ri,
+      SMARTLIST_FOREACH(routerlist->routers, const routerinfo_t *, ri,
       {
         const char *body = signed_descriptor_get_body(&ri->cache_info);
         if (body)
@@ -1449,7 +1515,7 @@ getinfo_helper_dir(control_connection_t *control_conn,
     routerlist_t *routerlist = router_get_routerlist();
     smartlist_t *sl = smartlist_create();
     if (routerlist && routerlist->routers) {
-      SMARTLIST_FOREACH(routerlist->routers, routerinfo_t *, ri,
+      SMARTLIST_FOREACH(routerlist->routers, const routerinfo_t *, ri,
       {
         const char *body = signed_descriptor_get_body(&ri->cache_info);
         signed_descriptor_t *ei = extrainfo_get_by_descriptor_digest(
@@ -1467,8 +1533,8 @@ getinfo_helper_dir(control_connection_t *control_conn,
     SMARTLIST_FOREACH(sl, char *, c, tor_free(c));
     smartlist_free(sl);
   } else if (!strcmpstart(question, "desc-annotations/id/")) {
-    routerinfo_t *ri = router_get_by_hexdigest(question+
-                                               strlen("desc-annotations/id/"));
+    ri = router_get_by_hexdigest(question+
+                                 strlen("desc-annotations/id/"));
     if (ri) {
       const char *annotations =
         signed_descriptor_get_annotations(&ri->cache_info);
@@ -1898,6 +1964,14 @@ static const getinfo_item_t getinfo_items[] = {
       "Number of versioning authorities agreeing on the status of the "
       "current version"),
   ITEM("address", misc, "IP address of this Tor host, if we can guess it."),
+  ITEM("traffic/read", misc,"Bytes read since the process was started."),
+  ITEM("traffic/written", misc,
+       "Bytes written since the process was started."),
+  ITEM("process/pid", misc, "Process id belonging to the main tor process."),
+  ITEM("process/uid", misc, "User id running the tor process."),
+  ITEM("process/user", misc,
+       "Username under which the tor process is running."),
+  ITEM("process/descriptor-limit", misc, "File descriptor limit."),
   ITEM("dir-usage", misc, "Breakdown of bytes transferred over DirPort."),
   PREFIX("desc-annotations/id/", dir, "Router annotations by hexdigest."),
   PREFIX("dir/server/", dir,"Router descriptors as retrieved from a DirPort."),
@@ -2107,7 +2181,7 @@ static int
 handle_control_extendcircuit(control_connection_t *conn, uint32_t len,
                              const char *body)
 {
-  smartlist_t *router_nicknames=NULL, *routers=NULL;
+  smartlist_t *router_nicknames=NULL, *nodes=NULL;
   origin_circuit_t *circ = NULL;
   int zero_circ;
   uint8_t intended_purpose = CIRCUIT_PURPOSE_C_GENERAL;
@@ -2138,8 +2212,7 @@ handle_control_extendcircuit(control_connection_t *conn, uint32_t len,
     if ((smartlist_len(args) == 1) ||
         (smartlist_len(args) >= 2 && is_keyval_pair(smartlist_get(args, 1)))) {
       // "EXTENDCIRCUIT 0" || EXTENDCIRCUIT 0 foo=bar"
-      circ = circuit_launch_by_router(intended_purpose, NULL,
-                                      CIRCLAUNCH_NEED_CAPACITY);
+      circ = circuit_launch(intended_purpose, CIRCLAUNCH_NEED_CAPACITY);
       if (!circ) {
         connection_write_str_to_buf("551 Couldn't start circuit\r\n", conn);
       } else {
@@ -2167,17 +2240,21 @@ handle_control_extendcircuit(control_connection_t *conn, uint32_t len,
   SMARTLIST_FOREACH(args, char *, cp, tor_free(cp));
   smartlist_free(args);
 
-  routers = smartlist_create();
+  nodes = smartlist_create();
   SMARTLIST_FOREACH(router_nicknames, const char *, n,
   {
-    routerinfo_t *r = router_get_by_nickname(n, 1);
-    if (!r) {
+    const node_t *node = node_get_by_nickname(n, 1);
+    if (!node) {
       connection_printf_to_buf(conn, "552 No such router \"%s\"\r\n", n);
       goto done;
     }
-    smartlist_add(routers, r);
+    if (!node_has_descriptor(node)) {
+      connection_printf_to_buf(conn, "552 descriptor for \"%s\"\r\n", n);
+      goto done;
+    }
+    smartlist_add(nodes, (void*)node);
   });
-  if (!smartlist_len(routers)) {
+  if (!smartlist_len(nodes)) {
     connection_write_str_to_buf("512 No router names provided\r\n", conn);
     goto done;
   }
@@ -2188,9 +2265,10 @@ handle_control_extendcircuit(control_connection_t *conn, uint32_t len,
   }
 
   /* now circ refers to something that is ready to be extended */
-  SMARTLIST_FOREACH(routers, routerinfo_t *, r,
+  SMARTLIST_FOREACH(nodes, const node_t *, node,
   {
-    extend_info_t *info = extend_info_from_router(r);
+    extend_info_t *info = extend_info_from_node(node);
+    tor_assert(info); /* True, since node_has_descriptor(node) == true */
     circuit_append_new_exit(circ, info);
     extend_info_free(info);
   });
@@ -2224,7 +2302,7 @@ handle_control_extendcircuit(control_connection_t *conn, uint32_t len,
  done:
   SMARTLIST_FOREACH(router_nicknames, char *, n, tor_free(n));
   smartlist_free(router_nicknames);
-  smartlist_free(routers);
+  smartlist_free(nodes);
   return 0;
 }
 
@@ -2340,16 +2418,17 @@ handle_control_attachstream(control_connection_t *conn, uint32_t len,
   }
   /* Is this a single hop circuit? */
   if (circ && (circuit_get_cpath_len(circ)<2 || hop==1)) {
-    routerinfo_t *r = NULL;
-    char* exit_digest;
+    const node_t *node = NULL;
+    char *exit_digest;
     if (circ->build_state &&
         circ->build_state->chosen_exit &&
         !tor_digest_is_zero(circ->build_state->chosen_exit->identity_digest)) {
       exit_digest = circ->build_state->chosen_exit->identity_digest;
-      r = router_get_by_digest(exit_digest);
+      node = node_get_by_id(exit_digest);
     }
     /* Do both the client and relay allow one-hop exit circuits? */
-    if (!r || !r->allow_single_hop_exits ||
+    if (!node ||
+        !node_allows_single_hop_exits(node) ||
         !get_options()->AllowSingleHopCircuits) {
       connection_write_str_to_buf(
       "551 Can't attach stream to this one-hop circuit.\r\n", conn);
@@ -2721,8 +2800,6 @@ int
 connection_control_finished_flushing(control_connection_t *conn)
 {
   tor_assert(conn);
-
-  connection_stop_writing(TO_CONN(conn));
   return 0;
 }
 
@@ -2757,6 +2834,17 @@ is_valid_initial_command(control_connection_t *conn, const char *cmd)
  * interfaces is broken. */
 #define MAX_COMMAND_LINE_LENGTH (1024*1024)
 
+static int
+peek_connection_has_control0_command(connection_t *conn)
+{
+  IF_HAS_BUFFEREVENT(conn, {
+    struct evbuffer *input = bufferevent_get_input(conn->bufev);
+    return peek_evbuffer_has_control0_command(input);
+  }) ELSE_IF_NO_BUFFEREVENT {
+    return peek_buf_has_control0_command(conn->inbuf);
+  }
+}
+
 /** Called when data has arrived on a v1 control connection: Try to fetch
  * commands from conn->inbuf, and execute them.
  */
@@ -2779,7 +2867,7 @@ connection_control_process_inbuf(control_connection_t *conn)
   }
 
   if (conn->_base.state == CONTROL_CONN_STATE_NEEDAUTH &&
-      peek_buf_has_control0_command(conn->_base.inbuf)) {
+      peek_connection_has_control0_command(TO_CONN(conn))) {
     /* Detect v0 commands and send a "no more v0" message. */
     size_t body_len;
     char buf[128];
@@ -2791,8 +2879,8 @@ connection_control_process_inbuf(control_connection_t *conn)
     body_len = 2+strlen(buf+6)+2; /* code, msg, nul. */
     set_uint16(buf+0, htons(body_len));
     connection_write_to_buf(buf, 4+body_len, TO_CONN(conn));
-    connection_mark_for_close(TO_CONN(conn));
-    conn->_base.hold_open_until_flushed = 1;
+
+    connection_mark_and_flush(TO_CONN(conn));
     return 0;
   }
 
@@ -2803,7 +2891,7 @@ connection_control_process_inbuf(control_connection_t *conn)
     /* First, fetch a line. */
     do {
       data_len = conn->incoming_cmd_len - conn->incoming_cmd_cur_len;
-      r = fetch_from_buf_line(conn->_base.inbuf,
+      r = connection_fetch_from_buf_line(TO_CONN(conn),
                               conn->incoming_cmd+conn->incoming_cmd_cur_len,
                               &data_len);
       if (r == 0)
@@ -2813,8 +2901,7 @@ connection_control_process_inbuf(control_connection_t *conn)
         if (data_len + conn->incoming_cmd_cur_len > MAX_COMMAND_LINE_LENGTH) {
           connection_write_str_to_buf("500 Line too long.\r\n", conn);
           connection_stop_reading(TO_CONN(conn));
-          connection_mark_for_close(TO_CONN(conn));
-          conn->_base.hold_open_until_flushed = 1;
+          connection_mark_and_flush(TO_CONN(conn));
         }
         while (conn->incoming_cmd_len < data_len+conn->incoming_cmd_cur_len)
           conn->incoming_cmd_len *= 2;
@@ -2874,8 +2961,7 @@ connection_control_process_inbuf(control_connection_t *conn)
   /* Otherwise, Quit is always valid. */
   if (!strcasecmp(conn->incoming_cmd, "QUIT")) {
     connection_write_str_to_buf("250 closing connection\r\n", conn);
-    connection_mark_for_close(TO_CONN(conn));
-    conn->_base.hold_open_until_flushed = 1;
+    connection_mark_and_flush(TO_CONN(conn));
     return 0;
   }
 
@@ -3169,10 +3255,10 @@ control_event_stream_status(edge_connection_t *conn, stream_status_event_t tp,
 static void
 orconn_target_get_name(char *name, size_t len, or_connection_t *conn)
 {
-  routerinfo_t *ri = router_get_by_digest(conn->identity_digest);
-  if (ri) {
+  const node_t *node = node_get_by_id(conn->identity_digest);
+  if (node) {
     tor_assert(len > MAX_VERBOSE_NICKNAME_LEN);
-    router_get_verbose_nickname(name, ri);
+    node_get_verbose_nickname(node, name);
   } else if (! tor_digest_is_zero(conn->identity_digest)) {
     name[0] = '$';
     base16_encode(name+1, len-1, conn->identity_digest,
@@ -3489,7 +3575,7 @@ control_event_networkstatus_changed_helper(smartlist_t *statuses,
   smartlist_add(strs, tor_strdup("650+"));
   smartlist_add(strs, tor_strdup(event_string));
   smartlist_add(strs, tor_strdup("\r\n"));
-  SMARTLIST_FOREACH(statuses, routerstatus_t *, rs,
+  SMARTLIST_FOREACH(statuses, const routerstatus_t *, rs,
     {
       s = networkstatus_getinfo_helper_single(rs);
       if (!s) continue;
@@ -3577,10 +3663,46 @@ control_event_buildtimeout_set(const circuit_build_times_t *cbt,
   return 0;
 }
 
+/** Called when a signal has been processed from signal_callback */
+int
+control_event_signal(uintptr_t signal)
+{
+  const char *signal_string = NULL;
+
+  if (!control_event_is_interesting(EVENT_SIGNAL))
+    return 0;
+
+  switch (signal) {
+    case SIGHUP:
+      signal_string = "RELOAD";
+      break;
+    case SIGUSR1:
+      signal_string = "DUMP";
+      break;
+    case SIGUSR2:
+      signal_string = "DEBUG";
+      break;
+    case SIGNEWNYM:
+      signal_string = "NEWNYM";
+      break;
+    case SIGCLEARDNSCACHE:
+      signal_string = "CLEARDNSCACHE";
+      break;
+    default:
+      log_warn(LD_BUG, "Unrecognized signal %lu in control_event_signal",
+               (unsigned long)signal);
+      return -1;
+  }
+
+  send_control_event(EVENT_SIGNAL, ALL_FORMATS, "650 SIGNAL %s\r\n",
+                     signal_string);
+  return 0;
+}
+
 /** Called when a single local_routerstatus_t has changed: Sends an NS event
  * to any controller that cares. */
 int
-control_event_networkstatus_changed_single(routerstatus_t *rs)
+control_event_networkstatus_changed_single(const routerstatus_t *rs)
 {
   smartlist_t *statuses;
   int r;
@@ -3589,7 +3711,7 @@ control_event_networkstatus_changed_single(routerstatus_t *rs)
     return 0;
 
   statuses = smartlist_create();
-  smartlist_add(statuses, rs);
+  smartlist_add(statuses, (void*)rs);
   r = control_event_networkstatus_changed(statuses);
   smartlist_free(statuses);
   return r;
@@ -3714,9 +3836,9 @@ control_event_guard(const char *nickname, const char *digest,
 
   {
     char buf[MAX_VERBOSE_NICKNAME_LEN+1];
-    routerinfo_t *ri = router_get_by_digest(digest);
-    if (ri) {
-      router_get_verbose_nickname(buf, ri);
+    const node_t *node = node_get_by_id(digest);
+    if (node) {
+      node_get_verbose_nickname(node, buf);
     } else {
       tor_snprintf(buf, sizeof(buf), "$%s~%s", hbuf, nickname);
     }

@@ -62,7 +62,6 @@ connection_cpu_finished_flushing(connection_t *conn)
 {
   tor_assert(conn);
   tor_assert(conn->type == CONN_TYPE_CPUWORKER);
-  connection_stop_writing(conn);
   return 0;
 }
 
@@ -141,13 +140,13 @@ connection_cpu_process_inbuf(connection_t *conn)
   tor_assert(conn);
   tor_assert(conn->type == CONN_TYPE_CPUWORKER);
 
-  if (!buf_datalen(conn->inbuf))
+  if (!connection_get_inbuf_len(conn))
     return 0;
 
   if (conn->state == CPUWORKER_STATE_BUSY_ONION) {
-    if (buf_datalen(conn->inbuf) < LEN_ONION_RESPONSE) /* answer available? */
+    if (connection_get_inbuf_len(conn) < LEN_ONION_RESPONSE)
       return 0; /* not yet */
-    tor_assert(buf_datalen(conn->inbuf) == LEN_ONION_RESPONSE);
+    tor_assert(connection_get_inbuf_len(conn) == LEN_ONION_RESPONSE);
 
     connection_fetch_from_buf(&success,1,conn);
     connection_fetch_from_buf(buf,LEN_ONION_RESPONSE-1,conn);
@@ -367,7 +366,7 @@ spawn_cpuworker(void)
 static void
 spawn_enough_cpuworkers(void)
 {
-  int num_cpuworkers_needed = get_options()->NumCPUs;
+  int num_cpuworkers_needed = get_num_cpus(get_options());
 
   if (num_cpuworkers_needed < MIN_CPUWORKERS)
     num_cpuworkers_needed = MIN_CPUWORKERS;

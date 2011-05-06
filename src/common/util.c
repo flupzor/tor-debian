@@ -14,6 +14,7 @@
 #define _GNU_SOURCE
 
 #include "orconfig.h"
+#define UTIL_PRIVATE
 #include "util.h"
 #include "torlog.h"
 #undef log
@@ -942,7 +943,7 @@ esc_for_log(const char *s)
   char *result, *outp;
   size_t len = 3;
   if (!s) {
-    return tor_strdup("");
+    return tor_strdup("(null)");
   }
 
   for (cp = s; *cp; ++cp) {
@@ -1822,7 +1823,7 @@ start_writing_to_file(const char *fname, int open_flags, int mode,
   if (open_flags & O_BINARY)
     new_file->binary = 1;
 
-  new_file->fd = open(open_name, open_flags, mode);
+  new_file->fd = tor_open_cloexec(open_name, open_flags, mode);
   if (new_file->fd < 0) {
     log_warn(LD_FS, "Couldn't open \"%s\" (%s) for writing: %s",
         open_name, fname, strerror(errno));
@@ -2043,7 +2044,7 @@ read_file_to_str(const char *filename, int flags, struct stat *stat_out)
 
   tor_assert(filename);
 
-  fd = open(filename,O_RDONLY|(bin?O_BINARY:O_TEXT),0);
+  fd = tor_open_cloexec(filename,O_RDONLY|(bin?O_BINARY:O_TEXT),0);
   if (fd<0) {
     int severity = LOG_WARN;
     int save_errno = errno;
@@ -2429,18 +2430,21 @@ digit_to_num(char d)
  * success, store the result in <b>out</b>, advance bufp to the next
  * character, and return 0.  On failure, return -1. */
 static int
-scan_unsigned(const char **bufp, unsigned *out, int width)
+scan_unsigned(const char **bufp, unsigned *out, int width, int base)
 {
   unsigned result = 0;
   int scanned_so_far = 0;
+  const int hex = base==16;
+  tor_assert(base == 10 || base == 16);
   if (!bufp || !*bufp || !out)
     return -1;
   if (width<0)
     width=MAX_SCANF_WIDTH;
 
-  while (**bufp && TOR_ISDIGIT(**bufp) && scanned_so_far < width) {
-    int digit = digit_to_num(*(*bufp)++);
-    unsigned new_result = result * 10 + digit;
+  while (**bufp && (hex?TOR_ISXDIGIT(**bufp):TOR_ISDIGIT(**bufp))
+         && scanned_so_far < width) {
+    int digit = hex?hex_decode_digit(*(*bufp)++):digit_to_num(*(*bufp)++);
+    unsigned new_result = result * base + digit;
     if (new_result > UINT32_MAX || new_result < result)
       return -1; /* over/underflow. */
     result = new_result;
@@ -2502,11 +2506,12 @@ tor_vsscanf(const char *buf, const char *pattern, va_list ap)
         if (!width) /* No zero-width things. */
           return -1;
       }
-      if (*pattern == 'u') {
+      if (*pattern == 'u' || *pattern == 'x') {
         unsigned *u = va_arg(ap, unsigned *);
+        const int base = (*pattern == 'u') ? 10 : 16;
         if (!*buf)
           return n_matched;
-        if (scan_unsigned(&buf, u, width)<0)
+        if (scan_unsigned(&buf, u, width, base)<0)
           return n_matched;
         ++pattern;
         ++n_matched;
@@ -2543,9 +2548,9 @@ tor_vsscanf(const char *buf, const char *pattern, va_list ap)
 
 /** Minimal sscanf replacement: parse <b>buf</b> according to <b>pattern</b>
  * and store the results in the corresponding argument fields.  Differs from
- * sscanf in that it: Only handles %u and %Ns.  Does not handle arbitrarily
- * long widths. %u does not consume any space.  Is locale-independent.
- * Returns -1 on malformed patterns.
+ * sscanf in that it: Only handles %u and %x and %Ns.  Does not handle
+ * arbitrarily long widths. %u and %x do not consume any space.  Is
+ * locale-independent.  Returns -1 on malformed patterns.
  *
  * (As with other locale-independent functions, we need this to parse data that
  * is in ASCII without worrying that the C library's locale-handling will make
@@ -2739,7 +2744,7 @@ finish_daemon(const char *desired_cwd)
     exit(1);
   }
 
-  nullfd = open("/dev/null", O_RDWR);
+  nullfd = tor_open_cloexec("/dev/null", O_RDWR, 0);
   if (nullfd < 0) {
     log_err(LD_GENERAL,"/dev/null can't be opened. Exiting.");
     exit(1);
@@ -2809,4 +2814,450 @@ load_windows_system_library(const TCHAR *library_name)
   return LoadLibrary(path);
 }
 #endif
+
+/** Format <b>child_state</b> and <b>saved_errno</b> as a hex string placed in
+ * <b>hex_errno</b>.  Called between fork and _exit, so must be signal-handler
+ * safe.
+ *
+ * <b>hex_errno</b> must have at least HEX_ERRNO_SIZE bytes available.
+ *
+ * The format of <b>hex_errno</b> is: "CHILD_STATE/ERRNO\n", left-padded
+ * with spaces. Note that there is no trailing \0. CHILD_STATE indicates where
+ * in the processs of starting the child process did the failure occur (see
+ * CHILD_STATE_* macros for definition), and SAVED_ERRNO is the value of
+ * errno when the failure occurred.
+ */
+
+void
+format_helper_exit_status(unsigned char child_state, int saved_errno,
+                          char *hex_errno)
+{
+  unsigned int unsigned_errno;
+  char *cur;
+  size_t i;
+
+  /* Fill hex_errno with spaces, and a trailing newline (memset may
+     not be signal handler safe, so we can't use it) */
+  for (i = 0; i < (HEX_ERRNO_SIZE - 1); i++)
+    hex_errno[i] = ' ';
+  hex_errno[HEX_ERRNO_SIZE - 1] = '\n';
+
+  /* Convert errno to be unsigned for hex conversion */
+  if (saved_errno < 0) {
+    unsigned_errno = (unsigned int) -saved_errno;
+  } else {
+    unsigned_errno = (unsigned int) saved_errno;
+  }
+
+  /* Convert errno to hex (start before \n) */
+  cur = hex_errno + HEX_ERRNO_SIZE - 2;
+
+  /* Check for overflow on first iteration of the loop */
+  if (cur < hex_errno)
+    return;
+
+  do {
+    *cur-- = "0123456789ABCDEF"[unsigned_errno % 16];
+    unsigned_errno /= 16;
+  } while (unsigned_errno != 0 && cur >= hex_errno);
+
+  /* Prepend the minus sign if errno was negative */
+  if (saved_errno < 0 && cur >= hex_errno)
+    *cur-- = '-';
+
+  /* Leave a gap */
+  if (cur >= hex_errno)
+    *cur-- = '/';
+
+  /* Check for overflow on first iteration of the loop */
+  if (cur < hex_errno)
+    return;
+
+  /* Convert child_state to hex */
+  do {
+    *cur-- = "0123456789ABCDEF"[child_state % 16];
+    child_state /= 16;
+  } while (child_state != 0 && cur >= hex_errno);
+}
+
+/* Maximum number of file descriptors, if we cannot get it via sysconf() */
+#define DEFAULT_MAX_FD 256
+
+#define CHILD_STATE_INIT 0
+#define CHILD_STATE_PIPE 1
+#define CHILD_STATE_MAXFD 2
+#define CHILD_STATE_FORK 3
+#define CHILD_STATE_DUPOUT 4
+#define CHILD_STATE_DUPERR 5
+#define CHILD_STATE_REDIRECT 6
+#define CHILD_STATE_CLOSEFD 7
+#define CHILD_STATE_EXEC 8
+#define CHILD_STATE_FAILEXEC 9
+
+#define SPAWN_ERROR_MESSAGE "ERR: Failed to spawn background process - code "
+
+/** Start a program in the background. If <b>filename</b> contains a '/',
+ * then it will be treated as an absolute or relative path.  Otherwise the
+ * system path will be searched for <b>filename</b>. The strings in
+ * <b>argv</b> will be passed as the command line arguments of the child
+ * program (following convention, argv[0] should normally be the filename of
+ * the executable). The last element of argv must be NULL. If the child
+ * program is launched, the PID will be returned and <b>stdout_read</b> and
+ * <b>stdout_err</b> will be set to file descriptors from which the stdout
+ * and stderr, respectively, output of the child program can be read, and the
+ * stdin of the child process shall be set to /dev/null.  Otherwise returns
+ * -1.  Some parts of this code are based on the POSIX subprocess module from
+ * Python.
+ */
+int
+tor_spawn_background(const char *const filename, int *stdout_read,
+                     int *stderr_read, const char **argv)
+{
+#ifdef MS_WINDOWS
+  (void) filename; (void) stdout_read; (void) stderr_read; (void) argv;
+  log_warn(LD_BUG, "not yet implemented on Windows.");
+  return -1;
+#else
+  pid_t pid;
+  int stdout_pipe[2];
+  int stderr_pipe[2];
+  int fd, retval;
+  ssize_t nbytes;
+
+  const char *error_message = SPAWN_ERROR_MESSAGE;
+  size_t error_message_length;
+
+  /* Represents where in the process of spawning the program is;
+     this is used for printing out the error message */
+  unsigned char child_state = CHILD_STATE_INIT;
+
+  char hex_errno[HEX_ERRNO_SIZE];
+
+  static int max_fd = -1;
+
+  /* We do the strlen here because strlen() is not signal handler safe,
+     and we are not allowed to use unsafe functions between fork and exec */
+  error_message_length = strlen(error_message);
+
+  child_state = CHILD_STATE_PIPE;
+
+  /* Set up pipe for redirecting stdout and stderr of child */
+  retval = pipe(stdout_pipe);
+  if (-1 == retval) {
+    log_warn(LD_GENERAL,
+      "Failed to set up pipe for stdout communication with child process: %s",
+       strerror(errno));
+    return -1;
+  }
+
+  retval = pipe(stderr_pipe);
+  if (-1 == retval) {
+    log_warn(LD_GENERAL,
+      "Failed to set up pipe for stderr communication with child process: %s",
+      strerror(errno));
+    return -1;
+  }
+
+  child_state = CHILD_STATE_MAXFD;
+
+#ifdef _SC_OPEN_MAX
+  if (-1 != max_fd) {
+    max_fd = (int) sysconf(_SC_OPEN_MAX);
+    if (max_fd == -1)
+      max_fd = DEFAULT_MAX_FD;
+      log_warn(LD_GENERAL,
+               "Cannot find maximum file descriptor, assuming %d", max_fd);
+  }
+#else
+  max_fd = DEFAULT_MAX_FD;
+#endif
+
+  child_state = CHILD_STATE_FORK;
+
+  pid = fork();
+  if (0 == pid) {
+    /* In child */
+
+    child_state = CHILD_STATE_DUPOUT;
+
+    /* Link child stdout to the write end of the pipe */
+    retval = dup2(stdout_pipe[1], STDOUT_FILENO);
+    if (-1 == retval)
+        goto error;
+
+    child_state = CHILD_STATE_DUPERR;
+
+    /* Link child stderr to the write end of the pipe */
+    retval = dup2(stderr_pipe[1], STDERR_FILENO);
+    if (-1 == retval)
+        goto error;
+
+    child_state = CHILD_STATE_REDIRECT;
+
+    /* Link stdin to /dev/null */
+    fd = open("/dev/null", O_RDONLY); /* NOT cloexec, obviously. */
+    if (fd != -1)
+      dup2(fd, STDIN_FILENO);
+    else
+      goto error;
+
+    child_state = CHILD_STATE_CLOSEFD;
+
+    close(stderr_pipe[0]);
+    close(stderr_pipe[1]);
+    close(stdout_pipe[0]);
+    close(stdout_pipe[1]);
+    close(fd);
+
+    /* Close all other fds, including the read end of the pipe */
+    /* XXX: We should now be doing enough FD_CLOEXEC setting to make
+     * this needless. */
+    for (fd = STDERR_FILENO + 1; fd < max_fd; fd++) {
+      close(fd);
+    }
+
+    child_state = CHILD_STATE_EXEC;
+
+    /* Call the requested program. We need the cast because
+       execvp doesn't define argv as const, even though it
+       does not modify the arguments */
+    execvp(filename, (char *const *) argv);
+
+    /* If we got here, the exec or open(/dev/null) failed */
+
+    child_state = CHILD_STATE_FAILEXEC;
+
+  error:
+    /* XXX: are we leaking fds from the pipe? */
+
+    format_helper_exit_status(child_state, errno, hex_errno);
+
+    /* Write the error message. GCC requires that we check the return
+       value, but there is nothing we can do if it fails */
+    nbytes = write(STDOUT_FILENO, error_message, error_message_length);
+    nbytes = write(STDOUT_FILENO, hex_errno, sizeof(hex_errno));
+
+    _exit(255);
+    return -1; /* Never reached, but avoids compiler warning */
+  }
+
+  /* In parent */
+
+  if (-1 == pid) {
+    log_warn(LD_GENERAL, "Failed to fork child process: %s", strerror(errno));
+    close(stdout_pipe[0]);
+    close(stdout_pipe[1]);
+    close(stderr_pipe[0]);
+    close(stderr_pipe[1]);
+    return -1;
+  }
+
+  /* Return read end of the pipes to caller, and close write end */
+  *stdout_read = stdout_pipe[0];
+  retval = close(stdout_pipe[1]);
+
+  if (-1 == retval) {
+    log_warn(LD_GENERAL,
+            "Failed to close write end of stdout pipe in parent process: %s",
+            strerror(errno));
+    /* Do not return -1, because the child is running, so the parent
+       needs to know about the pid in order to reap it later */
+  }
+
+  *stderr_read = stderr_pipe[0];
+  retval = close(stderr_pipe[1]);
+
+  if (-1 == retval) {
+    log_warn(LD_GENERAL,
+            "Failed to close write end of stderr pipe in parent process: %s",
+            strerror(errno));
+    /* Do not return -1, because the child is running, so the parent
+       needs to know about the pid in order to reap it later */
+  }
+
+  return pid;
+#endif
+}
+
+/** Read from stream, and send lines to log at the specified log level.
+ * Returns 1 if stream is closed normally, -1 if there is a error reading, and
+ * 0 otherwise. Handles lines from tor-fw-helper and
+ * tor_spawn_background() specially.
+ */
+static int
+log_from_pipe(FILE *stream, int severity, const char *executable,
+              int *child_status)
+{
+  char buf[256];
+
+  for (;;) {
+    char *retval;
+    retval = fgets(buf, sizeof(buf), stream);
+
+    if (NULL == retval) {
+      if (feof(stream)) {
+        /* Program has closed stream (probably it exited) */
+        /* TODO: check error */
+        fclose(stream);
+        return 1;
+      } else {
+        if (EAGAIN == errno) {
+          /* Nothing more to read, try again next time */
+          return 0;
+        } else {
+          /* There was a problem, abandon this child process */
+          fclose(stream);
+          return -1;
+        }
+      }
+    } else {
+      /* We have some data, log it and keep asking for more */
+      size_t len;
+
+      len = strlen(buf);
+      if (buf[len - 1] == '\n') {
+        /* Remove the trailing newline */
+        buf[len - 1] = '\0';
+      } else {
+        /* No newline; check whether we overflowed the buffer */
+        if (!feof(stream))
+          log_warn(LD_GENERAL,
+                  "Line from port forwarding helper was truncated: %s", buf);
+          /* TODO: What to do with this error? */
+      }
+
+      /* Check if buf starts with SPAWN_ERROR_MESSAGE */
+      if (strcmpstart(buf, SPAWN_ERROR_MESSAGE) == 0) {
+          /* Parse error message */
+          int retval, child_state, saved_errno;
+          retval = tor_sscanf(buf, SPAWN_ERROR_MESSAGE "%x/%x",
+                              &child_state, &saved_errno);
+          if (retval == 2) {
+              log_warn(LD_GENERAL,
+                "Failed to start child process \"%s\" in state %d: %s",
+                executable, child_state, strerror(saved_errno));
+              if (child_status)
+                  *child_status = 1;
+          } else {
+              /* Failed to parse message from child process, log it as a
+                 warning */
+              log_warn(LD_GENERAL,
+                "Unexpected message from port forwarding helper \"%s\": %s",
+                executable, buf);
+          }
+      } else {
+          log_fn(severity, LD_GENERAL, "Port forwarding helper says: %s", buf);
+      }
+    }
+  }
+
+  /* We should never get here */
+  return -1;
+}
+
+void
+tor_check_port_forwarding(const char *filename, int dir_port, int or_port,
+                          time_t now)
+{
+#ifdef MS_WINDOWS
+  (void) filename; (void) dir_port; (void) or_port; (void) now;
+  (void) tor_spawn_background;
+  (void) log_from_pipe;
+  log_warn(LD_GENERAL, "Sorry, port forwarding is not yet supported "
+           "on windows.");
+#else
+/* When fw-helper succeeds, how long do we wait until running it again */
+#define TIME_TO_EXEC_FWHELPER_SUCCESS 300
+/* When fw-helper fails, how long do we wait until running it again */
+#define TIME_TO_EXEC_FWHELPER_FAIL 60
+
+  static int child_pid = -1;
+  static FILE *stdout_read = NULL;
+  static FILE *stderr_read = NULL;
+  static time_t time_to_run_helper = 0;
+  int stdout_status, stderr_status, retval;
+  const char *argv[10];
+  char s_dirport[6], s_orport[6];
+
+  tor_assert(filename);
+
+  /* Set up command line for tor-fw-helper */
+  snprintf(s_dirport, sizeof s_dirport, "%d", dir_port);
+  snprintf(s_orport, sizeof s_orport, "%d", or_port);
+
+  /* TODO: Allow different internal and external ports */
+  argv[0] = filename;
+  argv[1] = "--internal-or-port";
+  argv[2] = s_orport;
+  argv[3] = "--external-or-port";
+  argv[4] = s_orport;
+  argv[5] = "--internal-dir-port";
+  argv[6] = s_dirport;
+  argv[7] = "--external-dir-port";
+  argv[8] = s_dirport;
+  argv[9] = NULL;
+
+  /* Start the child, if it is not already running */
+  if (-1 == child_pid &&
+      time_to_run_helper < now) {
+    int fd_out=-1, fd_err=-1;
+
+    /* Assume tor-fw-helper will succeed, start it later*/
+    time_to_run_helper = now + TIME_TO_EXEC_FWHELPER_SUCCESS;
+
+    child_pid = tor_spawn_background(filename, &fd_out, &fd_err, argv);
+    if (child_pid < 0) {
+      log_warn(LD_GENERAL, "Failed to start port forwarding helper %s",
+              filename);
+      child_pid = -1;
+      return;
+    }
+    /* Set stdout/stderr pipes to be non-blocking */
+    fcntl(fd_out, F_SETFL, O_NONBLOCK);
+    fcntl(fd_err, F_SETFL, O_NONBLOCK);
+    /* Open the buffered IO streams */
+    stdout_read = fdopen(fd_out, "r");
+    stderr_read = fdopen(fd_err, "r");
+
+    log_info(LD_GENERAL,
+      "Started port forwarding helper (%s) with pid %d", filename, child_pid);
+  }
+
+  /* If child is running, read from its stdout and stderr) */
+  if (child_pid > 0) {
+    /* Read from stdout/stderr and log result */
+    retval = 0;
+    stdout_status = log_from_pipe(stdout_read, LOG_INFO, filename, &retval);
+    stderr_status = log_from_pipe(stderr_read, LOG_WARN, filename, &retval);
+    if (retval) {
+      /* There was a problem in the child process */
+      time_to_run_helper = now + TIME_TO_EXEC_FWHELPER_FAIL;
+    }
+
+    /* Combine the two statuses in order of severity */
+    if (-1 == stdout_status || -1 == stderr_status)
+      /* There was a failure */
+      retval = -1;
+    else if (1 == stdout_status || 1 == stderr_status)
+      /* stdout or stderr was closed */
+      retval = 1;
+    else
+      /* Both are fine */
+      retval = 0;
+
+    /* If either pipe indicates a failure, act on it */
+    if (0 != retval) {
+      if (1 == retval) {
+        log_info(LD_GENERAL, "Port forwarding helper terminated");
+      } else {
+        log_warn(LD_GENERAL, "Failed to read from port forwarding helper");
+      }
+
+      /* TODO: The child might not actually be finished (maybe it failed or
+         closed stdout/stderr), so maybe we shouldn't start another? */
+      child_pid = -1;
+    }
+  }
+#endif
+}
 

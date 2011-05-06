@@ -126,6 +126,7 @@ tor_addr_eq_ipv4h(const tor_addr_t *a, uint32_t u)
 int tor_addr_lookup(const char *name, uint16_t family, tor_addr_t *addr_out);
 char *tor_dup_addr(const tor_addr_t *addr) ATTR_MALLOC;
 const char *fmt_addr(const tor_addr_t *addr);
+const char * fmt_addr32(uint32_t addr);
 int get_interface_address6(int severity, sa_family_t family, tor_addr_t *addr);
 
 /** Flag to specify how to do a comparison between addresses.  In an "exact"
@@ -162,7 +163,7 @@ int tor_addr_port_parse(const char *s, tor_addr_t *addr_out,
 int tor_addr_parse_mask_ports(const char *s,
                               tor_addr_t *addr_out, maskbits_t *mask_out,
                               uint16_t *port_min_out, uint16_t *port_max_out);
-const char * tor_addr_to_str(char *dest, const tor_addr_t *addr, int len,
+const char * tor_addr_to_str(char *dest, const tor_addr_t *addr, size_t len,
                              int decorate);
 int tor_addr_from_str(tor_addr_t *addr, const char *src);
 void tor_addr_copy(tor_addr_t *dest, const tor_addr_t *src);

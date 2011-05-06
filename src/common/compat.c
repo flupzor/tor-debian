@@ -103,6 +103,35 @@
 #include "strlcat.c"
 #endif
 
+/** As open(path, flags, mode), but return an fd with the close-on-exec mode
+ * set. */
+int
+tor_open_cloexec(const char *path, int flags, unsigned mode)
+{
+#ifdef O_CLOEXEC
+  return open(path, flags|O_CLOEXEC, mode);
+#else
+  int fd = open(path, flags, mode);
+#ifdef FD_CLOEXEC
+  if (fd >= 0)
+        fcntl(fd, F_SETFD, FD_CLOEXEC);
+#endif
+  return fd;
+#endif
+}
+
+/** DOCDOC */
+FILE *
+tor_fopen_cloexec(const char *path, const char *mode)
+{
+  FILE *result = fopen(path, mode);
+#ifdef FD_CLOEXEC
+  if (result != NULL)
+    fcntl(fileno(result), F_SETFD, FD_CLOEXEC);
+#endif
+  return result;
+}
+
 #ifdef HAVE_SYS_MMAN_H
 /** Try to create a memory mapping for <b>filename</b> and return it.  On
  * failure, return NULL.  Sets errno properly, using ERANGE to mean
@@ -118,7 +147,7 @@ tor_mmap_file(const char *filename)
 
   tor_assert(filename);
 
-  fd = open(filename, O_RDONLY, 0);
+  fd = tor_open_cloexec(filename, O_RDONLY, 0);
   if (fd<0) {
     int save_errno = errno;
     int severity = (errno == ENOENT) ? LOG_INFO : LOG_WARN;
@@ -693,7 +722,7 @@ tor_lockfile_lock(const char *filename, int blocking, int *locked_out)
   *locked_out = 0;
 
   log_info(LD_FS, "Locking \"%s\"", filename);
-  fd = open(filename, O_RDWR|O_CREAT|O_TRUNC, 0600);
+  fd = tor_open_cloexec(filename, O_RDWR|O_CREAT|O_TRUNC, 0600);
   if (fd < 0) {
     log_warn(LD_FS,"Couldn't open \"%s\" for locking: %s", filename,
              strerror(errno));
@@ -918,8 +947,16 @@ mark_socket_open(int s)
 int
 tor_open_socket(int domain, int type, int protocol)
 {
-  int s = socket(domain, type, protocol);
+  int s;
+#ifdef SOCK_CLOEXEC
+#define LINUX_CLOEXEC_OPEN_SOCKET
+  type |= SOCK_CLOEXEC;
+#endif
+  s = socket(domain, type, protocol);
   if (s >= 0) {
+#if !defined(LINUX_CLOEXEC_OPEN_SOCKET) && defined(FD_CLOEXEC)
+    fcntl(s, F_SETFD, FD_CLOEXEC);
+#endif
     socket_accounting_lock();
     ++n_sockets_open;
     mark_socket_open(s);
@@ -932,8 +969,17 @@ tor_open_socket(int domain, int type, int protocol)
 int
 tor_accept_socket(int sockfd, struct sockaddr *addr, socklen_t *len)
 {
-  int s = accept(sockfd, addr, len);
+  int s;
+#if defined(HAVE_ACCEPT4) && defined(SOCK_CLOEXEC)
+#define LINUX_CLOEXEC_ACCEPT
+  s = accept4(sockfd, addr, len, SOCK_CLOEXEC);
+#else
+  s = accept(sockfd, addr, len);
+#endif
   if (s >= 0) {
+#if !defined(LINUX_CLOEXEC_ACCEPT) && defined(FD_CLOEXEC)
+    fcntl(s, F_SETFD, FD_CLOEXEC);
+#endif
     socket_accounting_lock();
     ++n_sockets_open;
     mark_socket_open(s);
@@ -989,8 +1035,17 @@ tor_socketpair(int family, int type, int protocol, int fd[2])
 //don't use win32 socketpairs (they are always bad)
 #if defined(HAVE_SOCKETPAIR) && !defined(MS_WINDOWS)
   int r;
+#ifdef SOCK_CLOEXEC
+  type |= SOCK_CLOEXEC;
+#endif
   r = socketpair(family, type, protocol, fd);
   if (r == 0) {
+#if !defined(SOCK_CLOEXEC) && defined(FD_CLOEXEC)
+    if (fd[0] >= 0)
+      fcntl(fd[0], F_SETFD, FD_CLOEXEC);
+    if (fd[1] >= 0)
+      fcntl(fd[1], F_SETFD, FD_CLOEXEC);
+#endif
     socket_accounting_lock();
     if (fd[0] >= 0) {
       ++n_sockets_open;
@@ -1937,6 +1992,52 @@ spawn_exit(void)
    * call _exit, not exit, from child processes. */
   _exit(0);
 #endif
+}
+
+/** Implementation logic for compute_num_cpus(). */
+static int
+compute_num_cpus_impl(void)
+{
+#ifdef MS_WINDOWS
+  SYSTEM_INFO info;
+  memset(&info, 0, sizeof(info));
+  GetSystemInfo(&info);
+  if (info.dwNumberOfProcessors >= 1 && info.dwNumberOfProcessors < INT_MAX)
+    return (int)info.dwNumberOfProcessors;
+  else
+    return -1;
+#elif defined(HAVE_SYSCONF) && defined(_SC_NPROCESSORS_CONF)
+  long cpus = sysconf(_SC_NPROCESSORS_CONF);
+  if (cpus >= 1 && cpus < INT_MAX)
+    return (int)cpus;
+  else
+    return -1;
+#else
+  return -1;
+#endif
+}
+
+#define MAX_DETECTABLE_CPUS 16
+
+/** Return how many CPUs we are running with.  We assume that nobody is
+ * using hot-swappable CPUs, so we don't recompute this after the first
+ * time.  Return -1 if we don't know how to tell the number of CPUs on this
+ * system.
+ */
+int
+compute_num_cpus(void)
+{
+  static int num_cpus = -2;
+  if (num_cpus == -2) {
+    num_cpus = compute_num_cpus_impl();
+    tor_assert(num_cpus != -2);
+    if (num_cpus > MAX_DETECTABLE_CPUS)
+      log_notice(LD_GENERAL, "Wow!  I detected that you have %d CPUs. I "
+                 "will not autodetect any more than %d, though.  If you "
+                 "want to configure more, set NumCPUs in your torrc",
+                 num_cpus, MAX_DETECTABLE_CPUS);
+  }
+  return num_cpus;
 }
 
 /** Set *timeval to the current time of day.  On error, log and terminate.
