@@ -1,3 +1,16 @@
+tor (0.2.3.1-alpha-XXX) tor-0.2.3.x; urgency=low
+
+  * Merged from debian-0.2.2: 0.2.2.29-beta-1
+    - The postinst script changes /var/run/tor to mode 02750 if it exists,
+      but the tor init script creates it with mode 02700 if it doesn't.
+      Change the init script to also create the directory with a group
+      writeable mode, the same as the postinst maintainer script, i.e. 02750.
+      .
+      This will allow users in the debian-tor group to access the control
+      socket (re: #552556).
+
+ -- Peter Palfrader <weasel@debian.org>  Sat, 03 Sep 2011 12:13:10 +0200
+
 tor (0.2.3.1-alpha-1) tor-0.2.3.x; urgency=low
 
   * New upstream version.
