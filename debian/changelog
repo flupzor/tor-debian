@@ -8,6 +8,8 @@ tor (0.2.3.1-alpha-XXX) tor-0.2.3.x; urgency=low
       .
       This will allow users in the debian-tor group to access the control
       socket (re: #552556).
+    - Enable Control Socket by default.  It lives in /var/run/tor/
+      (closes: #552556).
 
  -- Peter Palfrader <weasel@debian.org>  Sat, 03 Sep 2011 12:13:10 +0200
 

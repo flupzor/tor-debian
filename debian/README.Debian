@@ -8,6 +8,11 @@ Debian.  If Tor is started as root or the 'debian-tor' user, then:
 - default logging goes to /var/log/tor/log (instead of stdout),
 - DataDirectory is set to /var/lib/tor (uses $HOME/.tor upstream),
 - User is set to "debian-tor".
+- ControlSocket is enabled at /var/run/tor/control, is made
+  group writable (ControlSocketsGroupWritable).  Additionally
+  CookieAuthentication is enabled, the cookie file written to
+  /var/run/tor/control.authcookie (CookieAuthFile) and made
+  group readable (CookieAuthFileGroupReadable).
 
 If Tor is started as any other user it behaves just like upstream's.
 
