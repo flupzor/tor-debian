@@ -254,7 +254,7 @@ circuit_get_all_pending_on_or_conn(smartlist_t *out, or_connection_t *or_conn)
         continue;
     } else {
       /* We expected a key. See if it's the right one. */
-      if (memcmp(or_conn->identity_digest,
+      if (tor_memneq(or_conn->identity_digest,
                  circ->n_hop->identity_digest, DIGEST_LEN))
         continue;
     }
@@ -272,8 +272,10 @@ circuit_count_pending_on_or_conn(or_connection_t *or_conn)
   circuit_get_all_pending_on_or_conn(sl, or_conn);
   cnt = smartlist_len(sl);
   smartlist_free(sl);
-  log_debug(LD_CIRC,"or_conn to %s, %d pending circs",
-            or_conn->nickname ? or_conn->nickname : "NULL", cnt);
+  log_debug(LD_CIRC,"or_conn to %s at %s, %d pending circs",
+            or_conn->nickname ? or_conn->nickname : "NULL",
+            or_conn->_base.address,
+            cnt);
   return cnt;
 }
 
@@ -548,6 +550,16 @@ circuit_free(circuit_t *circ)
 
     crypto_free_pk_env(ocirc->intro_key);
     rend_data_free(ocirc->rend_data);
+
+    tor_free(ocirc->dest_address);
+    if (ocirc->socks_username) {
+      memset(ocirc->socks_username, 0x12, ocirc->socks_username_len);
+      tor_free(ocirc->socks_username);
+    }
+    if (ocirc->socks_password) {
+      memset(ocirc->socks_password, 0x06, ocirc->socks_password_len);
+      tor_free(ocirc->socks_password);
+    }
   } else {
     or_circuit_t *ocirc = TO_OR_CIRCUIT(circ);
     /* Remember cell statistics for this circuit before deallocating. */
@@ -717,7 +729,7 @@ circuit_dump_by_conn(connection_t *conn, int severity)
         tor_addr_eq(&circ->n_hop->addr, &conn->addr) &&
         circ->n_hop->port == conn->port &&
         conn->type == CONN_TYPE_OR &&
-        !memcmp(TO_OR_CONN(conn)->identity_digest,
+        tor_memeq(TO_OR_CONN(conn)->identity_digest,
                 circ->n_hop->identity_digest, DIGEST_LEN)) {
       circuit_dump_details(severity, circ, conn->conn_array_index,
                            (circ->state == CIRCUIT_STATE_OPEN &&
@@ -771,8 +783,8 @@ circuit_get_by_circid_orconn_impl(circid_t circ_id, or_connection_t *conn)
     return found->circuit;
 
   return NULL;
-
   /* The rest of this checks for bugs. Disabled by default. */
+  /* We comment it out because coverity complains otherwise.
   {
     circuit_t *circ;
     for (circ=global_circuitlist;circ;circ = circ->next) {
@@ -791,7 +803,7 @@ circuit_get_by_circid_orconn_impl(circid_t circ_id, or_connection_t *conn)
       }
     }
     return NULL;
-  }
+  } */
 }
 
 /** Return a circ such that:
@@ -862,7 +874,7 @@ circuit_unlink_all_from_or_conn(or_connection_t *conn, int reason)
 }
 
 /** Return a circ such that:
- *  - circ-\>rend_data-\>query is equal to <b>rend_query</b>, and
+ *  - circ-\>rend_data-\>onion_address is equal to <b>rend_query</b>, and
  *  - circ-\>purpose is equal to <b>purpose</b>.
  *
  * Return NULL if no such circuit exists.
@@ -911,7 +923,7 @@ circuit_get_next_by_pk_and_purpose(origin_circuit_t *start,
     if (!digest)
       return TO_ORIGIN_CIRCUIT(circ);
     else if (TO_ORIGIN_CIRCUIT(circ)->rend_data &&
-             !memcmp(TO_ORIGIN_CIRCUIT(circ)->rend_data->rend_pk_digest,
+             tor_memeq(TO_ORIGIN_CIRCUIT(circ)->rend_data->rend_pk_digest,
                      digest, DIGEST_LEN))
       return TO_ORIGIN_CIRCUIT(circ);
   }
@@ -929,7 +941,7 @@ circuit_get_by_rend_token_and_purpose(uint8_t purpose, const char *token,
   for (circ = global_circuitlist; circ; circ = circ->next) {
     if (! circ->marked_for_close &&
         circ->purpose == purpose &&
-        ! memcmp(TO_OR_CIRCUIT(circ)->rend_token, token, len))
+        tor_memeq(TO_OR_CIRCUIT(circ)->rend_token, token, len))
       return TO_OR_CIRCUIT(circ);
   }
   return NULL;
@@ -977,7 +989,7 @@ circuit_find_to_cannibalize(uint8_t purpose, extend_info_t *info,
   int need_uptime = (flags & CIRCLAUNCH_NEED_UPTIME) != 0;
   int need_capacity = (flags & CIRCLAUNCH_NEED_CAPACITY) != 0;
   int internal = (flags & CIRCLAUNCH_IS_INTERNAL) != 0;
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
 
   /* Make sure we're not trying to create a onehop circ by
    * cannibalization. */
@@ -999,14 +1011,15 @@ circuit_find_to_cannibalize(uint8_t purpose, extend_info_t *info,
           (!need_capacity || circ->build_state->need_capacity) &&
           (internal == circ->build_state->is_internal) &&
           circ->remaining_relay_early_cells &&
-          !circ->build_state->onehop_tunnel) {
+          !circ->build_state->onehop_tunnel &&
+          !circ->isolation_values_set) {
         if (info) {
           /* need to make sure we don't duplicate hops */
           crypt_path_t *hop = circ->cpath;
           const node_t *ri1 = node_get_by_id(info->identity_digest);
           do {
             const node_t *ri2;
-            if (!memcmp(hop->extend_info->identity_digest,
+            if (tor_memeq(hop->extend_info->identity_digest,
                         info->identity_digest, DIGEST_LEN))
               goto next;
             if (ri1 &&
@@ -1096,7 +1109,7 @@ void
 circuit_expire_all_dirty_circs(void)
 {
   circuit_t *circ;
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
 
   for (circ=global_circuitlist; circ; circ = circ->next) {
     if (CIRCUIT_IS_ORIGIN(circ) &&

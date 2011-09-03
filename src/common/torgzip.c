@@ -43,11 +43,7 @@
 #define off64_t int64_t
 #endif
 
-#ifdef _MSC_VER
-#include "..\..\contrib\zlib\zlib.h"
-#else
 #include <zlib.h>
-#endif
 
 /** Set to 1 if zlib is a version that supports gzip; set to 0 if it doesn't;
  * set to -1 if we haven't checked yet. */
@@ -378,7 +374,7 @@ tor_gzip_uncompress(char **out, size_t *out_len,
 compress_method_t
 detect_compression_method(const char *in, size_t in_len)
 {
-  if (in_len > 2 && !memcmp(in, "\x1f\x8b", 2)) {
+  if (in_len > 2 && fast_memeq(in, "\x1f\x8b", 2)) {
     return GZIP_METHOD;
   } else if (in_len > 2 && (in[0] & 0x0f) == 8 &&
              (ntohs(get_uint16(in)) % 31) == 0) {

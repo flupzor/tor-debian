@@ -15,8 +15,8 @@
 #ifdef GEOIP_PRIVATE
 int geoip_parse_entry(const char *line);
 #endif
-int should_record_bridge_info(or_options_t *options);
-int geoip_load_file(const char *filename, or_options_t *options);
+int should_record_bridge_info(const or_options_t *options);
+int geoip_load_file(const char *filename, const or_options_t *options);
 int geoip_get_country_by_ip(uint32_t ipaddr);
 int geoip_get_n_countries(void);
 const char *geoip_get_country_name(country_t num);
@@ -43,12 +43,17 @@ void geoip_change_dirreq_state(uint64_t dirreq_id, dirreq_type_t type,
                                dirreq_state_t new_state);
 
 void geoip_dirreq_stats_init(time_t now);
+void geoip_reset_dirreq_stats(time_t now);
+char *geoip_format_dirreq_stats(time_t now);
 time_t geoip_dirreq_stats_write(time_t now);
 void geoip_dirreq_stats_term(void);
 void geoip_entry_stats_init(time_t now);
 time_t geoip_entry_stats_write(time_t now);
 void geoip_entry_stats_term(void);
+void geoip_reset_entry_stats(time_t now);
+char *geoip_format_entry_stats(time_t now);
 void geoip_bridge_stats_init(time_t now);
+char *geoip_format_bridge_stats(time_t now);
 time_t geoip_bridge_stats_write(time_t now);
 void geoip_bridge_stats_term(void);
 const char *geoip_get_bridge_stats_extrainfo(time_t);

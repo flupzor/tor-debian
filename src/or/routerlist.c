@@ -40,9 +40,9 @@
 
 /* static function prototypes */
 static const routerstatus_t *router_pick_directory_server_impl(
-                                           authority_type_t auth, int flags);
+                                           dirinfo_type_t auth, int flags);
 static const routerstatus_t *router_pick_trusteddirserver_impl(
-                          authority_type_t auth, int flags, int *n_busy_out);
+                          dirinfo_type_t auth, int flags, int *n_busy_out);
 static void mark_all_trusteddirservers_up(void);
 static int router_nickname_matches(const routerinfo_t *router,
                                    const char *nickname);
@@ -56,6 +56,8 @@ static const char *signed_descriptor_get_body_impl(
                                               int with_annotations);
 static void list_pending_downloads(digestmap_t *result,
                                    int purpose, const char *prefix);
+static void launch_dummy_descriptor_download_as_needed(time_t now,
+                                   const or_options_t *options);
 
 DECLARE_TYPED_DIGESTMAP_FNS(sdmap_, digest_sd_map_t, signed_descriptor_t)
 DECLARE_TYPED_DIGESTMAP_FNS(rimap_, digest_ri_map_t, routerinfo_t)
@@ -97,7 +99,7 @@ static smartlist_t *warned_nicknames = NULL;
 /** The last time we tried to download any routerdesc, or 0 for "never".  We
  * use this to rate-limit download attempts when the number of routerdescs to
  * download is low. */
-static time_t last_routerdesc_download_attempted = 0;
+static time_t last_descriptor_download_attempted = 0;
 
 /** When we last computed the weights to use for bandwidths on directory
  * requests, what were the total weighted bandwidth, and our share of that
@@ -109,7 +111,7 @@ static uint64_t sl_last_total_weighted_bw = 0,
 /** Return the number of directory authorities whose type matches some bit set
  * in <b>type</b>  */
 int
-get_n_authorities(authority_type_t type)
+get_n_authorities(dirinfo_type_t type)
 {
   int n = 0;
   if (!trusted_dir_servers)
@@ -120,7 +122,7 @@ get_n_authorities(authority_type_t type)
   return n;
 }
 
-#define get_n_v2_authorities() get_n_authorities(V2_AUTHORITY)
+#define get_n_v2_authorities() get_n_authorities(V2_DIRINFO)
 
 /** Helper: Return the cert_list_t for an authority whose authority ID is
  * <b>id_digest</b>, allocating a new list if necessary. */
@@ -168,7 +170,7 @@ already_have_cert(authority_cert_t *cert)
 
   SMARTLIST_FOREACH(cl->certs, authority_cert_t *, c,
   {
-    if (!memcmp(c->cache_info.signed_descriptor_digest,
+    if (tor_memeq(c->cache_info.signed_descriptor_digest,
                 cert->cache_info.signed_descriptor_digest,
                 DIGEST_LEN))
       return 1;
@@ -382,16 +384,16 @@ authority_cert_get_by_sk_digest(const char *sk_digest)
     return NULL;
 
   if ((c = get_my_v3_authority_cert()) &&
-      !memcmp(c->signing_key_digest, sk_digest, DIGEST_LEN))
+      tor_memeq(c->signing_key_digest, sk_digest, DIGEST_LEN))
     return c;
   if ((c = get_my_v3_legacy_cert()) &&
-      !memcmp(c->signing_key_digest, sk_digest, DIGEST_LEN))
+      tor_memeq(c->signing_key_digest, sk_digest, DIGEST_LEN))
     return c;
 
   DIGESTMAP_FOREACH(trusted_dir_certs, key, cert_list_t *, cl) {
     SMARTLIST_FOREACH(cl->certs, authority_cert_t *, cert,
     {
-      if (!memcmp(cert->signing_key_digest, sk_digest, DIGEST_LEN))
+      if (tor_memeq(cert->signing_key_digest, sk_digest, DIGEST_LEN))
         return cert;
     });
   } DIGESTMAP_FOREACH_END;
@@ -410,7 +412,7 @@ authority_cert_get_by_digests(const char *id_digest,
       !(cl = digestmap_get(trusted_dir_certs, id_digest)))
     return NULL;
   SMARTLIST_FOREACH(cl->certs, authority_cert_t *, cert,
-    if (!memcmp(cert->signing_key_digest, sk_digest, DIGEST_LEN))
+    if (tor_memeq(cert->signing_key_digest, sk_digest, DIGEST_LEN))
       return cert; );
 
   return NULL;
@@ -518,7 +520,7 @@ authority_certs_fetch_missing(networkstatus_t *status, time_t now)
   }
   SMARTLIST_FOREACH_BEGIN(trusted_dir_servers, trusted_dir_server_t *, ds) {
     int found = 0;
-    if (!(ds->type & V3_AUTHORITY))
+    if (!(ds->type & V3_DIRINFO))
       continue;
     if (smartlist_digest_isin(missing_digests, ds->v3_identity_digest))
       continue;
@@ -931,7 +933,7 @@ router_get_trusted_dir_servers(void)
  * servers that have returned 503 recently.
  */
 const routerstatus_t *
-router_pick_directory_server(authority_type_t type, int flags)
+router_pick_directory_server(dirinfo_type_t type, int flags)
 {
   const routerstatus_t *choice;
   if (get_options()->PreferTunneledDirConns)
@@ -976,7 +978,7 @@ router_get_my_share_of_directory_requests(double *v2_share_out,
   /* XXXX This is a bit of a kludge */
   if (rs->is_v2_dir) {
     sl_last_total_weighted_bw = 0;
-    router_pick_directory_server(V2_AUTHORITY, pds_flags);
+    router_pick_directory_server(V2_DIRINFO, pds_flags);
     if (sl_last_total_weighted_bw != 0) {
       *v2_share_out = U64_TO_DBL(sl_last_weighted_bw_of_me) /
         U64_TO_DBL(sl_last_total_weighted_bw);
@@ -985,7 +987,7 @@ router_get_my_share_of_directory_requests(double *v2_share_out,
 
   if (rs->version_supports_v3_dir) {
     sl_last_total_weighted_bw = 0;
-    router_pick_directory_server(V3_AUTHORITY, pds_flags);
+    router_pick_directory_server(V3_DIRINFO, pds_flags);
     if (sl_last_total_weighted_bw != 0) {
       *v3_share_out = U64_TO_DBL(sl_last_weighted_bw_of_me) /
         U64_TO_DBL(sl_last_total_weighted_bw);
@@ -1006,7 +1008,7 @@ router_get_trusteddirserver_by_digest(const char *digest)
 
   SMARTLIST_FOREACH(trusted_dir_servers, trusted_dir_server_t *, ds,
      {
-       if (!memcmp(ds->digest, digest, DIGEST_LEN))
+       if (tor_memeq(ds->digest, digest, DIGEST_LEN))
          return ds;
      });
 
@@ -1025,8 +1027,8 @@ trusteddirserver_get_by_v3_auth_digest(const char *digest)
 
   SMARTLIST_FOREACH(trusted_dir_servers, trusted_dir_server_t *, ds,
      {
-       if (!memcmp(ds->v3_identity_digest, digest, DIGEST_LEN) &&
-           (ds->type & V3_AUTHORITY))
+       if (tor_memeq(ds->v3_identity_digest, digest, DIGEST_LEN) &&
+           (ds->type & V3_DIRINFO))
          return ds;
      });
 
@@ -1037,7 +1039,7 @@ trusteddirserver_get_by_v3_auth_digest(const char *digest)
  * router_pick_directory_server.
  */
 const routerstatus_t *
-router_pick_trusteddirserver(authority_type_t type, int flags)
+router_pick_trusteddirserver(dirinfo_type_t type, int flags)
 {
   const routerstatus_t *choice;
   int busy = 0;
@@ -1073,9 +1075,9 @@ router_pick_trusteddirserver(authority_type_t type, int flags)
  * that we can use with BEGINDIR.
  */
 static const routerstatus_t *
-router_pick_directory_server_impl(authority_type_t type, int flags)
+router_pick_directory_server_impl(dirinfo_type_t type, int flags)
 {
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   const node_t *result;
   smartlist_t *direct, *tunnel;
   smartlist_t *trusted_direct, *trusted_tunnel;
@@ -1115,19 +1117,22 @@ router_pick_directory_server_impl(authority_type_t type, int flags)
       continue;
     if (requireother && router_digest_is_me(node->identity))
       continue;
-    if (type & V3_AUTHORITY) {
+    if (type & V3_DIRINFO) {
       if (!(status->version_supports_v3_dir ||
             router_digest_is_trusted_dir_type(node->identity,
-                                              V3_AUTHORITY)))
+                                              V3_DIRINFO)))
         continue;
     }
     is_trusted = router_digest_is_trusted_dir(node->identity);
-    if ((type & V2_AUTHORITY) && !(node->rs->is_v2_dir || is_trusted))
+    if ((type & V2_DIRINFO) && !(node->rs->is_v2_dir || is_trusted))
       continue;
-    if ((type & EXTRAINFO_CACHE) &&
+    if ((type & EXTRAINFO_DIRINFO) &&
         !router_supports_extrainfo(node->identity, 0))
       continue;
-    if (try_excluding && options->ExcludeNodes &&
+    if ((type & MICRODESC_DIRINFO) && !is_trusted &&
+        !node->rs->version_supports_microdesc_cache)
+      continue;
+    if (try_excluding &&
         routerset_contains_routerstatus(options->ExcludeNodes, status,
                                         country)) {
       ++n_excluded;
@@ -1192,10 +1197,10 @@ router_pick_directory_server_impl(authority_type_t type, int flags)
  * are as for router_pick_directory_server_impl().
  */
 static const routerstatus_t *
-router_pick_trusteddirserver_impl(authority_type_t type, int flags,
+router_pick_trusteddirserver_impl(dirinfo_type_t type, int flags,
                                   int *n_busy_out)
 {
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   smartlist_t *direct, *tunnel;
   smartlist_t *overloaded_direct, *overloaded_tunnel;
   const routerinfo_t *me = router_get_my_routerinfo();
@@ -1227,12 +1232,12 @@ router_pick_trusteddirserver_impl(authority_type_t type, int flags,
       if (!d->is_running) continue;
       if ((type & d->type) == 0)
         continue;
-      if ((type & EXTRAINFO_CACHE) &&
+      if ((type & EXTRAINFO_DIRINFO) &&
           !router_supports_extrainfo(d->digest, 1))
         continue;
       if (requireother && me && router_digest_is_me(d->digest))
           continue;
-      if (try_excluding && options->ExcludeNodes &&
+      if (try_excluding &&
           routerset_contains_routerstatus(options->ExcludeNodes,
                                           &d->fake_status, -1)) {
         ++n_excluded;
@@ -1352,21 +1357,33 @@ addrs_in_same_network_family(const tor_addr_t *a1,
   return 0 == tor_addr_compare_masked(a1, a2, 16, CMP_SEMANTIC);
 }
 
-/** Add all the family of <b>router</b> to the smartlist <b>sl</b>.
- * This is used to make sure we don't pick siblings in a single path,
- * or pick more than one relay from a family for our entry guard list.
+/**
+ * Add all the family of <b>node</b>, including <b>node</b> itself, to
+ * the smartlist <b>sl</b>.
+ *
+ * This is used to make sure we don't pick siblings in a single path, or
+ * pick more than one relay from a family for our entry guard list.
+ * Note that a node may be added to <b>sl</b> more than once if it is
+ * part of <b>node</b>'s family for more than one reason.
  */
 void
-nodelist_add_node_family(smartlist_t *sl, const node_t *node)
+nodelist_add_node_and_family(smartlist_t *sl, const node_t *node)
 {
   /* XXXX MOVE */
   const smartlist_t *all_nodes = nodelist_get_list();
   const smartlist_t *declared_family;
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
 
   tor_assert(node);
 
   declared_family = node_get_declared_family(node);
+
+  /* Let's make sure that we have the node itself, if it's a real node. */
+  {
+    const node_t *real_node = node_get_by_id(node->identity);
+    if (real_node)
+      smartlist_add(sl, (node_t*)real_node);
+  }
 
   /* First, add any nodes with similar network addresses. */
   if (options->EnforceDistinctSubnets) {
@@ -1412,13 +1429,14 @@ nodelist_add_node_family(smartlist_t *sl, const node_t *node)
   }
 }
 
-/** Given a <b>router</b>, add every node_t in its family to <b>sl</b>.
+/** Given a <b>router</b>, add every node_t in its family (including the
+ * node itself</b>) to <b>sl</b>.
  *
  * Note the type mismatch: This function takes a routerinfo, but adds nodes
  * to the smartlist!
  */
 static void
-routerlist_add_nodes_in_family(smartlist_t *sl, const routerinfo_t *router)
+routerlist_add_node_and_family(smartlist_t *sl, const routerinfo_t *router)
 {
   /* XXXX MOVE ? */
   node_t fake_node;
@@ -1429,7 +1447,7 @@ routerlist_add_nodes_in_family(smartlist_t *sl, const routerinfo_t *router)
     memcpy(fake_node.identity, router->cache_info.identity_digest, DIGEST_LEN);
     node = &fake_node;
   }
-  nodelist_add_node_family(sl, node);
+  nodelist_add_node_and_family(sl, node);
 }
 
 /** Return true iff <b>node</b> is named by some nickname in <b>lst</b>. */
@@ -1451,7 +1469,7 @@ int
 nodes_in_same_family(const node_t *node1, const node_t *node2)
 {
   /* XXXX MOVE */
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
 
   /* Are they in the same family because of their addresses? */
   if (options->EnforceDistinctSubnets) {
@@ -1560,7 +1578,7 @@ router_find_exact_exit_enclave(const char *address, uint16_t port)
   uint32_t addr;
   struct in_addr in;
   tor_addr_t a;
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
 
   if (!tor_inet_aton(address, &in))
     return NULL; /* it's not an IP already */
@@ -2166,12 +2184,8 @@ router_choose_random_node(smartlist_t *excludedsmartlist,
       });
   }
 
-  if ((r = routerlist_find_my_routerinfo())) {
-    const node_t *me = node_get_by_id(r->cache_info.identity_digest);
-    if (me)
-      smartlist_add(excludednodes, (void *)me);
-    routerlist_add_nodes_in_family(excludednodes, r);
-  }
+  if ((r = routerlist_find_my_routerinfo()))
+    routerlist_add_node_and_family(excludednodes, r);
 
   router_add_running_nodes_to_smartlist(sl, allow_invalid,
                                         need_uptime, need_capacity,
@@ -2269,25 +2283,27 @@ hex_digest_nickname_matches(const char *hexdigest, const char *identity_digest,
     return 0;
 
   if (nn_char == '=' || nn_char == '~') {
+    if (!nickname)
+      return 0;
     if (strcasecmp(nn_buf, nickname))
       return 0;
     if (nn_char == '=' && !is_named)
       return 0;
   }
 
-  return !memcmp(digest, identity_digest, DIGEST_LEN);
+  return tor_memeq(digest, identity_digest, DIGEST_LEN);
 }
 
 /* Return true iff <b>router</b> is listed as named in the current
  * consensus. */
-static int
+int
 router_is_named(const routerinfo_t *router)
 {
   const char *digest =
     networkstatus_get_router_digest_by_nickname(router->nickname);
 
   return (digest &&
-          !memcmp(digest, router->cache_info.identity_digest, DIGEST_LEN));
+          tor_memeq(digest, router->cache_info.identity_digest, DIGEST_LEN));
 }
 
 /** Return true iff the digest of <b>router</b>'s identity key,
@@ -2377,8 +2393,8 @@ router_get_by_nickname(const char *nickname, int warn_if_unnamed)
       if (n_matches <= 1 || router->is_running)
         best_match = router;
     } else if (maybedigest &&
-               !memcmp(digest, router->cache_info.identity_digest, DIGEST_LEN)
-               ) {
+               tor_memeq(digest, router->cache_info.identity_digest,
+                         DIGEST_LEN)) {
       if (router_hex_digest_matches(router, nickname))
         return router;
       /* If we reach this point, we have a ID=name syntax that matches the
@@ -2443,30 +2459,18 @@ router_get_by_nickname(const char *nickname, int warn_if_unnamed)
 #endif
 }
 
-/** Try to find a routerinfo for <b>digest</b>. If we don't have one,
- * return 1. If we do, ask tor_version_as_new_as() for the answer.
- */
-int
-router_digest_version_as_new_as(const char *digest, const char *cutoff)
-{
-  const routerinfo_t *router = router_get_by_id_digest(digest);
-  if (!router)
-    return 1;
-  return tor_version_as_new_as(router->platform, cutoff);
-}
-
 /** Return true iff <b>digest</b> is the digest of the identity key of a
  * trusted directory matching at least one bit of <b>type</b>.  If <b>type</b>
  * is zero, any authority is okay. */
 int
-router_digest_is_trusted_dir_type(const char *digest, authority_type_t type)
+router_digest_is_trusted_dir_type(const char *digest, dirinfo_type_t type)
 {
   if (!trusted_dir_servers)
     return 0;
   if (authdir_mode(get_options()) && router_digest_is_me(digest))
     return 1;
   SMARTLIST_FOREACH(trusted_dir_servers, trusted_dir_server_t *, ent,
-    if (!memcmp(digest, ent->digest, DIGEST_LEN)) {
+    if (tor_memeq(digest, ent->digest, DIGEST_LEN)) {
       return (!type) || ((type & ent->type) != 0);
     });
   return 0;
@@ -2615,7 +2619,7 @@ signed_descriptor_get_body_impl(const signed_descriptor_t *desc,
 
   tor_assert(r);
   if (!with_annotations) {
-    if (memcmp("router ", r, 7) && memcmp("extra-info ", r, 11)) {
+    if (fast_memcmp("router ", r, 7) && fast_memcmp("extra-info ", r, 11)) {
       char *cp = tor_strndup(r, 64);
       log_err(LD_DIR, "descriptor at %p begins with unexpected string %s.  "
               "Is another process running in our data directory?  Exiting.",
@@ -3093,7 +3097,7 @@ routerlist_replace(routerlist_t *rl, routerinfo_t *ri_old,
     routerlist_insert(rl, ri_new);
     return;
   }
-  if (memcmp(ri_old->cache_info.identity_digest,
+  if (tor_memneq(ri_old->cache_info.identity_digest,
              ri_new->cache_info.identity_digest, DIGEST_LEN)) {
     /* digests don't match; digestmap_set won't replace */
     rimap_remove(rl->identity_map, ri_old->cache_info.identity_digest);
@@ -3110,7 +3114,7 @@ routerlist_replace(routerlist_t *rl, routerinfo_t *ri_old,
               &ri_new->cache_info);
   }
 
-  same_descriptors = ! memcmp(ri_old->cache_info.signed_descriptor_digest,
+  same_descriptors = tor_memeq(ri_old->cache_info.signed_descriptor_digest,
                               ri_new->cache_info.signed_descriptor_digest,
                               DIGEST_LEN);
 
@@ -3132,7 +3136,7 @@ routerlist_replace(routerlist_t *rl, routerinfo_t *ri_old,
       sdmap_remove(rl->desc_digest_map,
                    ri_old->cache_info.signed_descriptor_digest);
 
-      if (memcmp(ri_old->cache_info.extra_info_digest,
+      if (tor_memneq(ri_old->cache_info.extra_info_digest,
                  ri_new->cache_info.extra_info_digest, DIGEST_LEN)) {
         ei_tmp = eimap_remove(rl->extra_info_map,
                               ri_old->cache_info.extra_info_digest);
@@ -3231,16 +3235,14 @@ router_set_status(const char *digest, int up)
   tor_assert(digest);
 
   SMARTLIST_FOREACH(trusted_dir_servers, trusted_dir_server_t *, d,
-                    if (!memcmp(d->digest, digest, DIGEST_LEN))
+                    if (tor_memeq(d->digest, digest, DIGEST_LEN))
                       d->is_running = up);
 
   node = node_get_mutable_by_id(digest);
   if (node) {
 #if 0
-    char buf[MAX_VERBOSE_NICKNAME_LEN+1];
-    node_get_verbose_nickname(node,buf);
     log_debug(LD_DIR,"Marking router %s as %s.",
-              buf, up ? "up" : "down");
+              node_describe(node), up ? "up" : "down");
 #endif
     if (!up && node_is_me(node) && !we_are_hibernating())
       log_warn(LD_NET, "We just marked ourself as down. Are your external "
@@ -3276,11 +3278,12 @@ router_add_to_routerlist(routerinfo_t *router, const char **msg,
                          int from_cache, int from_fetch)
 {
   const char *id_digest;
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   int authdir = authdir_mode_handles_descs(options, router->purpose);
   int authdir_believes_valid = 0;
   routerinfo_t *old_router;
-  networkstatus_t *consensus = networkstatus_get_latest_consensus();
+  networkstatus_t *consensus =
+    networkstatus_get_latest_consensus_by_flavor(FLAV_NS);
   const smartlist_t *networkstatus_v2_list = networkstatus_get_v2_list();
   int in_consensus = 0;
 
@@ -3309,11 +3312,12 @@ router_add_to_routerlist(routerinfo_t *router, const char **msg,
         router->purpose == ROUTER_PURPOSE_BRIDGE &&
         !was_bridge) {
       log_info(LD_DIR, "Replacing non-bridge descriptor with bridge "
-               "descriptor for router '%s'", router->nickname);
+               "descriptor for router %s",
+               router_describe(router));
     } else {
       log_info(LD_DIR,
-               "Dropping descriptor that we already have for router '%s'",
-               router->nickname);
+               "Dropping descriptor that we already have for router %s",
+               router_describe(router));
       *msg = "Router descriptor was not new.";
       routerinfo_free(router);
       return ROUTER_WAS_NOT_NEW;
@@ -3337,8 +3341,8 @@ router_add_to_routerlist(routerinfo_t *router, const char **msg,
       /* We asked for it, so some networkstatus must have listed it when we
        * did.  Save it if we're a cache in case somebody else asks for it. */
       log_info(LD_DIR,
-               "Received a no-longer-recognized descriptor for router '%s'",
-               router->nickname);
+               "Received a no-longer-recognized descriptor for router %s",
+               router_describe(router));
       *msg = "Router descriptor is not referenced by any network-status.";
 
       /* Only journal this desc if we'll be serving it. */
@@ -3355,7 +3359,7 @@ router_add_to_routerlist(routerinfo_t *router, const char **msg,
   {
     routerstatus_t *rs =
       networkstatus_v2_find_mutable_entry(ns, id_digest);
-    if (rs && !memcmp(rs->descriptor_digest,
+    if (rs && tor_memeq(rs->descriptor_digest,
                       router->cache_info.signed_descriptor_digest,
                       DIGEST_LEN))
       rs->need_to_mirror = 0;
@@ -3363,7 +3367,7 @@ router_add_to_routerlist(routerinfo_t *router, const char **msg,
   if (consensus) {
     routerstatus_t *rs = networkstatus_vote_find_mutable_entry(
                                                      consensus, id_digest);
-    if (rs && !memcmp(rs->descriptor_digest,
+    if (rs && tor_memeq(rs->descriptor_digest,
                       router->cache_info.signed_descriptor_digest,
                       DIGEST_LEN)) {
       in_consensus = 1;
@@ -3390,8 +3394,9 @@ router_add_to_routerlist(routerinfo_t *router, const char **msg,
   if (router->purpose == ROUTER_PURPOSE_BRIDGE && from_cache &&
       !authdir_mode_bridge(options) &&
       !routerinfo_is_a_configured_bridge(router)) {
-    log_info(LD_DIR, "Dropping bridge descriptor for '%s' because we have "
-             "no bridge configured at that address.", router->nickname);
+    log_info(LD_DIR, "Dropping bridge descriptor for %s because we have "
+             "no bridge configured at that address.",
+             safe_str_client(router_describe(router)));
     *msg = "Router descriptor was not a configured bridge.";
     routerinfo_free(router);
     return ROUTER_WAS_NOT_WANTED;
@@ -3402,8 +3407,8 @@ router_add_to_routerlist(routerinfo_t *router, const char **msg,
     if (!in_consensus && (router->cache_info.published_on <=
                           old_router->cache_info.published_on)) {
       /* Same key, but old.  This one is not listed in the consensus. */
-      log_debug(LD_DIR, "Not-new descriptor for router '%s'",
-                router->nickname);
+      log_debug(LD_DIR, "Not-new descriptor for router %s",
+                router_describe(router));
       /* Only journal this desc if we'll be serving it. */
       if (!from_cache && should_cache_old_descriptors())
         signed_desc_append_to_journal(&router->cache_info,
@@ -3413,9 +3418,8 @@ router_add_to_routerlist(routerinfo_t *router, const char **msg,
       return ROUTER_WAS_NOT_NEW;
     } else {
       /* Same key, and either new, or listed in the consensus. */
-      log_debug(LD_DIR, "Replacing entry for router '%s/%s' [%s]",
-                router->nickname, old_router->nickname,
-                hex_str(id_digest,DIGEST_LEN));
+      log_debug(LD_DIR, "Replacing entry for router %s",
+                router_describe(router));
       if (routers_have_same_or_addr(router, old_router)) {
         /* these carry over when the address and orport are unchanged. */
         router->last_reachable = old_router->last_reachable;
@@ -3485,7 +3489,7 @@ _compare_old_routers_by_identity(const void **_a, const void **_b)
 {
   int i;
   const signed_descriptor_t *r1 = *_a, *r2 = *_b;
-  if ((i = memcmp(r1->identity_digest, r2->identity_digest, DIGEST_LEN)))
+  if ((i = fast_memcmp(r1->identity_digest, r2->identity_digest, DIGEST_LEN)))
     return i;
   return (int)(r1->published_on - r2->published_on);
 }
@@ -3533,7 +3537,7 @@ routerlist_remove_old_cached_routers_with_id(time_t now,
   ident = ((signed_descriptor_t*)smartlist_get(lst, lo))->identity_digest;
   for (i = lo+1; i <= hi; ++i) {
     signed_descriptor_t *r = smartlist_get(lst, i);
-    tor_assert(!memcmp(ident, r->identity_digest, DIGEST_LEN));
+    tor_assert(tor_memeq(ident, r->identity_digest, DIGEST_LEN));
   }
 #endif
   /* Check whether we need to do anything at all. */
@@ -3691,8 +3695,8 @@ routerlist_remove_old_routers(void)
         /* Too old: remove it.  (If we're a cache, just move it into
          * old_routers.) */
         log_info(LD_DIR,
-                 "Forgetting obsolete (too old) routerinfo for router '%s'",
-                 router->nickname);
+                 "Forgetting obsolete (too old) routerinfo for router %s",
+                 router_describe(router));
         routerlist_remove(routerlist, router, 1, now);
         i--;
       }
@@ -3745,7 +3749,7 @@ routerlist_remove_old_routers(void)
       cur_id = r->identity_digest;
       hi = i;
     }
-    if (memcmp(cur_id, r->identity_digest, DIGEST_LEN)) {
+    if (tor_memneq(cur_id, r->identity_digest, DIGEST_LEN)) {
       routerlist_remove_old_cached_routers_with_id(now,
                                                    cutoff, i+1, hi, retain);
       cur_id = r->identity_digest;
@@ -3983,7 +3987,7 @@ signed_desc_digest_is_recognized(signed_descriptor_t *desc)
 
   if (consensus) {
     rs = networkstatus_vote_find_entry(consensus, desc->identity_digest);
-    if (rs && !memcmp(rs->descriptor_digest,
+    if (rs && tor_memeq(rs->descriptor_digest,
                       desc->signed_descriptor_digest, DIGEST_LEN))
       return 1;
   }
@@ -3992,12 +3996,22 @@ signed_desc_digest_is_recognized(signed_descriptor_t *desc)
     {
       if (!(rs = networkstatus_v2_find_entry(ns, desc->identity_digest)))
         continue;
-      if (!memcmp(rs->descriptor_digest,
+      if (tor_memeq(rs->descriptor_digest,
                   desc->signed_descriptor_digest, DIGEST_LEN))
         return 1;
     });
   }
   return 0;
+}
+
+/** Update downloads for router descriptors and/or microdescriptors as
+ * appropriate. */
+void
+update_all_descriptor_downloads(time_t now)
+{
+  update_router_descriptor_downloads(now);
+  update_microdesc_downloads(now);
+  launch_dummy_descriptor_download_as_needed(now, get_options());
 }
 
 /** Clear all our timeouts for fetching v2 and v3 directory stuff, and then
@@ -4008,14 +4022,13 @@ routerlist_retry_directory_downloads(time_t now)
   router_reset_status_download_failures();
   router_reset_descriptor_download_failures();
   update_networkstatus_downloads(now);
-  update_router_descriptor_downloads(now);
-  update_microdesc_downloads(now);
+  update_all_descriptor_downloads(now);
 }
 
 /** Return 1 if all running sufficiently-stable routers we can use will reject
  * addr:port, return 0 if any might accept it. */
 int
-router_exit_policy_all_nodes_reject(uint32_t addr, uint16_t port,
+router_exit_policy_all_nodes_reject(const tor_addr_t *addr, uint16_t port,
                                     int need_uptime)
 { /* XXXX MOVE */
   addr_policy_result_t r;
@@ -4024,7 +4037,7 @@ router_exit_policy_all_nodes_reject(uint32_t addr, uint16_t port,
     if (node->is_running &&
         !node_is_unreliable(node, need_uptime, 0, 0)) {
 
-      r = compare_addr_to_node_policy(addr, port, node);
+      r = compare_tor_addr_to_node_policy(addr, port, node);
 
       if (r != ADDR_POLICY_REJECTED && r != ADDR_POLICY_PROBABLY_REJECTED)
         return 0; /* this one could be ok. good enough. */
@@ -4049,7 +4062,7 @@ trusted_dir_server_t *
 add_trusted_dir_server(const char *nickname, const char *address,
                        uint16_t dir_port, uint16_t or_port,
                        const char *digest, const char *v3_auth_digest,
-                       authority_type_t type)
+                       dirinfo_type_t type)
 {
   trusted_dir_server_t *ent;
   uint32_t a;
@@ -4084,7 +4097,7 @@ add_trusted_dir_server(const char *nickname, const char *address,
   ent->is_running = 1;
   ent->type = type;
   memcpy(ent->digest, digest, DIGEST_LEN);
-  if (v3_auth_digest && (type & V3_AUTHORITY))
+  if (v3_auth_digest && (type & V3_DIRINFO))
     memcpy(ent->v3_identity_digest, v3_auth_digest, DIGEST_LEN);
 
   dlen = 64 + strlen(hostname) + (nickname?strlen(nickname):0);
@@ -4163,7 +4176,7 @@ int
 any_trusted_dir_is_v1_authority(void)
 {
   if (trusted_dir_servers)
-    return get_n_authorities(V1_AUTHORITY) > 0;
+    return get_n_authorities(V1_DIRINFO) > 0;
 
   return 0;
 }
@@ -4293,7 +4306,8 @@ initiate_descriptor_downloads(const routerstatus_t *source,
  * running, or otherwise not a descriptor that we would make any
  * use of even if we had it. Else return 1. */
 static INLINE int
-client_would_use_router(routerstatus_t *rs, time_t now, or_options_t *options)
+client_would_use_router(const routerstatus_t *rs, time_t now,
+                        const or_options_t *options)
 {
   if (!rs->is_flagged_running && !options->FetchUselessDescriptors) {
     /* If we had this router descriptor, we wouldn't even bother using it.
@@ -4346,7 +4360,7 @@ launch_descriptor_downloads(int purpose,
                             const routerstatus_t *source, time_t now)
 {
   int should_delay = 0, n_downloadable;
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   const char *descname;
 
   tor_assert(purpose == DIR_PURPOSE_FETCH_SERVERDESC ||
@@ -4363,15 +4377,15 @@ launch_descriptor_downloads(int purpose,
                 descname);
       should_delay = 0;
     } else {
-      should_delay = (last_routerdesc_download_attempted +
+      should_delay = (last_descriptor_download_attempted +
                       MAX_CLIENT_INTERVAL_WITHOUT_REQUEST) > now;
       if (!should_delay && n_downloadable) {
-        if (last_routerdesc_download_attempted) {
+        if (last_descriptor_download_attempted) {
           log_info(LD_DIR,
                    "There are not many downloadable %ss, but we've "
                    "been waiting long enough (%d seconds). Downloading.",
                    descname,
-                   (int)(now-last_routerdesc_download_attempted));
+                   (int)(now-last_descriptor_download_attempted));
         } else {
           log_info(LD_DIR,
                    "There are not many downloadable %ss, but we haven't "
@@ -4434,7 +4448,7 @@ launch_descriptor_downloads(int purpose,
                                     downloadable, i, i+n_per_request,
                                     pds_flags);
     }
-    last_routerdesc_download_attempted = now;
+    last_descriptor_download_attempted = now;
   }
 }
 
@@ -4450,7 +4464,7 @@ update_router_descriptor_cache_downloads_v2(time_t now)
   digestmap_t *map; /* Which descs are in progress, or assigned? */
   int i, j, n;
   int n_download;
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   const smartlist_t *networkstatus_v2_list = networkstatus_get_v2_list();
 
   if (! directory_fetches_dir_info_early(options)) {
@@ -4592,7 +4606,7 @@ void
 update_consensus_router_descriptor_downloads(time_t now, int is_vote,
                                              networkstatus_t *consensus)
 {
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   digestmap_t *map = NULL;
   smartlist_t *no_longer_old = smartlist_create();
   smartlist_t *downloadable = smartlist_create();
@@ -4628,7 +4642,7 @@ update_consensus_router_descriptor_downloads(time_t now, int is_vote,
         const routerinfo_t *ri;
         ++n_have;
         if (!(ri = router_get_by_id_digest(rs->identity_digest)) ||
-            memcmp(ri->cache_info.signed_descriptor_digest,
+            tor_memneq(ri->cache_info.signed_descriptor_digest,
                    sd->signed_descriptor_digest, DIGEST_LEN)) {
           /* We have a descriptor with this digest, but either there is no
            * entry in routerlist with the same ID (!ri), or there is one,
@@ -4666,7 +4680,8 @@ update_consensus_router_descriptor_downloads(time_t now, int is_vote,
         if (oldrouter)
           format_iso_time(time_bufold, oldrouter->cache_info.published_on);
         log_info(LD_DIR, "Learned about %s (%s vs %s) from %s's vote (%s)",
-                 rs->nickname, time_bufnew,
+                 routerstatus_describe(rs),
+                 time_bufnew,
                  oldrouter ? time_bufold : "none",
                  source->nickname, oldrouter ? "known" : "unknown");
       }
@@ -4718,30 +4733,20 @@ update_consensus_router_descriptor_downloads(time_t now, int is_vote,
  * do this only when we aren't seeing incoming data. see bug 652. */
 #define DUMMY_DOWNLOAD_INTERVAL (20*60)
 
-/** Launch downloads for router status as needed. */
-void
-update_router_descriptor_downloads(time_t now)
+/** As needed, launch a dummy router descriptor fetch to see if our
+ * address has changed. */
+static void
+launch_dummy_descriptor_download_as_needed(time_t now,
+                                           const or_options_t *options)
 {
-  or_options_t *options = get_options();
   static time_t last_dummy_download = 0;
-  if (should_delay_dir_fetches(options))
-    return;
-  if (directory_fetches_dir_info_early(options)) {
-    update_router_descriptor_cache_downloads_v2(now);
-  }
-
-  update_consensus_router_descriptor_downloads(now, 0,
-                  networkstatus_get_reasonably_live_consensus(now, FLAV_NS));
-
   /* XXXX023 we could be smarter here; see notes on bug 652. */
-  /* XXXX NM Microdescs: if we're not fetching microdescriptors, we need
-   * to make something else invoke this. */
   /* If we're a server that doesn't have a configured address, we rely on
    * directory fetches to learn when our address changes.  So if we haven't
    * tried to get any routerdescs in a long time, try a dummy fetch now. */
   if (!options->Address &&
       server_mode(options) &&
-      last_routerdesc_download_attempted + DUMMY_DOWNLOAD_INTERVAL < now &&
+      last_descriptor_download_attempted + DUMMY_DOWNLOAD_INTERVAL < now &&
       last_dummy_download + DUMMY_DOWNLOAD_INTERVAL < now) {
     last_dummy_download = now;
     directory_get_from_dirserver(DIR_PURPOSE_FETCH_SERVERDESC,
@@ -4750,11 +4755,28 @@ update_router_descriptor_downloads(time_t now)
   }
 }
 
+/** Launch downloads for router status as needed. */
+void
+update_router_descriptor_downloads(time_t now)
+{
+  const or_options_t *options = get_options();
+  if (should_delay_dir_fetches(options))
+    return;
+  if (!we_fetch_router_descriptors(options))
+    return;
+  if (directory_fetches_dir_info_early(options)) {
+    update_router_descriptor_cache_downloads_v2(now);
+  }
+
+  update_consensus_router_descriptor_downloads(now, 0,
+                  networkstatus_get_reasonably_live_consensus(now, FLAV_NS));
+}
+
 /** Launch extrainfo downloads as needed. */
 void
 update_extrainfo_downloads(time_t now)
 {
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   routerlist_t *rl;
   smartlist_t *wanted;
   digestmap_t *pending;
@@ -4876,23 +4898,31 @@ get_dir_info_status_string(void)
 static void
 count_usable_descriptors(int *num_present, int *num_usable,
                          const networkstatus_t *consensus,
-                         or_options_t *options, time_t now,
+                         const or_options_t *options, time_t now,
                          routerset_t *in_set)
 {
+  const int md = (consensus->flavor == FLAV_MICRODESC);
   *num_present = 0, *num_usable=0;
 
-  SMARTLIST_FOREACH(consensus->routerstatus_list, routerstatus_t *, rs,
-     {
+  SMARTLIST_FOREACH_BEGIN(consensus->routerstatus_list, routerstatus_t *, rs)
+    {
        if (in_set && ! routerset_contains_routerstatus(in_set, rs, -1))
          continue;
        if (client_would_use_router(rs, now, options)) {
+         const char * const digest = rs->descriptor_digest;
+         int present;
          ++*num_usable; /* the consensus says we want it. */
-         if (router_get_by_descriptor_digest(rs->descriptor_digest)) {
+         if (md)
+           present = NULL != microdesc_cache_lookup_by_digest256(NULL, digest);
+         else
+           present = NULL != router_get_by_descriptor_digest(digest);
+         if (present) {
            /* we have the descriptor listed in the consensus. */
            ++*num_present;
          }
        }
-     });
+     }
+  SMARTLIST_FOREACH_END(rs);
 
   log_debug(LD_DIR, "%d usable, %d present.", *num_usable, *num_present);
 }
@@ -4906,7 +4936,7 @@ count_loading_descriptors_progress(void)
   int num_present = 0, num_usable=0;
   time_t now = time(NULL);
   const networkstatus_t *consensus =
-    networkstatus_get_reasonably_live_consensus(now, FLAV_NS);
+    networkstatus_get_reasonably_live_consensus(now,usable_consensus_flavor());
   double fraction;
 
   if (!consensus)
@@ -4934,16 +4964,17 @@ update_router_have_minimum_dir_info(void)
   int num_present = 0, num_usable=0;
   time_t now = time(NULL);
   int res;
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   const networkstatus_t *consensus =
-    networkstatus_get_reasonably_live_consensus(now, FLAV_NS);
+    networkstatus_get_reasonably_live_consensus(now,usable_consensus_flavor());
+  int using_md;
 
   if (!consensus) {
     if (!networkstatus_get_latest_consensus())
-      strlcpy(dir_info_status, "We have no network-status consensus.",
+      strlcpy(dir_info_status, "We have no usable consensus.",
               sizeof(dir_info_status));
     else
-      strlcpy(dir_info_status, "We have no recent network-status consensus.",
+      strlcpy(dir_info_status, "We have no recent usable consensus.",
               sizeof(dir_info_status));
     res = 0;
     goto done;
@@ -4957,19 +4988,22 @@ update_router_have_minimum_dir_info(void)
     goto done;
   }
 
+  using_md = consensus->flavor == FLAV_MICRODESC;
+
   count_usable_descriptors(&num_present, &num_usable, consensus, options, now,
                            NULL);
 
   if (num_present < num_usable/4) {
     tor_snprintf(dir_info_status, sizeof(dir_info_status),
-            "We have only %d/%d usable descriptors.", num_present, num_usable);
+                 "We have only %d/%d usable %sdescriptors.",
+                 num_present, num_usable, using_md ? "micro" : "");
     res = 0;
     control_event_bootstrap(BOOTSTRAP_STATUS_REQUESTING_DESCRIPTORS, 0);
     goto done;
   } else if (num_present < 2) {
     tor_snprintf(dir_info_status, sizeof(dir_info_status),
-                 "Only %d descriptor%s here and believed reachable!",
-                 num_present, num_present ? "" : "s");
+                 "Only %d %sdescriptor%s here and believed reachable!",
+                 num_present, using_md ? "micro" : "", num_present ? "" : "s");
     res = 0;
     goto done;
   }
@@ -4981,8 +5015,8 @@ update_router_have_minimum_dir_info(void)
 
     if (!num_usable || !num_present) {
       tor_snprintf(dir_info_status, sizeof(dir_info_status),
-                   "We have only %d/%d usable entry node descriptors.",
-                   num_present, num_usable);
+                   "We have only %d/%d usable entry node %sdescriptors.",
+                   num_present, num_usable, using_md?"micro":"");
       res = 0;
       goto done;
     }
@@ -5022,7 +5056,7 @@ void
 router_reset_descriptor_download_failures(void)
 {
   networkstatus_reset_download_failures();
-  last_routerdesc_download_attempted = 0;
+  last_descriptor_download_attempted = 0;
   if (!routerlist)
     return;
   SMARTLIST_FOREACH(routerlist->routers, routerinfo_t *, ri,
@@ -5143,13 +5177,14 @@ routerinfo_incompatible_with_extrainfo(const routerinfo_t *ri,
     return 1;
   }
 
-  digest_matches = !memcmp(ei->cache_info.signed_descriptor_digest,
+  digest_matches = tor_memeq(ei->cache_info.signed_descriptor_digest,
                            sd->extra_info_digest, DIGEST_LEN);
 
   /* The identity must match exactly to have been generated at the same time
    * by the same router. */
-  if (memcmp(ri->cache_info.identity_digest, ei->cache_info.identity_digest,
-             DIGEST_LEN)) {
+  if (tor_memneq(ri->cache_info.identity_digest,
+                 ei->cache_info.identity_digest,
+                 DIGEST_LEN)) {
     if (msg) *msg = "Extrainfo nickname or identity did not match routerinfo";
     goto err; /* different servers */
   }
@@ -5159,7 +5194,7 @@ routerinfo_incompatible_with_extrainfo(const routerinfo_t *ri,
     if (crypto_pk_public_checksig(ri->identity_pkey,
                        signed_digest, sizeof(signed_digest),
                        ei->pending_sig, ei->pending_sig_len) != DIGEST_LEN ||
-        memcmp(signed_digest, ei->cache_info.signed_descriptor_digest,
+        tor_memneq(signed_digest, ei->cache_info.signed_descriptor_digest,
                DIGEST_LEN)) {
       ei->bad_sig = 1;
       tor_free(ei->pending_sig);
@@ -5255,25 +5290,25 @@ routerlist_assert_ok(const routerlist_t *rl)
   });
 
   RIMAP_FOREACH(rl->identity_map, d, r) {
-    tor_assert(!memcmp(r->cache_info.identity_digest, d, DIGEST_LEN));
+    tor_assert(tor_memeq(r->cache_info.identity_digest, d, DIGEST_LEN));
   } DIGESTMAP_FOREACH_END;
   SDMAP_FOREACH(rl->desc_digest_map, d, sd) {
-    tor_assert(!memcmp(sd->signed_descriptor_digest, d, DIGEST_LEN));
+    tor_assert(tor_memeq(sd->signed_descriptor_digest, d, DIGEST_LEN));
   } DIGESTMAP_FOREACH_END;
   SDMAP_FOREACH(rl->desc_by_eid_map, d, sd) {
     tor_assert(!tor_digest_is_zero(d));
     tor_assert(sd);
-    tor_assert(!memcmp(sd->extra_info_digest, d, DIGEST_LEN));
+    tor_assert(tor_memeq(sd->extra_info_digest, d, DIGEST_LEN));
   } DIGESTMAP_FOREACH_END;
   EIMAP_FOREACH(rl->extra_info_map, d, ei) {
     signed_descriptor_t *sd;
-    tor_assert(!memcmp(ei->cache_info.signed_descriptor_digest,
+    tor_assert(tor_memeq(ei->cache_info.signed_descriptor_digest,
                        d, DIGEST_LEN));
     sd = sdmap_get(rl->desc_by_eid_map,
                    ei->cache_info.signed_descriptor_digest);
     // tor_assert(sd); // XXXX see above
     if (sd) {
-      tor_assert(!memcmp(ei->cache_info.signed_descriptor_digest,
+      tor_assert(tor_memeq(ei->cache_info.signed_descriptor_digest,
                          sd->extra_info_digest, DIGEST_LEN));
     }
   } DIGESTMAP_FOREACH_END;
@@ -5319,7 +5354,7 @@ static int
 _compare_routerinfo_by_id_digest(const void **a, const void **b)
 {
   routerinfo_t *first = *(routerinfo_t **)a, *second = *(routerinfo_t **)b;
-  return memcmp(first->cache_info.identity_digest,
+  return fast_memcmp(first->cache_info.identity_digest,
                 second->cache_info.identity_digest,
                 DIGEST_LEN);
 }
@@ -5480,7 +5515,7 @@ routerset_parse(routerset_t *target, const char *s, const char *description)
 void
 refresh_all_country_info(void)
 {
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
 
   if (options->EntryNodes)
     routerset_refresh_countries(options->EntryNodes);
@@ -5546,7 +5581,8 @@ routerset_contains(const routerset_t *set, const tor_addr_t *addr,
                    const char *nickname, const char *id_digest,
                    country_t country)
 {
-  if (!set || !set->list) return 0;
+  if (!set || !set->list)
+    return 0;
   if (nickname && strmap_get_lc(set->names, nickname))
     return 4;
   if (id_digest && digestmap_get(set->digests, id_digest))
@@ -5827,29 +5863,11 @@ int
 hid_serv_acting_as_directory(void)
 {
   const routerinfo_t *me = router_get_my_routerinfo();
-  networkstatus_t *c;
-  const routerstatus_t *rs;
   if (!me)
     return 0;
   if (!get_options()->HidServDirectoryV2) {
     log_info(LD_REND, "We are not acting as hidden service directory, "
                       "because we have not been configured as such.");
-    return 0;
-  }
-  if (!(c = networkstatus_get_latest_consensus())) {
-    log_info(LD_REND, "There's no consensus, so I can't tell if I'm a hidden "
-             "service directory");
-    return 0;
-  }
-  rs = networkstatus_vote_find_entry(c, me->cache_info.identity_digest);
-  if (!rs) {
-    log_info(LD_REND, "We're not listed in the consensus, so we're not "
-             "being a hidden service directory.");
-    return 0;
-  }
-  if (!rs->is_hs_dir) {
-    log_info(LD_REND, "We're not listed as a hidden service directory in "
-             "the consensus, so we won't be one.");
     return 0;
   }
   return 1;

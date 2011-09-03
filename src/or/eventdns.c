@@ -461,7 +461,7 @@ sockaddr_eq(const struct sockaddr *sa1, const struct sockaddr *sa2,
 		const struct sockaddr_in6 *sin1, *sin2;
 		sin1 = (const struct sockaddr_in6 *)sa1;
 		sin2 = (const struct sockaddr_in6 *)sa2;
-		if (memcmp(sin1->sin6_addr.s6_addr, sin2->sin6_addr.s6_addr, 16))
+		if (tor_memneq(sin1->sin6_addr.s6_addr, sin2->sin6_addr.s6_addr, 16))
 			return 0;
 		else if (include_port && sin1->sin6_port != sin2->sin6_port)
 			return 0;
@@ -1028,6 +1028,9 @@ request_parse(u8 *packet, ssize_t length, struct evdns_server_port *port, struct
 	GET16(answers);
 	GET16(authority);
 	GET16(additional);
+	(void)additional;
+	(void)authority;
+	(void)answers;
 
 	if (flags & 0x8000) return -1; /* Must not be an answer. */
 	flags &= 0x0110; /* Only RD and CD get preserved. */
@@ -1560,7 +1563,7 @@ evdns_request_data_build(const char *const name, const size_t name_len,
 
 /* exported function */
 struct evdns_server_port *
-evdns_add_server_port(int socket, int is_tcp, evdns_request_callback_fn_type cb, void *user_data)
+evdns_add_server_port(tor_socket_t socket, int is_tcp, evdns_request_callback_fn_type cb, void *user_data)
 {
 	struct evdns_server_port *port;
 	if (!(port = mm_malloc(sizeof(struct evdns_server_port))))
@@ -1828,8 +1831,8 @@ evdns_server_request_respond(struct evdns_server_request *_req, int err)
 	r = sendto(port->socket, req->response, req->response_len, 0,
 			   (struct sockaddr*) &req->addr, req->addrlen);
 	if (r<0) {
-		int err = last_error(port->socket);
-		if (! error_is_eagain(err))
+		int error = last_error(port->socket);
+		if (! error_is_eagain(error))
 			return -1;
 
 		if (port->pending_replies) {
@@ -2253,7 +2256,7 @@ sockaddr_is_loopback(const struct sockaddr *addr)
 		return (ntohl(sin->sin_addr.s_addr) & 0xff000000) == 0x7f000000;
 	} else if (addr->sa_family == AF_INET6) {
 		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)addr;
-		return !memcmp(sin6->sin6_addr.s6_addr, LOOPBACK_S6, 16);
+		return fast_memeq(sin6->sin6_addr.s6_addr, LOOPBACK_S6, 16);
 	}
 	return 0;
 }
@@ -2288,7 +2291,7 @@ _evdns_nameserver_add_impl(const struct sockaddr *address,
 
 	evtimer_set(&ns->timeout_event, nameserver_prod_callback, ns);
 
-	ns->socket = tor_open_socket(PF_INET, SOCK_DGRAM, 0);
+	ns->socket = tor_open_socket(address->sa_family, SOCK_DGRAM, 0);
 	if (ns->socket < 0) { err = 1; goto out1; }
 #ifdef WIN32
 	{

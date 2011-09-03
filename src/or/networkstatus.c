@@ -50,7 +50,9 @@ static strmap_t *unnamed_server_map = NULL;
  * of whichever type we are using for our own circuits.  This will be the same
  * as one of current_ns_consensus or current_md_consensus.
  */
-#define current_consensus current_ns_consensus
+#define current_consensus                                       \
+  (we_use_microdescriptors_for_circuits(get_options()) ?        \
+   current_md_consensus : current_ns_consensus)
 
 /** Most recently received and validated v3 "ns"-flavored consensus network
  * status. */
@@ -211,7 +213,7 @@ router_reload_consensus_networkstatus(void)
   char *filename;
   char *s;
   struct stat st;
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   const unsigned int flags = NSSET_FROM_CACHE | NSSET_DONT_DOWNLOAD_CERTS;
   int flav;
 
@@ -422,7 +424,7 @@ networkstatus_get_voter_by_id(networkstatus_t *vote,
   if (!vote || !vote->voters)
     return NULL;
   SMARTLIST_FOREACH(vote->voters, networkstatus_voter_info_t *, voter,
-    if (!memcmp(voter->identity_digest, identity, DIGEST_LEN))
+    if (fast_memeq(voter->identity_digest, identity, DIGEST_LEN))
       return voter);
   return NULL;
 }
@@ -443,9 +445,9 @@ networkstatus_check_document_signature(const networkstatus_t *consensus,
 
   if (crypto_pk_get_digest(cert->signing_key, key_digest)<0)
     return -1;
-  if (memcmp(sig->signing_key_digest, key_digest, DIGEST_LEN) ||
-      memcmp(sig->identity_digest, cert->cache_info.identity_digest,
-             DIGEST_LEN))
+  if (tor_memneq(sig->signing_key_digest, key_digest, DIGEST_LEN) ||
+      tor_memneq(sig->identity_digest, cert->cache_info.identity_digest,
+                 DIGEST_LEN))
     return -1;
 
   signed_digest_len = crypto_pk_keysize(cert->signing_key);
@@ -455,7 +457,7 @@ networkstatus_check_document_signature(const networkstatus_t *consensus,
                                 signed_digest_len,
                                 sig->signature,
                                 sig->signature_len) < dlen ||
-      memcmp(signed_digest, consensus->digests.d[sig->alg], dlen)) {
+      tor_memneq(signed_digest, consensus->digests.d[sig->alg], dlen)) {
     log_warn(LD_DIR, "Got a bad signature on a networkstatus vote");
     sig->bad_signature = 1;
   } else {
@@ -482,7 +484,7 @@ networkstatus_check_consensus_signature(networkstatus_t *consensus,
   int n_bad = 0;
   int n_unknown = 0;
   int n_no_signature = 0;
-  int n_v3_authorities = get_n_authorities(V3_AUTHORITY);
+  int n_v3_authorities = get_n_authorities(V3_DIRINFO);
   int n_required = n_v3_authorities/2 + 1;
   smartlist_t *need_certs_from = smartlist_create();
   smartlist_t *unrecognized = smartlist_create();
@@ -507,7 +509,7 @@ networkstatus_check_consensus_signature(networkstatus_t *consensus,
         authority_cert_t *cert =
           authority_cert_get_by_digests(sig->identity_digest,
                                         sig->signing_key_digest);
-        tor_assert(!memcmp(sig->identity_digest, voter->identity_digest,
+        tor_assert(tor_memeq(sig->identity_digest, voter->identity_digest,
                            DIGEST_LEN));
 
         if (!is_v3_auth) {
@@ -553,7 +555,7 @@ networkstatus_check_consensus_signature(networkstatus_t *consensus,
   SMARTLIST_FOREACH(router_get_trusted_dir_servers(),
                     trusted_dir_server_t *, ds,
     {
-      if ((ds->type & V3_AUTHORITY) &&
+      if ((ds->type & V3_DIRINFO) &&
           !networkstatus_get_voter_by_id(consensus, ds->v3_identity_digest))
         smartlist_add(missing_authorities, ds);
     });
@@ -736,7 +738,7 @@ router_set_networkstatus_v2(const char *s, time_t arrived_at,
   base16_encode(fp, HEX_DIGEST_LEN+1, ns->identity_digest, DIGEST_LEN);
   if (!(trusted_dir =
         router_get_trusteddirserver_by_digest(ns->identity_digest)) ||
-      !(trusted_dir->type & V2_AUTHORITY)) {
+      !(trusted_dir->type & V2_DIRINFO)) {
     log_info(LD_DIR, "Network status was signed, but not by an authoritative "
              "directory we recognize.");
     source_desc = fp;
@@ -810,8 +812,8 @@ router_set_networkstatus_v2(const char *s, time_t arrived_at,
   for (i=0; i < smartlist_len(networkstatus_v2_list); ++i) {
     networkstatus_v2_t *old_ns = smartlist_get(networkstatus_v2_list, i);
 
-    if (!memcmp(old_ns->identity_digest, ns->identity_digest, DIGEST_LEN)) {
-      if (!memcmp(old_ns->networkstatus_digest,
+    if (tor_memeq(old_ns->identity_digest, ns->identity_digest, DIGEST_LEN)) {
+      if (tor_memeq(old_ns->networkstatus_digest,
                   ns->networkstatus_digest, DIGEST_LEN)) {
         /* Same one we had before. */
         networkstatus_v2_free(ns);
@@ -937,7 +939,7 @@ compare_digest_to_routerstatus_entry(const void *_key, const void **_member)
 {
   const char *key = _key;
   const routerstatus_t *rs = *_member;
-  return memcmp(key, rs->identity_digest, DIGEST_LEN);
+  return tor_memcmp(key, rs->identity_digest, DIGEST_LEN);
 }
 
 /** As networkstatus_v2_find_entry, but do not return a const pointer */
@@ -1130,7 +1132,7 @@ update_v2_networkstatus_cache_downloads(time_t now)
       {
          char resource[HEX_DIGEST_LEN+6]; /* fp/hexdigit.z\0 */
          tor_addr_t addr;
-         if (!(ds->type & V2_AUTHORITY))
+         if (!(ds->type & V2_DIRINFO))
            continue;
          if (router_digest_is_me(ds->digest))
            continue;
@@ -1173,7 +1175,7 @@ update_v2_networkstatus_cache_downloads(time_t now)
 
 /** DOCDOC */
 static int
-we_want_to_fetch_flavor(or_options_t *options, int flavor)
+we_want_to_fetch_flavor(const or_options_t *options, int flavor)
 {
   if (flavor < 0 || flavor > N_CONSENSUS_FLAVORS) {
     /* This flavor is crazy; we don't want it */
@@ -1187,7 +1189,7 @@ we_want_to_fetch_flavor(or_options_t *options, int flavor)
   }
   /* Otherwise, we want the flavor only if we want to use it to build
    * circuits. */
-  return (flavor == USABLE_CONSENSUS_FLAVOR);
+  return flavor == usable_consensus_flavor();
 }
 
 /** How many times will we try to fetch a consensus before we give up? */
@@ -1202,7 +1204,7 @@ static void
 update_consensus_networkstatus_downloads(time_t now)
 {
   int i;
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
 
   if (!networkstatus_get_live_consensus(now))
     time_to_download_next_consensus = now; /* No live consensus? Get one now!*/
@@ -1272,7 +1274,7 @@ networkstatus_consensus_download_failed(int status_code, const char *flavname)
 void
 update_consensus_networkstatus_fetch_time(time_t now)
 {
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   networkstatus_t *c = networkstatus_get_live_consensus(now);
   if (c) {
     long dl_interval;
@@ -1346,7 +1348,7 @@ update_consensus_networkstatus_fetch_time(time_t now)
  * fetches yet (e.g. we demand bridges and none are yet known).
  * Else return 0. */
 int
-should_delay_dir_fetches(or_options_t *options)
+should_delay_dir_fetches(const or_options_t *options)
 {
   if (options->UseBridges && !any_bridge_descriptors_known()) {
     log_info(LD_DIR, "delaying dir fetches (no running bridges known)");
@@ -1360,10 +1362,10 @@ should_delay_dir_fetches(or_options_t *options)
 void
 update_networkstatus_downloads(time_t now)
 {
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   if (should_delay_dir_fetches(options))
     return;
-  if (directory_fetches_dir_info_early(options))
+  if (authdir_mode_any_main(options) || options->FetchV2Networkstatus)
     update_v2_networkstatus_cache_downloads(now);
   update_consensus_networkstatus_downloads(now);
   update_certificate_downloads(now);
@@ -1392,7 +1394,7 @@ update_certificate_downloads(time_t now)
 int
 consensus_is_waiting_for_certs(void)
 {
-  return consensus_waiting_for_certs[USABLE_CONSENSUS_FLAVOR].consensus
+  return consensus_waiting_for_certs[usable_consensus_flavor()].consensus
     ? 1 : 0;
 }
 
@@ -1402,7 +1404,7 @@ networkstatus_v2_get_by_digest(const char *digest)
 {
   SMARTLIST_FOREACH(networkstatus_v2_list, networkstatus_v2_t *, ns,
     {
-      if (!memcmp(ns->identity_digest, digest, DIGEST_LEN))
+      if (tor_memeq(ns->identity_digest, digest, DIGEST_LEN))
         return ns;
     });
   return NULL;
@@ -1465,10 +1467,10 @@ networkstatus_get_reasonably_live_consensus(time_t now, int flavor)
 static int
 routerstatus_has_changed(const routerstatus_t *a, const routerstatus_t *b)
 {
-  tor_assert(!memcmp(a->identity_digest, b->identity_digest, DIGEST_LEN));
+  tor_assert(tor_memeq(a->identity_digest, b->identity_digest, DIGEST_LEN));
 
   return strcmp(a->nickname, b->nickname) ||
-         memcmp(a->descriptor_digest, b->descriptor_digest, DIGEST_LEN) ||
+         fast_memneq(a->descriptor_digest, b->descriptor_digest, DIGEST_LEN) ||
          a->addr != b->addr ||
          a->or_port != b->or_port ||
          a->dir_port != b->dir_port ||
@@ -1520,7 +1522,7 @@ notify_control_networkstatus_changed(const networkstatus_t *old_c,
   SMARTLIST_FOREACH_JOIN(
                      old_c->routerstatus_list, const routerstatus_t *, rs_old,
                      new_c->routerstatus_list, const routerstatus_t *, rs_new,
-                     memcmp(rs_old->identity_digest,
+                     tor_memcmp(rs_old->identity_digest,
                             rs_new->identity_digest, DIGEST_LEN),
                      smartlist_add(changed, (void*) rs_new)) {
     if (routerstatus_has_changed(rs_old, rs_new))
@@ -1544,13 +1546,13 @@ networkstatus_copy_old_consensus_info(networkstatus_t *new_c,
 
   SMARTLIST_FOREACH_JOIN(old_c->routerstatus_list, routerstatus_t *, rs_old,
                          new_c->routerstatus_list, routerstatus_t *, rs_new,
-                         memcmp(rs_old->identity_digest,
+                         tor_memcmp(rs_old->identity_digest,
                                 rs_new->identity_digest, DIGEST_LEN),
                          STMT_NIL) {
     /* Okay, so we're looking at the same identity. */
     rs_new->last_dir_503_at = rs_old->last_dir_503_at;
 
-    if (!memcmp(rs_old->descriptor_digest, rs_new->descriptor_digest,
+    if (tor_memeq(rs_old->descriptor_digest, rs_new->descriptor_digest,
                 DIGEST_LEN)) {
       /* And the same descriptor too! */
       memcpy(&rs_new->dl_status, &rs_old->dl_status,sizeof(download_status_t));
@@ -1583,7 +1585,7 @@ networkstatus_set_current_consensus(const char *consensus,
   networkstatus_t *c=NULL;
   int r, result = -1;
   time_t now = time(NULL);
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   char *unverified_fname = NULL, *consensus_fname = NULL;
   int flav = networkstatus_parse_flavor_name(flavor);
   const unsigned from_cache = flags & NSSET_FROM_CACHE;
@@ -1621,7 +1623,7 @@ networkstatus_set_current_consensus(const char *consensus,
     flavor = networkstatus_get_flavor_name(flav);
   }
 
-  if (flav != USABLE_CONSENSUS_FLAVOR &&
+  if (flav != usable_consensus_flavor() &&
       !directory_caches_dir_info(options)) {
     /* This consensus is totally boring to us: we won't use it, and we won't
      * serve it.  Drop it. */
@@ -1666,7 +1668,7 @@ networkstatus_set_current_consensus(const char *consensus,
   }
 
   if (current_digests &&
-      !memcmp(&c->digests, current_digests, sizeof(c->digests))) {
+      tor_memeq(&c->digests, current_digests, sizeof(c->digests))) {
     /* We already have this one. That's a failure. */
     log_info(LD_DIR, "Got a %s consensus we already have", flavor);
     goto done;
@@ -1726,14 +1728,14 @@ networkstatus_set_current_consensus(const char *consensus,
     }
   }
 
-  if (!from_cache && flav == USABLE_CONSENSUS_FLAVOR)
+  if (!from_cache && flav == usable_consensus_flavor())
     control_event_client_status(LOG_NOTICE, "CONSENSUS_ARRIVED");
 
   /* Are we missing any certificates at all? */
   if (r != 1 && dl_certs)
     authority_certs_fetch_missing(c, now);
 
-  if (flav == USABLE_CONSENSUS_FLAVOR) {
+  if (flav == usable_consensus_flavor()) {
     notify_control_networkstatus_changed(current_consensus, c);
   }
   if (flav == FLAV_NS) {
@@ -1780,8 +1782,8 @@ networkstatus_set_current_consensus(const char *consensus,
       download_status_failed(&consensus_dl_status[flav], 0);
   }
 
-  if (flav == USABLE_CONSENSUS_FLAVOR) {
-    /* XXXXNM Microdescs: needs a non-ns variant. */
+  if (flav == usable_consensus_flavor()) {
+    /* XXXXNM Microdescs: needs a non-ns variant. ???? NM*/
     update_consensus_networkstatus_fetch_time(now);
 
     nodelist_set_consensus(current_consensus);
@@ -1812,7 +1814,7 @@ networkstatus_set_current_consensus(const char *consensus,
  * valid-after time, declare that our clock is skewed. */
 #define EARLY_CONSENSUS_NOTICE_SKEW 60
 
-  if (now < current_consensus->valid_after - EARLY_CONSENSUS_NOTICE_SKEW) {
+  if (now < c->valid_after - EARLY_CONSENSUS_NOTICE_SKEW) {
     char tbuf[ISO_TIME_LEN+1];
     char dbuf[64];
     long delta = now - c->valid_after;
@@ -1989,7 +1991,7 @@ routers_update_status_from_consensus_networkstatus(smartlist_t *routers,
                                                    int reset_failures)
 {
   trusted_dir_server_t *ds;
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   int authdir = authdir_mode_v2(options) || authdir_mode_v3(options);
   networkstatus_t *ns = current_consensus;
   if (!ns || !smartlist_len(ns->routerstatus_list))
@@ -2001,16 +2003,9 @@ routers_update_status_from_consensus_networkstatus(smartlist_t *routers,
 
   SMARTLIST_FOREACH_JOIN(ns->routerstatus_list, routerstatus_t *, rs,
                          routers, routerinfo_t *, router,
-                         memcmp(rs->identity_digest,
+                         tor_memcmp(rs->identity_digest,
                                router->cache_info.identity_digest, DIGEST_LEN),
   {
-#if 0
-    /* We have no routerstatus for this router. Clear flags and skip it. */
-    if (!authdir) {
-      if (router->purpose == ROUTER_PURPOSE_GENERAL)
-        router_clear_status_flags(router);
-    }
-#endif
   }) {
     /* We have a routerstatus for this router. */
     const char *digest = router->cache_info.identity_digest;
@@ -2018,7 +2013,7 @@ routers_update_status_from_consensus_networkstatus(smartlist_t *routers,
     ds = router_get_trusteddirserver_by_digest(digest);
 
     /* Is it the same descriptor, or only the same identity? */
-    if (!memcmp(router->cache_info.signed_descriptor_digest,
+    if (tor_memeq(router->cache_info.signed_descriptor_digest,
                 rs->descriptor_digest, DIGEST_LEN)) {
       if (ns->valid_until > router->cache_info.last_listed_as_valid_until)
         router->cache_info.last_listed_as_valid_until = ns->valid_until;
@@ -2047,10 +2042,10 @@ routers_update_status_from_consensus_networkstatus(smartlist_t *routers,
     time_t live_until = ns->published_on + V2_NETWORKSTATUS_ROUTER_LIFETIME;
     SMARTLIST_FOREACH_JOIN(ns->entries, const routerstatus_t *, rs,
                          routers, routerinfo_t *, ri,
-                         memcmp(rs->identity_digest,
+                         tor_memcmp(rs->identity_digest,
                                 ri->cache_info.identity_digest, DIGEST_LEN),
                          STMT_NIL) {
-      if (!memcmp(ri->cache_info.signed_descriptor_digest,
+      if (tor_memeq(ri->cache_info.signed_descriptor_digest,
                   rs->descriptor_digest, DIGEST_LEN)) {
         if (live_until > ri->cache_info.last_listed_as_valid_until)
           ri->cache_info.last_listed_as_valid_until = live_until;
@@ -2149,7 +2144,7 @@ void
 networkstatus_dump_bridge_status_to_file(time_t now)
 {
   char *status = networkstatus_getinfo_by_purpose("bridge", now);
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   size_t len = strlen(options->DataDirectory) + 32;
   char *fname = tor_malloc(len);
   tor_snprintf(fname, len, "%s"PATH_SEPARATOR"networkstatus-bridges",
@@ -2203,7 +2198,7 @@ get_net_param_from_list(smartlist_t *net_params, const char *param_name,
  * <b>min_val</b> and at most <b>max_val</b> and raise/cap the parsed value
  * if necessary. */
 int32_t
-networkstatus_get_param(networkstatus_t *ns, const char *param_name,
+networkstatus_get_param(const networkstatus_t *ns, const char *param_name,
                         int32_t default_val, int32_t min_val, int32_t max_val)
 {
   if (!ns) /* if they pass in null, go find it ourselves */

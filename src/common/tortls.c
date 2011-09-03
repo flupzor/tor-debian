@@ -22,8 +22,12 @@
 
 #include <assert.h>
 #ifdef MS_WINDOWS /*wrkard for dtls1.h >= 0.9.8m of "#include <winsock.h>"*/
+ #ifndef WIN32_WINNT
  #define WIN32_WINNT 0x400
+ #endif
+ #ifndef _WIN32_WINNT
  #define _WIN32_WINNT 0x400
+ #endif
  #define WIN32_LEAN_AND_MEAN
  #if defined(_MSC_VER) && (_MSC_VER < 1300)
     #include <winsock.h>
@@ -47,6 +51,7 @@
 #ifdef USE_BUFFEREVENTS
 #include <event2/bufferevent_ssl.h>
 #include <event2/buffer.h>
+#include <event2/event.h>
 #include "compat_libevent.h"
 #endif
 
@@ -222,6 +227,40 @@ ssl_state_to_string(int ssl_state)
   return buf;
 }
 
+/** Write a description of the current state of <b>tls</b> into the
+ * <b>sz</b>-byte buffer at <b>buf</b>. */
+void
+tor_tls_get_state_description(tor_tls_t *tls, char *buf, size_t sz)
+{
+  const char *ssl_state;
+  const char *tortls_state;
+
+  if (PREDICT_UNLIKELY(!tls || !tls->ssl)) {
+    strlcpy(buf, "(No SSL object)", sz);
+    return;
+  }
+
+  ssl_state = ssl_state_to_string(tls->ssl->state);
+  switch (tls->state) {
+#define CASE(st) case TOR_TLS_ST_##st: tortls_state = " in "#st ; break
+    CASE(HANDSHAKE);
+    CASE(OPEN);
+    CASE(GOTCLOSE);
+    CASE(SENTCLOSE);
+    CASE(CLOSED);
+    CASE(RENEGOTIATE);
+#undef CASE
+  case TOR_TLS_ST_BUFFEREVENT:
+    tortls_state = "";
+    break;
+  default:
+    tortls_state = " in unknown TLS state";
+    break;
+  }
+
+  tor_snprintf(buf, sz, "%s%s", ssl_state, tortls_state);
+}
+
 void
 tor_tls_log_one_error(tor_tls_t *tls, unsigned long err,
                   int severity, int domain, const char *doing)
@@ -234,6 +273,22 @@ tor_tls_log_one_error(tor_tls_t *tls, unsigned long err,
   state = (st>=0)?ssl_state_to_string(st):"---";
 
   addr = tls ? tls->address : NULL;
+
+  /* Some errors are known-benign, meaning they are the fault of the other
+   * side of the connection. The caller doesn't know this, so override the
+   * priority for those cases. */
+  switch (ERR_GET_REASON(err)) {
+    case SSL_R_HTTP_REQUEST:
+    case SSL_R_HTTPS_PROXY_REQUEST:
+    case SSL_R_RECORD_LENGTH_MISMATCH:
+    case SSL_R_RECORD_TOO_LARGE:
+    case SSL_R_UNKNOWN_PROTOCOL:
+    case SSL_R_UNSUPPORTED_PROTOCOL:
+      severity = LOG_INFO;
+      break;
+    default:
+      break;
+  }
 
   msg = (const char*)ERR_reason_error_string(err);
   lib = (const char*)ERR_lib_error_string(err);
@@ -899,6 +954,13 @@ tor_tls_client_is_using_v2_ciphers(const SSL *ssl, const char *address)
   return 1;
 }
 
+static void
+tor_tls_debug_state_callback(const SSL *ssl, int type, int val)
+{
+  log_debug(LD_HANDSHAKE, "SSL %p is now in state %s [type=%d,val=%d].",
+            ssl, ssl_state_to_string(ssl->state), type, val);
+}
+
 /** Invoked when we're accepting a connection on <b>ssl</b>, and the connection
  * changes state. We use this:
  * <ul><li>To alter the state of the handshake partway through, so we
@@ -910,6 +972,9 @@ tor_tls_server_info_callback(const SSL *ssl, int type, int val)
 {
   tor_tls_t *tls;
   (void) val;
+
+  tor_tls_debug_state_callback(ssl, type, val);
+
   if (type != SSL_CB_ACCEPT_LOOP)
     return;
   if (ssl->state != SSL3_ST_SW_SRVR_HELLO_A)
@@ -1096,8 +1161,11 @@ tor_tls_new(int sock, int isServer)
 #ifdef V2_HANDSHAKE_SERVER
   if (isServer) {
     SSL_set_info_callback(result->ssl, tor_tls_server_info_callback);
-  }
+  } else
 #endif
+  {
+    SSL_set_info_callback(result->ssl, tor_tls_debug_state_callback);
+  }
 
   /* Not expected to get called. */
   tls_log_errors(NULL, LOG_WARN, LD_NET, "creating tor_tls_t object");
@@ -1131,7 +1199,7 @@ tor_tls_set_renegotiate_callback(tor_tls_t *tls,
   if (cb) {
     SSL_set_info_callback(tls->ssl, tor_tls_server_info_callback);
   } else {
-    SSL_set_info_callback(tls->ssl, NULL);
+    SSL_set_info_callback(tls->ssl, tor_tls_debug_state_callback);
   }
 #endif
 }
@@ -1825,7 +1893,7 @@ tor_tls_init_bufferevent(tor_tls_t *tls, struct bufferevent *bufev_in,
   const enum bufferevent_ssl_state state = receiving ?
     BUFFEREVENT_SSL_ACCEPTING : BUFFEREVENT_SSL_CONNECTING;
 
-  if (filter) {
+  if (filter || tor_libevent_using_iocp_bufferevents()) {
     /* Grab an extra reference to the SSL, since BEV_OPT_CLOSE_ON_FREE
        means that the SSL will get freed too.
 
@@ -1838,6 +1906,10 @@ tor_tls_init_bufferevent(tor_tls_t *tls, struct bufferevent *bufev_in,
                                          state,
                                          BEV_OPT_DEFER_CALLBACKS|
                                          BEV_OPT_CLOSE_ON_FREE);
+    /* Tell the underlying bufferevent when to accept more data from the SSL
+       filter (only when it's got less than 32K to write), and when to notify
+       the SSL filter that it could write more (when it drops under 24K). */
+    bufferevent_setwatermark(bufev_in, EV_WRITE, 24*1024, 32*1024);
   } else {
     if (bufev_in) {
       evutil_socket_t s = bufferevent_getfd(bufev_in);

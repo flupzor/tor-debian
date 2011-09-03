@@ -7,7 +7,7 @@ else
 tor_platform_source=
 endif
 
-EXTRA_DIST=ntmain.c or_sha1.i
+EXTRA_DIST=ntmain.c or_sha1.i Makefile.nmake
 
 if USE_EXTERNAL_EVDNS
 evdns_source=
@@ -69,17 +69,12 @@ AM_CPPFLAGS = -DSHARE_DATADIR="\"$(datadir)\"" \
 # This seems to matter nowhere but on windows, but I assure you that it
 # matters a lot there, and is quite hard to debug if you forget to do it.
 
-if USE_BUFFEREVENTS
-levent_openssl_lib = -levent_openssl
-else
-levent_openssl_lib =
-endif
 
 tor_LDFLAGS = @TOR_LDFLAGS_zlib@ @TOR_LDFLAGS_openssl@ @TOR_LDFLAGS_libevent@
 tor_LDADD = ./libtor.a ../common/libor.a ../common/libor-crypto.a \
 	../common/libor-event.a \
 	@TOR_ZLIB_LIBS@ -lm @TOR_LIBEVENT_LIBS@ @TOR_OPENSSL_LIBS@ \
-	@TOR_LIB_WS32@ @TOR_LIB_GDI@ $(levent_openssl_lib)
+	@TOR_LIB_WS32@ @TOR_LIB_GDI@
 
 noinst_HEADERS = \
 	buffers.h				\
@@ -142,11 +137,13 @@ micro-revision.i: FORCE
 	  mv micro-revision.tmp micro-revision.i;			\
 	fi; true
 
-or_sha1.i: $(tor_SOURCES)
+or_sha1.i: $(tor_SOURCES) $(libtor_a_SOURCES)
 	if test "@SHA1SUM@" != none; then \
-	  @SHA1SUM@ $(tor_SOURCES) | @SED@ -n 's/^\(.*\)$$/"\1\\n"/p' > or_sha1.i; \
+	  @SHA1SUM@ $(tor_SOURCES) $(libtor_a_SOURCES) | \
+	  @SED@ -n 's/^\(.*\)$$/"\1\\n"/p' > or_sha1.i; \
 	elif test "@OPENSSL@" != none; then \
-	  @OPENSSL@ sha1 $(tor_SOURCES) | @SED@ -n 's/SHA1(\(.*\))= \(.*\)/"\2  \1\\n"/p' > or_sha1.i; \
+	  @OPENSSL@ sha1 $(tor_SOURCES) $(libtor_a_SOURCES) | \
+	  @SED@ -n 's/SHA1(\(.*\))= \(.*\)/"\2  \1\\n"/p' > or_sha1.i; \
 	else \
 	  rm or_sha1.i; \
 	  touch or_sha1.i; \

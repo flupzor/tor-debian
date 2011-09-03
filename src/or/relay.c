@@ -29,6 +29,7 @@
 #include "reasons.h"
 #include "relay.h"
 #include "rendcommon.h"
+#include "router.h"
 #include "routerlist.h"
 #include "routerparse.h"
 
@@ -134,7 +135,7 @@ relay_digest_matches(crypto_digest_env_t *digest, cell_t *cell)
   crypto_digest_add_bytes(digest, (char*) cell->payload, CELL_PAYLOAD_SIZE);
   crypto_digest_get_digest(digest, calculated_integrity, 4);
 
-  if (memcmp(received_integrity, calculated_integrity, 4)) {
+  if (tor_memneq(received_integrity, calculated_integrity, 4)) {
 //    log_fn(LOG_INFO,"Recognized=0 but bad digest. Not recognizing.");
 // (%d vs %d).", received_integrity, calculated_integrity);
     /* restore digest to its old form */
@@ -751,9 +752,9 @@ connection_ap_process_end_not_open(
              (tor_inet_aton(conn->socks_request->address, &in) &&
               !conn->chosen_exit_name))) {
           log_info(LD_APP,
-                 "Exitrouter '%s' seems to be more restrictive than its exit "
+                 "Exitrouter %s seems to be more restrictive than its exit "
                  "policy. Not using this router as exit for now.",
-                 node_get_nickname(exitrouter));
+                 node_describe(exitrouter));
           policies_set_node_exitpolicy_to_reject_all(exitrouter);
         }
         /* rewrite it to an IP if we learned one. */
@@ -942,6 +943,12 @@ connection_edge_process_relay_cell_not_open(
                                   count_loading_descriptors_progress());
           break;
       }
+    }
+    /* This is definitely a success, so forget about any pending data we
+     * had sent. */
+    if (conn->pending_optimistic_data) {
+      generic_buffer_free(conn->pending_optimistic_data);
+      conn->pending_optimistic_data = NULL;
     }
 
     /* handle anything that might have queued */
@@ -1342,6 +1349,10 @@ connection_edge_package_raw_inbuf(edge_connection_t *conn, int package_partial,
   char payload[CELL_PAYLOAD_SIZE];
   circuit_t *circ;
   unsigned domain = conn->cpath_layer ? LD_APP : LD_EXIT;
+  int sending_from_optimistic = 0;
+  const int sending_optimistically =
+    conn->_base.type == CONN_TYPE_AP &&
+    conn->_base.state != AP_CONN_STATE_OPEN;
 
   tor_assert(conn);
 
@@ -1374,7 +1385,18 @@ connection_edge_package_raw_inbuf(edge_connection_t *conn, int package_partial,
     return 0;
   }
 
-  amount_to_process = connection_get_inbuf_len(TO_CONN(conn));
+  sending_from_optimistic = conn->sending_optimistic_data != NULL;
+
+  if (PREDICT_UNLIKELY(sending_from_optimistic)) {
+    amount_to_process = generic_buffer_len(conn->sending_optimistic_data);
+    if (PREDICT_UNLIKELY(!amount_to_process)) {
+      log_warn(LD_BUG, "sending_optimistic_data was non-NULL but empty");
+      amount_to_process = connection_get_inbuf_len(TO_CONN(conn));
+      sending_from_optimistic = 0;
+    }
+  } else {
+    amount_to_process = connection_get_inbuf_len(TO_CONN(conn));
+  }
 
   if (!amount_to_process)
     return 0;
@@ -1390,10 +1412,29 @@ connection_edge_package_raw_inbuf(edge_connection_t *conn, int package_partial,
   stats_n_data_bytes_packaged += length;
   stats_n_data_cells_packaged += 1;
 
-  connection_fetch_from_buf(payload, length, TO_CONN(conn));
+  if (PREDICT_UNLIKELY(sending_from_optimistic)) {
+    /* XXX023 We could be more efficient here by sometimes packing
+     * previously-sent optimistic data in the same cell with data
+     * from the inbuf. */
+    generic_buffer_get(conn->sending_optimistic_data, payload, length);
+    if (!generic_buffer_len(conn->sending_optimistic_data)) {
+        generic_buffer_free(conn->sending_optimistic_data);
+        conn->sending_optimistic_data = NULL;
+    }
+  } else {
+    connection_fetch_from_buf(payload, length, TO_CONN(conn));
+  }
 
   log_debug(domain,"(%d) Packaging %d bytes (%d waiting).", conn->_base.s,
             (int)length, (int)connection_get_inbuf_len(TO_CONN(conn)));
+
+  if (sending_optimistically && !sending_from_optimistic) {
+    /* This is new optimistic data; remember it in case we need to detach and
+       retry */
+    if (!conn->pending_optimistic_data)
+      conn->pending_optimistic_data = generic_buffer_new();
+    generic_buffer_add(conn->pending_optimistic_data, payload, length);
+  }
 
   if (connection_edge_send_command(conn, RELAY_COMMAND_DATA,
                                    payload, length) < 0 )
@@ -2009,7 +2050,8 @@ static int ewma_enabled = 0;
 
 /** Adjust the global cell scale factor based on <b>options</b> */
 void
-cell_ewma_set_scale_factor(or_options_t *options, networkstatus_t *consensus)
+cell_ewma_set_scale_factor(const or_options_t *options,
+                           const networkstatus_t *consensus)
 {
   int32_t halflife_ms;
   double halflife;
@@ -2335,13 +2377,13 @@ connection_or_flush_from_first_active_circuit(or_connection_t *conn, int max,
 
     /* Calculate the exact time that this cell has spent in the queue. */
     if (get_options()->CellStatistics && !CIRCUIT_IS_ORIGIN(circ)) {
-      struct timeval now;
+      struct timeval tvnow;
       uint32_t flushed;
       uint32_t cell_waiting_time;
       insertion_time_queue_t *it_queue = queue->insertion_times;
-      tor_gettimeofday_cached(&now);
-      flushed = (uint32_t)((now.tv_sec % SECONDS_IN_A_DAY) * 100L +
-                 (uint32_t)now.tv_usec / (uint32_t)10000L);
+      tor_gettimeofday_cached(&tvnow);
+      flushed = (uint32_t)((tvnow.tv_sec % SECONDS_IN_A_DAY) * 100L +
+                 (uint32_t)tvnow.tv_usec / (uint32_t)10000L);
       if (!it_queue || !it_queue->first) {
         log_info(LD_GENERAL, "Cannot determine insertion time of cell. "
                              "Looks like the CellStatistics option was "

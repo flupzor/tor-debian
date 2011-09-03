@@ -27,12 +27,17 @@ int connection_edge_flushed_some(edge_connection_t *conn);
 int connection_edge_finished_flushing(edge_connection_t *conn);
 int connection_edge_finished_connecting(edge_connection_t *conn);
 
+void connection_ap_about_to_close(edge_connection_t *edge_conn);
+void connection_exit_about_to_close(edge_connection_t *edge_conn);
+
 int connection_ap_handshake_send_begin(edge_connection_t *ap_conn);
 int connection_ap_handshake_send_resolve(edge_connection_t *ap_conn);
 
 edge_connection_t  *connection_ap_make_link(connection_t *partner,
                                             char *address, uint16_t port,
                                             const char *digest,
+                                            int session_group,
+                                            int isolation_flags,
                                             int use_begindir, int want_onehop);
 void connection_ap_handshake_socks_reply(edge_connection_t *conn, char *reply,
                                          size_t replylen,
@@ -48,7 +53,7 @@ int connection_exit_begin_conn(cell_t *cell, circuit_t *circ);
 int connection_exit_begin_resolve(cell_t *cell, or_circuit_t *circ);
 void connection_exit_connect(edge_connection_t *conn);
 int connection_edge_is_rendezvous_stream(edge_connection_t *conn);
-int connection_ap_can_use_exit(edge_connection_t *conn,
+int connection_ap_can_use_exit(const edge_connection_t *conn,
                                const node_t *exit);
 void connection_ap_expire_beginning(void);
 void connection_ap_attach_pending(void);
@@ -63,7 +68,8 @@ int connection_ap_process_transparent(edge_connection_t *conn);
 int address_is_invalid_destination(const char *address, int client);
 
 void addressmap_init(void);
-void addressmap_clear_excluded_trackexithosts(or_options_t *options);
+void addressmap_clear_excluded_trackexithosts(const or_options_t *options);
+void addressmap_clear_invalid_automaps(const or_options_t *options);
 void addressmap_clean(time_t now);
 void addressmap_clear_configured(void);
 void addressmap_clear_transient(void);
@@ -98,6 +104,13 @@ hostname_type_t parse_extended_hostname(char *address, int allowdotexit);
 #if defined(HAVE_NET_IF_H) && defined(HAVE_NET_PFVAR_H)
 int get_pf_socket(void);
 #endif
+
+int connection_edge_compatible_with_circuit(const edge_connection_t *conn,
+                                            const origin_circuit_t *circ);
+int connection_edge_update_circuit_isolation(const edge_connection_t *conn,
+                                             origin_circuit_t *circ,
+                                             int dry_run);
+void circuit_clear_isolation(origin_circuit_t *circ);
 
 #endif
 

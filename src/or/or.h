@@ -23,8 +23,12 @@
 #endif
 
 #ifdef MS_WINDOWS
+#ifndef WIN32_WINNT
 #define WIN32_WINNT 0x400
+#endif
+#ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x400
+#endif
 #define WIN32_LEAN_AND_MEAN
 #endif
 
@@ -230,15 +234,30 @@ typedef enum {
 #define PROXY_CONNECT 1
 #define PROXY_SOCKS4 2
 #define PROXY_SOCKS5 3
+/* !!!! If there is ever a PROXY_* type over 2, we must grow the proxy_type
+ * field in or_connection_t */
+/* pluggable transports proxy type */
+#define PROXY_PLUGGABLE 4
 
 /* Proxy client handshake states */
-#define PROXY_HTTPS_WANT_CONNECT_OK 1
-#define PROXY_SOCKS4_WANT_CONNECT_OK 2
-#define PROXY_SOCKS5_WANT_AUTH_METHOD_NONE 3
-#define PROXY_SOCKS5_WANT_AUTH_METHOD_RFC1929 4
-#define PROXY_SOCKS5_WANT_AUTH_RFC1929_OK 5
-#define PROXY_SOCKS5_WANT_CONNECT_OK 6
-#define PROXY_CONNECTED 7
+/* We use a proxy but we haven't even connected to it yet. */
+#define PROXY_INFANT 1
+/* We use an HTTP proxy and we've sent the CONNECT command. */
+#define PROXY_HTTPS_WANT_CONNECT_OK 2
+/* We use a SOCKS4 proxy and we've sent the CONNECT command. */
+#define PROXY_SOCKS4_WANT_CONNECT_OK 3
+/* We use a SOCKS5 proxy and we try to negotiate without
+   any authentication . */
+#define PROXY_SOCKS5_WANT_AUTH_METHOD_NONE 4
+/* We use a SOCKS5 proxy and we try to negotiate with
+   Username/Password authentication . */
+#define PROXY_SOCKS5_WANT_AUTH_METHOD_RFC1929 5
+/* We use a SOCKS5 proxy and we just sent our credentials. */
+#define PROXY_SOCKS5_WANT_AUTH_RFC1929_OK 6
+/* We use a SOCKS5 proxy and we just sent our CONNECT command. */
+#define PROXY_SOCKS5_WANT_CONNECT_OK 7
+/* We use a proxy and we CONNECTed successfully!. */
+#define PROXY_CONNECTED 8
 
 /** True iff <b>x</b> is an edge connection. */
 #define CONN_IS_EDGE(x) \
@@ -911,6 +930,11 @@ typedef struct {
 
 typedef struct buf_t buf_t;
 typedef struct socks_request_t socks_request_t;
+#ifdef USE_BUFFEREVENTS
+#define generic_buffer_t struct evbuffer
+#else
+#define generic_buffer_t buf_t
+#endif
 
 /* Values for connection_t.magic: used to make sure that downcasts (casts from
 * connection_t to foo_connection_t) are safe. */
@@ -919,6 +943,7 @@ typedef struct socks_request_t socks_request_t;
 #define EDGE_CONNECTION_MAGIC 0xF0374013u
 #define DIR_CONNECTION_MAGIC 0x9988ffeeu
 #define CONTROL_CONNECTION_MAGIC 0x8abc765du
+#define LISTENER_CONNECTION_MAGIC 0x1a1ac741u
 
 /** Description of a connection to another host or process, and associated
  * data.
@@ -982,7 +1007,7 @@ typedef struct connection_t {
   unsigned int proxy_state:4;
 
   /** Our socket; -1 if this connection is closed, or has no socket. */
-  evutil_socket_t s;
+  tor_socket_t s;
   int conn_array_index; /**< Index into the global connection array. */
 
   struct event *read_event; /**< Libevent event structure. */
@@ -1024,15 +1049,31 @@ typedef struct connection_t {
   /** Unique identifier for this connection on this Tor instance. */
   uint64_t global_identifier;
 
-  /* XXXX023 move this field, and all the listener-only fields (just
-     socket_family, I think), into a new listener_connection_t subtype. */
-  /** If the connection is a CONN_TYPE_AP_DNS_LISTENER, this field points
-   * to the evdns_server_port is uses to listen to and answer connections. */
-  struct evdns_server_port *dns_server_port;
-
   /** Unique ID for measuring tunneled network status requests. */
   uint64_t dirreq_id;
 } connection_t;
+
+typedef struct listener_connection_t {
+  connection_t _base;
+
+  /** If the connection is a CONN_TYPE_AP_DNS_LISTENER, this field points
+   * to the evdns_server_port it uses to listen to and answer connections. */
+  struct evdns_server_port *dns_server_port;
+
+  /** @name Isolation parameters
+   *
+   * For an AP listener, these fields describe how to isolate streams that
+   * arrive on the listener.
+   *
+   * @{
+   */
+  /** The session group for this listener. */
+  int session_group;
+  /** One or more ISO_ flags to describe how to isolate streams. */
+  uint8_t isolation_flags;
+  /**@}*/
+
+} listener_connection_t;
 
 /** Stores flags and information related to the portion of a v2 Tor OR
  * connection handshake that happens after the TLS handshake is finished.
@@ -1084,6 +1125,7 @@ typedef struct or_connection_t {
    * router itself has a problem.
    */
   unsigned int is_bad_for_new_circs:1;
+  unsigned int proxy_type:2; /**< One of PROXY_NONE...PROXY_SOCKS5 */
   uint8_t link_proto; /**< What protocol version are we using? 0 for
                        * "none negotiated yet." */
   circid_t next_circ_id; /**< Which circ_id do we try to use next on
@@ -1170,6 +1212,20 @@ typedef struct edge_connection_t {
   /** What rendezvous service are we querying for? (AP only) */
   rend_data_t *rend_data;
 
+  /* === Isolation related, AP only. === */
+  /** AP only: based on which factors do we isolate this stream? */
+  uint8_t isolation_flags;
+  /** AP only: what session group is this stream in? */
+  int session_group;
+  /** AP only: The newnym epoch in which we created this connection. */
+  unsigned nym_epoch;
+  /** AP only: The original requested address before we rewrote it. */
+  char *original_dest_address;
+  /* Other fields to isolate on already exist.  The ClientAddr is addr.  The
+     ClientProtocol is a combination of type and socks_request->
+     socks_version.  SocksAuth is socks_request->username/password.
+     DestAddr is in socks_request->address. */
+
   /** Number of times we've reassigned this application connection to
    * a new circuit. We keep track because the timeout is longer if we've
    * already retried several times. */
@@ -1211,6 +1267,21 @@ typedef struct edge_connection_t {
   /** True iff this is an AP connection that came from a transparent or
    * NATd connection */
   unsigned int is_transparent_ap:1;
+
+  /** For AP connections only: Set if this connection's target exit node
+   * allows optimistic data (that is, data sent on this stream before
+   * the exit has sent a CONNECTED cell) and we have chosen to use it.
+   */
+  unsigned int may_use_optimistic_data : 1;
+
+  /** For AP connections only: buffer for data that we have sent
+   * optimistically, which we might need to re-send if we have to
+   * retry this connection. */
+  generic_buffer_t *pending_optimistic_data;
+  /* For AP connections only: buffer for data that we previously sent
+  * optimistically which we are currently re-sending as we retry this
+  * connection. */
+  generic_buffer_t *sending_optimistic_data;
 
   /** If this is a DNSPort connection, this field holds the pending DNS
    * request that we're going to try to answer.  */
@@ -1271,6 +1342,9 @@ typedef struct control_connection_t {
 
   /** True if we have sent a protocolinfo reply on this connection. */
   unsigned int have_sent_protocolinfo:1;
+  /** True if we have received a takeownership command on this
+   * connection. */
+  unsigned int is_owning_control_connection:1;
 
   /** Amount of space allocated in incoming_cmd. */
   uint32_t incoming_cmd_len;
@@ -1298,6 +1372,9 @@ static edge_connection_t *TO_EDGE_CONN(connection_t *);
 /** Convert a connection_t* to an control_connection_t*; assert if the cast is
  * invalid. */
 static control_connection_t *TO_CONTROL_CONN(connection_t *);
+/** Convert a connection_t* to an listener_connection_t*; assert if the cast is
+ * invalid. */
+static listener_connection_t *TO_LISTENER_CONN(connection_t *);
 
 static INLINE or_connection_t *TO_OR_CONN(connection_t *c)
 {
@@ -1318,6 +1395,11 @@ static INLINE control_connection_t *TO_CONTROL_CONN(connection_t *c)
 {
   tor_assert(c->magic == CONTROL_CONNECTION_MAGIC);
   return DOWNCAST(control_connection_t, c);
+}
+static INLINE listener_connection_t *TO_LISTENER_CONN(connection_t *c)
+{
+  tor_assert(c->magic == LISTENER_CONNECTION_MAGIC);
+  return DOWNCAST(listener_connection_t, c);
 }
 
 /* Conditional macros to help write code that works whether bufferevents are
@@ -1641,6 +1723,12 @@ typedef struct routerstatus_t {
   /** True iff this router is a version that, if it caches directory info,
    * we can get v3 downloads from. */
   unsigned int version_supports_v3_dir:1;
+  /** True iff this router is a version that, if it caches directory info,
+   * we can get microdescriptors from. */
+  unsigned int version_supports_microdesc_cache:1;
+  /** True iff this router is a version that allows DATA cells to arrive on
+   * a stream before it has sent a CONNECTED cell. */
+  unsigned int version_supports_optimistic_data:1;
 
   unsigned int has_bandwidth:1; /**< The vote/consensus had bw info */
   unsigned int has_exitsummary:1; /**< The vote/consensus had exit summaries */
@@ -1706,6 +1794,11 @@ typedef struct microdesc_t {
   saved_location_t saved_location : 3;
   /** If true, do not attempt to cache this microdescriptor on disk. */
   unsigned int no_save : 1;
+  /** If true, this microdesc is attached to a node_t. */
+  unsigned int held_by_node : 1;
+  /** If true, this microdesc has an entry in the microdesc_map */
+  unsigned int held_in_map : 1;
+
   /** If saved_location == SAVED_IN_CACHE, this field holds the offset of the
    * microdescriptor in the cache. */
   off_t off;
@@ -1918,9 +2011,6 @@ typedef enum {
   FLAV_MICRODESC = 1,
 } consensus_flavor_t;
 
-/** Which consensus flavor do we actually want to use to build circuits? */
-#define USABLE_CONSENSUS_FLAVOR FLAV_NS
-
 /** How many different consensus flavors are there? */
 #define N_CONSENSUS_FLAVORS ((int)(FLAV_MICRODESC)+1)
 
@@ -2090,24 +2180,33 @@ typedef struct authority_cert_t {
   uint8_t is_cross_certified;
 } authority_cert_t;
 
-/** Bitfield enum type listing types of directory authority/directory
- * server.  */
+/** Bitfield enum type listing types of information that directory authorities
+ * can be authoritative about, and that directory caches may or may not cache.
+ *
+ * Note that the granularity here is based on authority granularity and on
+ * cache capabilities.  Thus, one particular bit may correspond in practice to
+ * a few types of directory info, so long as every authority that pronounces
+ * officially about one of the types prounounces officially about all of them,
+ * and so long as every cache that caches one of them caches all of them.
+ */
 typedef enum {
-  NO_AUTHORITY      = 0,
+  NO_DIRINFO      = 0,
   /** Serves/signs v1 directory information: Big lists of routers, and short
    * routerstatus documents. */
-  V1_AUTHORITY      = 1 << 0,
+  V1_DIRINFO      = 1 << 0,
   /** Serves/signs v2 directory information: i.e. v2 networkstatus documents */
-  V2_AUTHORITY      = 1 << 1,
+  V2_DIRINFO      = 1 << 1,
   /** Serves/signs v3 directory information: votes, consensuses, certs */
-  V3_AUTHORITY      = 1 << 2,
+  V3_DIRINFO      = 1 << 2,
   /** Serves hidden service descriptors. */
-  HIDSERV_AUTHORITY = 1 << 3,
+  HIDSERV_DIRINFO = 1 << 3,
   /** Serves bridge descriptors. */
-  BRIDGE_AUTHORITY  = 1 << 4,
-  /** Serves extrainfo documents. (XXX Not precisely an authority type)*/
-  EXTRAINFO_CACHE   = 1 << 5,
-} authority_type_t;
+  BRIDGE_DIRINFO  = 1 << 4,
+  /** Serves extrainfo documents. */
+  EXTRAINFO_DIRINFO=1 << 5,
+  /** Serves microdescriptors. */
+  MICRODESC_DIRINFO=1 << 6,
+} dirinfo_type_t;
 
 #define CRYPT_PATH_MAGIC 0x70127012u
 
@@ -2180,15 +2279,15 @@ typedef struct {
   /** How to extend to the planned exit node. */
   extend_info_t *chosen_exit;
   /** Whether every node in the circ must have adequate uptime. */
-  int need_uptime;
+  unsigned int need_uptime : 1;
   /** Whether every node in the circ must have adequate capacity. */
-  int need_capacity;
+  unsigned int need_capacity : 1;
   /** Whether the last hop was picked with exiting in mind. */
-  int is_internal;
-  /** Did we pick this as a one-hop tunnel (not safe for other conns)?
-   * These are for encrypted connections that exit to this router, not
+  unsigned int is_internal : 1;
+  /** Did we pick this as a one-hop tunnel (not safe for other streams)?
+   * These are for encrypted dir conns that exit to this router, not
    * for arbitrary exits from the circuit. */
-  int onehop_tunnel;
+  unsigned int onehop_tunnel : 1;
   /** The crypt_path_t to append after rendezvous: used for rendezvous. */
   crypt_path_t *pending_final_cpath;
   /** How many times has building a circuit for this task failed? */
@@ -2296,6 +2395,11 @@ typedef struct circuit_t {
    * in time in order to indicate that a circuit shouldn't be used for new
    * streams, but that it can stay alive as long as it has streams on it.
    * That's a kludge we should fix.
+   *
+   * XXX023 The CBT code uses this field to record when HS-related
+   * circuits entered certain states.  This usage probably won't
+   * interfere with this field's primary purpose, but we should
+   * document it more thoroughly to make sure of that.
    */
   time_t timestamp_dirty;
 
@@ -2382,6 +2486,55 @@ typedef struct origin_circuit_t {
   /* XXXX NM This can get re-used after 2**32 circuits. */
   uint32_t global_identifier;
 
+  /** True if we have associated one stream to this circuit, thereby setting
+   * the isolation paramaters for this circuit.  Note that this doesn't
+   * necessarily mean that we've <em>attached</em> any streams to the circuit:
+   * we may only have marked up this circuit during the launch process.
+   */
+  unsigned int isolation_values_set : 1;
+  /** True iff any stream has <em>ever</em> been attached to this circuit.
+   *
+   * In a better world we could use timestamp_dirty for this, but
+   * timestamp_dirty is far too overloaded at the moment.
+   */
+  unsigned int isolation_any_streams_attached : 1;
+
+  /** A bitfield of ISO_* flags for every isolation field such that this
+   * circuit has had streams with more than one value for that field
+   * attached to it. */
+  uint8_t isolation_flags_mixed;
+
+  /** @name Isolation parameters
+   *
+   * If any streams have been associated with this circ (isolation_values_set
+   * == 1), and all streams associated with the circuit have had the same
+   * value for some field ((isolation_flags_mixed & ISO_FOO) == 0), then these
+   * elements hold the value for that field.
+   *
+   * Note again that "associated" is not the same as "attached": we
+   * preliminarily associate streams with a circuit while the circuit is being
+   * launched, so that we can tell whether we need to launch more circuits.
+   *
+   * @{
+   */
+  uint8_t client_proto_type;
+  uint8_t client_proto_socksver;
+  uint16_t dest_port;
+  tor_addr_t client_addr;
+  char *dest_address;
+  int session_group;
+  unsigned nym_epoch;
+  size_t socks_username_len;
+  uint8_t socks_password_len;
+  /* Note that the next two values are NOT NUL-terminated; see
+     socks_username_len and socks_password_len for their lengths. */
+  char *socks_username;
+  char *socks_password;
+  /** Global identifier for the first stream attached here; used by
+   * ISO_STREAM. */
+  uint64_t associated_isolated_stream_global_id;
+  /**@}*/
+
 } origin_circuit_t;
 
 /** An or_circuit_t holds information needed to implement a circuit at an
@@ -2466,14 +2619,14 @@ typedef struct or_circuit_t {
   cell_ewma_t p_cell_ewma;
 } or_circuit_t;
 
-/** Convert a circuit subtype to a circuit_t.*/
+/** Convert a circuit subtype to a circuit_t. */
 #define TO_CIRCUIT(x)  (&((x)->_base))
 
-/** Convert a circuit_t* to a pointer to the enclosing or_circuit_t.  Asserts
+/** Convert a circuit_t* to a pointer to the enclosing or_circuit_t.  Assert
  * if the cast is impossible. */
 static or_circuit_t *TO_OR_CIRCUIT(circuit_t *);
 /** Convert a circuit_t* to a pointer to the enclosing origin_circuit_t.
- * Asserts if the cast is impossible. */
+ * Assert if the cast is impossible. */
 static origin_circuit_t *TO_ORIGIN_CIRCUIT(circuit_t *);
 
 static INLINE or_circuit_t *TO_OR_CIRCUIT(circuit_t *x)
@@ -2500,6 +2653,60 @@ typedef enum invalid_router_usage_t {
 #define MIN_CONSTRAINED_TCP_BUFFER 2048
 #define MAX_CONSTRAINED_TCP_BUFFER 262144  /* 256k */
 
+/** @name Isolation flags
+
+    Ways to isolate client streams
+
+    @{
+*/
+/** Isolate based on destination port */
+#define ISO_DESTPORT    (1u<<0)
+/** Isolate based on destination address */
+#define ISO_DESTADDR    (1u<<1)
+/** Isolate based on SOCKS authentication */
+#define ISO_SOCKSAUTH   (1u<<2)
+/** Isolate based on client protocol choice */
+#define ISO_CLIENTPROTO (1u<<3)
+/** Isolate based on client address */
+#define ISO_CLIENTADDR  (1u<<4)
+/** Isolate based on session group (always on). */
+#define ISO_SESSIONGRP  (1u<<5)
+/** Isolate based on newnym epoch (always on). */
+#define ISO_NYM_EPOCH   (1u<<6)
+/** Isolate all streams (Internal only). */
+#define ISO_STREAM      (1u<<7)
+/**@}*/
+
+/** Default isolation level for ports. */
+#define ISO_DEFAULT (ISO_CLIENTADDR|ISO_SOCKSAUTH|ISO_SESSIONGRP|ISO_NYM_EPOCH)
+
+/** Indicates that we haven't yet set a session group on a port_cfg_t. */
+#define SESSION_GROUP_UNSET -1
+/** Session group reserved for directory connections */
+#define SESSION_GROUP_DIRCONN -2
+/** Session group reserved for resolve requests launched by a controller */
+#define SESSION_GROUP_CONTROL_RESOLVE -3
+/** First automatically allocated session group number */
+#define SESSION_GROUP_FIRST_AUTO -4
+
+/** Configuration for a single port that we're listening on. */
+typedef struct port_cfg_t {
+  tor_addr_t addr; /**< The actual IP to listen on, if !is_unix_addr. */
+  int port; /**< The configured port, or CFG_AUTO_PORT to tell Tor to pick its
+             * own port. */
+  uint8_t type; /**< One of CONN_TYPE_*_LISTENER */
+  unsigned is_unix_addr : 1; /**< True iff this is an AF_UNIX address. */
+
+  /* Client port types (socks, dns, trans, natd) only: */
+  uint8_t isolation_flags; /**< Zero or more isolation flags */
+  int session_group; /**< A session group, or -1 if this port is not in a
+                      * session group. */
+
+  /* Unix sockets only: */
+  /** Path for an AF_UNIX address */
+  char unix_addr[FLEXIBLE_ARRAY_MEMBER];
+} port_cfg_t;
+
 /** A linked list of lines in a config file. */
 typedef struct config_line_t {
   char *key;
@@ -2508,6 +2715,10 @@ typedef struct config_line_t {
 } config_line_t;
 
 typedef struct routerset_t routerset_t;
+
+/** A magic value for the (Socks|OR|...)Port options below, telling Tor
+ * to pick its own port. */
+#define CFG_AUTO_PORT 0xc4005e
 
 /** Configuration options for a Tor process. */
 typedef struct {
@@ -2591,15 +2802,17 @@ typedef struct {
   char *User; /**< Name of user to run Tor as. */
   char *Group; /**< Name of group to run Tor as. */
   int ORPort; /**< Port to listen on for OR connections. */
-  int SocksPort; /**< Port to listen on for SOCKS connections. */
-  /** Port to listen on for transparent pf/netfilter connections. */
-  int TransPort;
-  int NATDPort; /**< Port to listen on for transparent natd connections. */
+  config_line_t *SocksPort; /**< Ports to listen on for SOCKS connections. */
+  /** Ports to listen on for transparent pf/netfilter connections. */
+  config_line_t *TransPort;
+  config_line_t *NATDPort; /**< Ports to listen on for transparent natd
+                            * connections. */
   int ControlPort; /**< Port to listen on for control connections. */
   config_line_t *ControlSocket; /**< List of Unix Domain Sockets to listen on
                                  * for control connections. */
+  int ControlSocketsGroupWritable; /**< Boolean: Are control sockets g+rw? */
   int DirPort; /**< Port to listen on for directory connections. */
-  int DNSPort; /**< Port to listen on for DNS requests. */
+  config_line_t *DNSPort; /**< Port to listen on for DNS requests. */
   int AssumeReachable; /**< Whether to publish our descriptor regardless. */
   int AuthoritativeDir; /**< Boolean: is this an authoritative directory? */
   int V1AuthoritativeDir; /**< Boolean: is this an authoritative directory
@@ -2627,6 +2840,9 @@ typedef struct {
   int UseBridges; /**< Boolean: should we start all circuits with a bridge? */
   config_line_t *Bridges; /**< List of bootstrap bridge addresses. */
 
+  config_line_t *ClientTransportPlugin; /**< List of client
+                                           transport plugins. */
+
   int BridgeRelay; /**< Boolean: are we acting as a bridge relay? We make
                     * this explicit so we can change how we behave in the
                     * future. */
@@ -2641,12 +2857,14 @@ typedef struct {
   /** To what authority types do we publish our descriptor? Choices are
    * "v1", "v2", "v3", "bridge", or "". */
   smartlist_t *PublishServerDescriptor;
-  /** An authority type, derived from PublishServerDescriptor. */
-  authority_type_t _PublishServerDescriptor;
+  /** A bitfield of authority types, derived from PublishServerDescriptor. */
+  dirinfo_type_t _PublishServerDescriptor;
   /** Boolean: do we publish hidden service descriptors to the HS auths? */
   int PublishHidServDescriptors;
   int FetchServerDescriptors; /**< Do we fetch server descriptors as normal? */
-  int FetchHidServDescriptors; /** and hidden service descriptors? */
+  int FetchHidServDescriptors; /**< and hidden service descriptors? */
+  int FetchV2Networkstatus; /**< Do we fetch v2 networkstatus documents when
+                             * we don't need to? */
   int HidServDirectoryV2; /**< Do we participate in the HS DHT? */
 
   int MinUptimeHidServDirectoryV2; /**< As directory authority, accept hidden
@@ -2669,12 +2887,10 @@ typedef struct {
   uint64_t ConstrainedSockSize; /**< Size of constrained buffers. */
 
   /** Whether we should drop exit streams from Tors that we don't know are
-   * relays.  One of "0" (never refuse), "1" (always refuse), or "auto" (do
+   * relays.  One of "0" (never refuse), "1" (always refuse), or "-1" (do
    * what the consensus says, defaulting to 'refuse' if the consensus says
    * nothing). */
-  char *RefuseUnknownExits;
-  /** Parsed version of RefuseUnknownExits. -1 for auto. */
-  int RefuseUnknownExits_;
+  int RefuseUnknownExits;
 
   /** Application ports that require all nodes in circ to have sufficient
    * uptime. */
@@ -2828,6 +3044,11 @@ typedef struct {
   int DisablePredictedCircuits; /**< Boolean: does Tor preemptively
                                  * make circuits in the background (0),
                                  * or not (1)? */
+
+  /** Process specifier for a controller that ‘owns’ this Tor
+   * instance.  Tor will terminate if its owning controller does. */
+  char *OwningControllerProcess;
+
   int ShutdownWaitLength; /**< When we get a SIGINT and we're a server, how
                            * long do we wait before exiting? */
   char *SafeLogging; /**< Contains "relay", "1", "0" (meaning no scrubbing). */
@@ -3044,6 +3265,24 @@ typedef struct {
    * the defaults have changed. */
   int _UsingTestNetworkDefaults;
 
+  /** If 1, we try to use microdescriptors to build circuits.  If 0, we don't.
+   * If -1, Tor decides. */
+  int UseMicrodescriptors;
+
+  /** File where we should write the ControlPort. */
+  char *ControlPortWriteToFile;
+  /** Should that file be group-readable? */
+  int ControlPortFileGroupReadable;
+
+#define MAX_MAX_CLIENT_CIRCUITS_PENDING 1024
+  /** Maximum number of non-open general-purpose origin circuits to allow at
+   * once. */
+  int MaxClientCircuitsPending;
+
+  /** If 1, we always send optimistic data when it's supported.  If 0, we
+   * never use it.  If -1, we do what the consensus says. */
+  int OptimisticData;
+
 } or_options_t;
 
 /** Persistent state for an onion router, as saved to disk. */
@@ -3122,6 +3361,8 @@ static INLINE void or_state_mark_dirty(or_state_t *state, time_t when)
 
 #define MAX_SOCKS_REPLY_LEN 1024
 #define MAX_SOCKS_ADDR_LEN 256
+#define SOCKS_NO_AUTH 0x00
+#define SOCKS_USER_PASS 0x02
 
 /** Please open a TCP connection to this addr:port. */
 #define SOCKS_COMMAND_CONNECT       0x01
@@ -3141,10 +3382,17 @@ struct socks_request_t {
   /** Which version of SOCKS did the client use? One of "0, 4, 5" -- where
    * 0 means that no socks handshake ever took place, and this is just a
    * stub connection (e.g. see connection_ap_make_link()). */
-  char socks_version;
-  int command; /**< What is this stream's goal? One from the above list. */
+  uint8_t socks_version;
+  /** If using socks5 authentication, which authentication type did we
+   * negotiate?  currently we support 0 (no authentication) and 2
+   * (username/password). */
+  uint8_t auth_type;
+  /** What is this stream's goal? One of the SOCKS_COMMAND_* values */
+  uint8_t command;
+  /** Which kind of listener created this stream? */
+  uint8_t listener_type;
   size_t replylen; /**< Length of <b>reply</b>. */
-  char reply[MAX_SOCKS_REPLY_LEN]; /**< Write an entry into this string if
+  uint8_t reply[MAX_SOCKS_REPLY_LEN]; /**< Write an entry into this string if
                                     * we want to specify our own socks reply,
                                     * rather than using the default socks4 or
                                     * socks5 socks reply. We use this for the
@@ -3156,6 +3404,19 @@ struct socks_request_t {
   unsigned int has_finished : 1; /**< Has the SOCKS handshake finished? Used to
                               * make sure we send back a socks reply for
                               * every connection. */
+  unsigned int got_auth : 1; /**< Have we received any authentication data? */
+
+  /** Number of bytes in username; 0 if username is NULL */
+  size_t usernamelen;
+  /** Number of bytes in password; 0 if password is NULL */
+  uint8_t passwordlen;
+  /** The negotiated username value if any (for socks5), or the entire
+   * authentication string (for socks4).  This value is NOT nul-terminated;
+   * see usernamelen for its length. */
+  char *username;
+  /** The negotiated password value if any (for socks5). This value is NOT
+   * nul-terminated; see passwordlen for its length. */
+  char *password;
 };
 
 /********************************* circuitbuild.c **********************/
@@ -3313,6 +3574,9 @@ typedef enum setopt_err_t {
 typedef enum {
   /** We're remapping this address because the controller told us to. */
   ADDRMAPSRC_CONTROLLER,
+  /** We're remapping this address because of an AutomapHostsOnResolve
+   * configuration. */
+  ADDRMAPSRC_AUTOMAP,
   /** We're remapping this address because our configuration (via torrc, the
    * command line, or a SETCONF command) told us to. */
   ADDRMAPSRC_TORRC,
@@ -3377,7 +3641,9 @@ typedef enum buildtimeout_set_event_t {
  */
 #define CONN_LOG_PROTECT(conn, stmt)                                    \
   STMT_BEGIN                                                            \
-    int _log_conn_is_control = (conn && conn->type == CONN_TYPE_CONTROL); \
+    int _log_conn_is_control;                                           \
+    tor_assert(conn);                                                   \
+    _log_conn_is_control = (conn->type == CONN_TYPE_CONTROL);           \
     if (_log_conn_is_control)                                           \
       disable_control_logging();                                        \
   STMT_BEGIN stmt; STMT_END;                                            \
@@ -3650,7 +3916,7 @@ typedef struct trusted_dir_server_t {
   unsigned int has_accepted_serverdesc:1;
 
   /** What kind of authority is this? (Bitfield.) */
-  authority_type_t type;
+  dirinfo_type_t type;
 
   download_status_t v2_ns_dl_status; /**< Status of downloading this server's
                                * v2 network status. */
