@@ -24,21 +24,25 @@ exit 0
 
 @DPATCH@
 diff -urNad tor~/src/or/config.c tor/src/or/config.c
---- tor~/src/or/config.c	2006-07-24 05:15:02.576170550 +0200
-+++ tor/src/or/config.c	2006-07-24 05:18:45.286651501 +0200
-@@ -2118,8 +2118,13 @@
-     REJECT("Failed to normalize old Log options. See logs for details.");
+--- tor~/src/or/config.c	2011-09-03 13:31:11.113531768 +0200
++++ tor/src/or/config.c	2011-09-03 13:31:15.189490441 +0200
+@@ -3135,11 +3135,16 @@
+         "misconfigured or something else goes wrong.");
  
    /* Special case on first boot if no Log options are given. */
--  if (!options->Logs && !options->RunAsDaemon && !from_setconf)
--    config_line_append(&options->Logs, "Log", "notice stdout");
+-  if (!options->Logs && !options->RunAsDaemon && !from_setconf) {
+-    if (quiet_level == 0)
 +  if (debian_running_as_debiantor()) {
 +    if (!options->Logs && !from_setconf)
 +      config_line_append(&options->Logs, "Log", "notice file /var/log/tor/log");
 +  } else {
-+    if (!options->Logs && !options->RunAsDaemon && !from_setconf)
-+      config_line_append(&options->Logs, "Log", "notice stdout");
-+  }
++    if (!options->Logs && !options->RunAsDaemon && !from_setconf) {
++      if (quiet_level == 0)
+         config_line_append(&options->Logs, "Log", "notice stdout");
+-    else if (quiet_level == 1)
++      else if (quiet_level == 1)
+         config_line_append(&options->Logs, "Log", "warn stdout");
++    }
+   }
  
    if (options_init_logs(options, 1)<0) /* Validate the log(s) */
-     REJECT("Failed to validate Log options. See logs for details.");
