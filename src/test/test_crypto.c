@@ -69,7 +69,7 @@ test_crypto_rng(void)
     uint64_t big;
     char *host;
     j = crypto_rand_int(100);
-    if (i < 0 || i >= 100)
+    if (j < 0 || j >= 100)
       allok = 0;
     big = crypto_rand_uint64(U64_LITERAL(1)<<40);
     if (big >= (U64_LITERAL(1)<<40))
@@ -240,11 +240,13 @@ test_crypto_sha(void)
   /* Test SHA-1 with a test vector from the specification. */
   i = crypto_digest(data, "abc", 3);
   test_memeq_hex(data, "A9993E364706816ABA3E25717850C26C9CD0D89D");
+  tt_int_op(i, ==, 0);
 
   /* Test SHA-256 with a test vector from the specification. */
   i = crypto_digest256(data, "abc", 3, DIGEST_SHA256);
   test_memeq_hex(data, "BA7816BF8F01CFEA414140DE5DAE2223B00361A3"
                        "96177A9CB410FF61F20015AD");
+  tt_int_op(i, ==, 0);
 
   /* Test HMAC-SHA-1 with test cases from RFC2202. */
 
@@ -341,7 +343,9 @@ test_crypto_pk(void)
   test_eq(0, crypto_pk_cmp_keys(pk1, pk2));
 
   test_eq(128, crypto_pk_keysize(pk1));
+  test_eq(1024, crypto_pk_num_bits(pk1));
   test_eq(128, crypto_pk_keysize(pk2));
+  test_eq(1024, crypto_pk_num_bits(pk2));
 
   test_eq(128, crypto_pk_public_encrypt(pk2, data1, sizeof(data1),
                                         "Hello whirled.", 15,
@@ -626,7 +630,7 @@ test_crypto_aes_iv(void)
   crypto_free_cipher_env(cipher);
   cipher = NULL;
   test_eq(encrypted_size, 16 + 4095);
-  tor_assert(encrypted_size > 0); /* This is obviously true, since 4111 is
+  tt_assert(encrypted_size > 0); /* This is obviously true, since 4111 is
                                    * greater than 0, but its truth is not
                                    * obvious to all analysis tools. */
   cipher = crypto_create_init_cipher(key1, 0);
@@ -635,7 +639,7 @@ test_crypto_aes_iv(void)
   crypto_free_cipher_env(cipher);
   cipher = NULL;
   test_eq(decrypted_size, 4095);
-  tor_assert(decrypted_size > 0);
+  tt_assert(decrypted_size > 0);
   test_memeq(plain, decrypted1, 4095);
   /* Encrypt a second time (with a new random initialization vector). */
   cipher = crypto_create_init_cipher(key1, 1);
@@ -644,14 +648,14 @@ test_crypto_aes_iv(void)
   crypto_free_cipher_env(cipher);
   cipher = NULL;
   test_eq(encrypted_size, 16 + 4095);
-  tor_assert(encrypted_size > 0);
+  tt_assert(encrypted_size > 0);
   cipher = crypto_create_init_cipher(key1, 0);
   decrypted_size = crypto_cipher_decrypt_with_iv(cipher, decrypted2, 4095,
                                              encrypted2, encrypted_size);
   crypto_free_cipher_env(cipher);
   cipher = NULL;
   test_eq(decrypted_size, 4095);
-  tor_assert(decrypted_size > 0);
+  tt_assert(decrypted_size > 0);
   test_memeq(plain, decrypted2, 4095);
   test_memneq(encrypted1, encrypted2, encrypted_size);
   /* Decrypt with the wrong key. */
@@ -676,14 +680,14 @@ test_crypto_aes_iv(void)
   crypto_free_cipher_env(cipher);
   cipher = NULL;
   test_eq(encrypted_size, 16 + 1);
-  tor_assert(encrypted_size > 0);
+  tt_assert(encrypted_size > 0);
   cipher = crypto_create_init_cipher(key1, 0);
   decrypted_size = crypto_cipher_decrypt_with_iv(cipher, decrypted1, 1,
                                              encrypted1, encrypted_size);
   crypto_free_cipher_env(cipher);
   cipher = NULL;
   test_eq(decrypted_size, 1);
-  tor_assert(decrypted_size > 0);
+  tt_assert(decrypted_size > 0);
   test_memeq(plain_1, decrypted1, 1);
   /* Special length case: 15. */
   cipher = crypto_create_init_cipher(key1, 1);
@@ -692,14 +696,14 @@ test_crypto_aes_iv(void)
   crypto_free_cipher_env(cipher);
   cipher = NULL;
   test_eq(encrypted_size, 16 + 15);
-  tor_assert(encrypted_size > 0);
+  tt_assert(encrypted_size > 0);
   cipher = crypto_create_init_cipher(key1, 0);
   decrypted_size = crypto_cipher_decrypt_with_iv(cipher, decrypted1, 15,
                                              encrypted1, encrypted_size);
   crypto_free_cipher_env(cipher);
   cipher = NULL;
   test_eq(decrypted_size, 15);
-  tor_assert(decrypted_size > 0);
+  tt_assert(decrypted_size > 0);
   test_memeq(plain_15, decrypted1, 15);
   /* Special length case: 16. */
   cipher = crypto_create_init_cipher(key1, 1);
@@ -708,14 +712,14 @@ test_crypto_aes_iv(void)
   crypto_free_cipher_env(cipher);
   cipher = NULL;
   test_eq(encrypted_size, 16 + 16);
-  tor_assert(encrypted_size > 0);
+  tt_assert(encrypted_size > 0);
   cipher = crypto_create_init_cipher(key1, 0);
   decrypted_size = crypto_cipher_decrypt_with_iv(cipher, decrypted1, 16,
                                              encrypted1, encrypted_size);
   crypto_free_cipher_env(cipher);
   cipher = NULL;
   test_eq(decrypted_size, 16);
-  tor_assert(decrypted_size > 0);
+  tt_assert(decrypted_size > 0);
   test_memeq(plain_16, decrypted1, 16);
   /* Special length case: 17. */
   cipher = crypto_create_init_cipher(key1, 1);
@@ -724,12 +728,12 @@ test_crypto_aes_iv(void)
   crypto_free_cipher_env(cipher);
   cipher = NULL;
   test_eq(encrypted_size, 16 + 17);
-  tor_assert(encrypted_size > 0);
+  tt_assert(encrypted_size > 0);
   cipher = crypto_create_init_cipher(key1, 0);
   decrypted_size = crypto_cipher_decrypt_with_iv(cipher, decrypted1, 17,
                                              encrypted1, encrypted_size);
   test_eq(decrypted_size, 17);
-  tor_assert(decrypted_size > 0);
+  tt_assert(decrypted_size > 0);
   test_memeq(plain_17, decrypted1, 17);
 
  done:

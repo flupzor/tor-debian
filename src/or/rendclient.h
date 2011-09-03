@@ -12,6 +12,8 @@
 #ifndef _TOR_RENDCLIENT_H
 #define _TOR_RENDCLIENT_H
 
+void rend_client_purge_state(void);
+
 void rend_client_introcirc_has_opened(origin_circuit_t *circ);
 void rend_client_rendcirc_has_opened(origin_circuit_t *circ);
 int rend_client_introduction_acked(origin_circuit_t *circ,
@@ -19,6 +21,7 @@ int rend_client_introduction_acked(origin_circuit_t *circ,
                                    size_t request_len);
 void rend_client_refetch_v2_renddesc(const rend_data_t *rend_query);
 void rend_client_cancel_descriptor_fetches(void);
+void rend_client_purge_last_hid_serv_requests(void);
 int rend_client_remove_intro_point(extend_info_t *failed_intro,
                                    const rend_data_t *rend_query);
 int rend_client_rendezvous_acked(origin_circuit_t *circ,
@@ -34,7 +37,7 @@ int rend_client_any_intro_points_usable(const rend_cache_entry_t *entry);
 
 int rend_client_send_introduction(origin_circuit_t *introcirc,
                                   origin_circuit_t *rendcirc);
-int rend_parse_service_authorization(or_options_t *options,
+int rend_parse_service_authorization(const or_options_t *options,
                                      int validate_only);
 rend_service_authorization_t *rend_client_lookup_service_authorization(
                                                 const char *onion_address);

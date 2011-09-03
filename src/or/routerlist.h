@@ -11,7 +11,7 @@
 #ifndef _TOR_ROUTERLIST_H
 #define _TOR_ROUTERLIST_H
 
-int get_n_authorities(authority_type_t type);
+int get_n_authorities(dirinfo_type_t type);
 int trusted_dirs_reload_certs(void);
 int trusted_dirs_load_certs_from_string(const char *contents, int from_store,
                                         int flush);
@@ -27,16 +27,15 @@ int router_reload_router_list(void);
 int authority_cert_dl_looks_uncertain(const char *id_digest);
 smartlist_t *router_get_trusted_dir_servers(void);
 
-const routerstatus_t *router_pick_directory_server(authority_type_t type,
+const routerstatus_t *router_pick_directory_server(dirinfo_type_t type,
                                                    int flags);
 trusted_dir_server_t *router_get_trusteddirserver_by_digest(const char *d);
 trusted_dir_server_t *trusteddirserver_get_by_v3_auth_digest(const char *d);
-const routerstatus_t *router_pick_trusteddirserver(authority_type_t type,
+const routerstatus_t *router_pick_trusteddirserver(dirinfo_type_t type,
                                                    int flags);
 int router_get_my_share_of_directory_requests(double *v2_share_out,
                                               double *v3_share_out);
 void router_reset_status_download_failures(void);
-void routerlist_add_family(smartlist_t *sl, const routerinfo_t *router);
 int routers_have_same_or_addr(const routerinfo_t *r1, const routerinfo_t *r2);
 int router_nickname_is_in_list(const routerinfo_t *router, const char *list);
 const routerinfo_t *routerlist_find_my_routerinfo(void);
@@ -56,11 +55,11 @@ const node_t *router_choose_random_node(smartlist_t *excludedsmartlist,
 
 const routerinfo_t *router_get_by_nickname(const char *nickname,
                                      int warn_if_unnamed);
-int router_digest_version_as_new_as(const char *digest, const char *cutoff);
+int router_is_named(const routerinfo_t *router);
 int router_digest_is_trusted_dir_type(const char *digest,
-                                      authority_type_t type);
+                                      dirinfo_type_t type);
 #define router_digest_is_trusted_dir(d) \
-  router_digest_is_trusted_dir_type((d), NO_AUTHORITY)
+  router_digest_is_trusted_dir_type((d), NO_DIRINFO)
 
 int router_addr_is_trusted_dir(uint32_t addr);
 int hexdigest_to_digest(const char *hexdigest, char *digest);
@@ -130,7 +129,7 @@ void router_load_extrainfo_from_string(const char *s, const char *eos,
                                        int descriptor_digests);
 
 void routerlist_retry_directory_downloads(time_t now);
-int router_exit_policy_all_nodes_reject(uint32_t addr, uint16_t port,
+int router_exit_policy_all_nodes_reject(const tor_addr_t *addr, uint16_t port,
                                         int need_uptime);
 
 int router_exit_policy_rejects_all(const routerinfo_t *router);
@@ -138,13 +137,14 @@ trusted_dir_server_t *add_trusted_dir_server(const char *nickname,
                            const char *address,
                            uint16_t dir_port, uint16_t or_port,
                            const char *digest, const char *v3_auth_digest,
-                           authority_type_t type);
+                           dirinfo_type_t type);
 void authority_cert_free(authority_cert_t *cert);
 void clear_trusted_dir_servers(void);
 int any_trusted_dir_is_v1_authority(void);
 void update_consensus_router_descriptor_downloads(time_t now, int is_vote,
                                                   networkstatus_t *consensus);
 void update_router_descriptor_downloads(time_t now);
+void update_all_descriptor_downloads(time_t now);
 void update_extrainfo_downloads(time_t now);
 int router_have_minimum_dir_info(void);
 void router_dir_info_changed(void);

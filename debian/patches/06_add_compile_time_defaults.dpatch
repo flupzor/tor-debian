@@ -23,9 +23,9 @@ esac
 exit 0
 
 @DPATCH@
-diff -urNad tor~/src/or/config.c tor/src/or/config.c
---- tor~/src/or/config.c	2009-09-03 15:05:41.000000000 +0200
-+++ tor/src/or/config.c	2009-09-03 15:09:37.662104166 +0200
+diff -urNad '--exclude=CVS' '--exclude=.svn' '--exclude=.git' '--exclude=.arch' '--exclude=.hg' '--exclude=_darcs' '--exclude=.bzr' tor~/src/or/config.c tor/src/or/config.c
+--- tor~/src/or/config.c	2011-06-17 22:11:35.000000000 +0200
++++ tor/src/or/config.c	2011-06-17 22:31:19.510811846 +0200
 @@ -12,6 +12,7 @@
  #define CONFIG_PRIVATE
  
@@ -34,7 +34,7 @@ diff -urNad tor~/src/or/config.c tor/src/or/config.c
  #include "circuitbuild.h"
  #include "circuitlist.h"
  #include "config.h"
-@@ -717,6 +718,9 @@
+@@ -577,6 +578,9 @@
  static void init_libevent(void);
  static int opt_streq(const char *s1, const char *s2);
  
@@ -54,7 +54,7 @@ diff -urNad tor~/src/or/config.c tor/src/or/config.c
    if (argv) { /* first time we're called. save command line args */
      backup_argv = argv;
      backup_argc = argc;
-@@ -5304,3 +5311,62 @@
+@@ -5332,3 +5339,83 @@
    return 0;
  }
  
@@ -114,6 +114,27 @@ diff -urNad tor~/src/or/config.c tor/src/or/config.c
 +    tor_assert(var);
 +    var->initvalue = tor_strdup("debian-tor");
 +  };
++
++  /* set up the control socket stuff */
++  var = config_find_option(&options_format, "ControlSocket");
++  tor_assert(var);
++  var->initvalue = tor_strdup("/var/run/tor/control");
++
++  var = config_find_option(&options_format, "ControlSocketsGroupWritable");
++  tor_assert(var);
++  var->initvalue = tor_strdup("1");
++
++  var = config_find_option(&options_format, "CookieAuthentication");
++  tor_assert(var);
++  var->initvalue = tor_strdup("1");
++
++  var = config_find_option(&options_format, "CookieAuthFileGroupReadable");
++  tor_assert(var);
++  var->initvalue = tor_strdup("1");
++
++  var = config_find_option(&options_format, "CookieAuthFile");
++  tor_assert(var);
++  var->initvalue = tor_strdup("/var/run/tor/control.authcookie");
 +
 +  return 0;
 +}

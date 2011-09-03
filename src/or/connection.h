@@ -22,6 +22,7 @@ dir_connection_t *dir_connection_new(int socket_family);
 or_connection_t *or_connection_new(int socket_family);
 edge_connection_t *edge_connection_new(int type, int socket_family);
 control_connection_t *control_connection_new(int socket_family);
+listener_connection_t *listener_connection_new(int type, int socket_family);
 connection_t *connection_new(int type, int socket_family);
 
 void connection_link_connections(connection_t *conn_a, connection_t *conn_b);
@@ -57,6 +58,9 @@ int connection_connect(connection_t *conn, const char *address,
 
 int connection_proxy_connect(connection_t *conn, int type);
 int connection_read_proxy_handshake(connection_t *conn);
+void log_failed_proxy_connection(connection_t *conn);
+int get_proxy_addrport(tor_addr_t *addr, uint16_t *port, int *proxy_type,
+                       const connection_t *conn);
 
 int retry_all_listeners(smartlist_t *replaced_conns,
                         smartlist_t *new_conns);
@@ -79,6 +83,8 @@ int connection_fetch_from_buf_http(connection_t *conn,
 int connection_wants_to_flush(connection_t *conn);
 int connection_outbuf_too_full(connection_t *conn);
 int connection_handle_write(connection_t *conn, int force);
+int connection_flush(connection_t *conn);
+
 void _connection_write_to_buf_impl(const char *string, size_t len,
                                    connection_t *conn, int zlib);
 static void connection_write_to_buf(const char *string, size_t len,

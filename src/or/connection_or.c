@@ -13,6 +13,7 @@
 #include "or.h"
 #include "buffers.h"
 #include "circuitbuild.h"
+#include "circuitlist.h"
 #include "command.h"
 #include "config.h"
 #include "connection.h"
@@ -124,7 +125,7 @@ connection_or_set_identity_digest(or_connection_t *conn, const char *digest)
 
   if (!orconn_identity_map)
     orconn_identity_map = digestmap_new();
-  if (!memcmp(conn->identity_digest, digest, DIGEST_LEN))
+  if (tor_memeq(conn->identity_digest, digest, DIGEST_LEN))
     return;
 
   /* If the identity was set previously, remove the old mapping. */
@@ -143,11 +144,147 @@ connection_or_set_identity_digest(or_connection_t *conn, const char *digest)
 #if 1
   /* Testing code to check for bugs in representation. */
   for (; tmp; tmp = tmp->next_with_same_id) {
-    tor_assert(!memcmp(tmp->identity_digest, digest, DIGEST_LEN));
+    tor_assert(tor_memeq(tmp->identity_digest, digest, DIGEST_LEN));
     tor_assert(tmp != conn);
   }
 #endif
 }
+
+/**************************************************************/
+
+/** Map from a string describing what a non-open OR connection was doing when
+ * failed, to an intptr_t describing the count of connections that failed that
+ * way.  Note that the count is stored _as_ the pointer.
+ */
+static strmap_t *broken_connection_counts;
+
+/** If true, do not record information in <b>broken_connection_counts</b>. */
+static int disable_broken_connection_counts = 0;
+
+/** Record that an OR connection failed in <b>state</b>. */
+static void
+note_broken_connection(const char *state)
+{
+  void *ptr;
+  intptr_t val;
+  if (disable_broken_connection_counts)
+    return;
+
+  if (!broken_connection_counts)
+    broken_connection_counts = strmap_new();
+
+  ptr = strmap_get(broken_connection_counts, state);
+  val = (intptr_t)ptr;
+  val++;
+  ptr = (void*)val;
+  strmap_set(broken_connection_counts, state, ptr);
+}
+
+/** Forget all recorded states for failed connections.  If
+ * <b>stop_recording</b> is true, don't record any more. */
+void
+clear_broken_connection_map(int stop_recording)
+{
+  if (broken_connection_counts)
+    strmap_free(broken_connection_counts, NULL);
+  broken_connection_counts = NULL;
+  if (stop_recording)
+    disable_broken_connection_counts = 1;
+}
+
+/** Write a detailed description the state of <b>orconn</b> into the
+ * <b>buflen</b>-byte buffer at <b>buf</b>.  This description includes not
+ * only the OR-conn level state but also the TLS state.  It's useful for
+ * diagnosing broken handshakes. */
+static void
+connection_or_get_state_description(or_connection_t *orconn,
+                                    char *buf, size_t buflen)
+{
+  connection_t *conn = TO_CONN(orconn);
+  const char *conn_state;
+  char tls_state[256];
+
+  tor_assert(conn->type == CONN_TYPE_OR);
+
+  conn_state = conn_state_to_string(conn->type, conn->state);
+  tor_tls_get_state_description(orconn->tls, tls_state, sizeof(tls_state));
+
+  tor_snprintf(buf, buflen, "%s with SSL state %s", conn_state, tls_state);
+}
+
+/** Record the current state of <b>orconn</b> as the state of a broken
+ * connection. */
+static void
+connection_or_note_state_when_broken(or_connection_t *orconn)
+{
+  char buf[256];
+  if (disable_broken_connection_counts)
+    return;
+  connection_or_get_state_description(orconn, buf, sizeof(buf));
+  log_info(LD_HANDSHAKE,"Connection died in state '%s'", buf);
+  note_broken_connection(buf);
+}
+
+/** Helper type used to sort connection states and find the most frequent. */
+typedef struct broken_state_count_t {
+  intptr_t count;
+  const char *state;
+} broken_state_count_t;
+
+/** Helper function used to sort broken_state_count_t by frequency. */
+static int
+broken_state_count_compare(const void **a_ptr, const void **b_ptr)
+{
+  const broken_state_count_t *a = *a_ptr, *b = *b_ptr;
+  if (b->count < a->count)
+    return -1;
+  else if (b->count == a->count)
+    return 0;
+  else
+    return 1;
+}
+
+/** Upper limit on the number of different states to report for connection
+ * failure. */
+#define MAX_REASONS_TO_REPORT 10
+
+/** Report a list of the top states for failed OR connections at log level
+ * <b>severity</b>, in log domain <b>domain</b>. */
+void
+connection_or_report_broken_states(int severity, int domain)
+{
+  int total = 0;
+  smartlist_t *items;
+
+  if (!broken_connection_counts || disable_broken_connection_counts)
+    return;
+
+  items = smartlist_create();
+  STRMAP_FOREACH(broken_connection_counts, state, void *, countptr) {
+    broken_state_count_t *c = tor_malloc(sizeof(broken_state_count_t));
+    c->count = (intptr_t)countptr;
+    total += (int)c->count;
+    c->state = state;
+    smartlist_add(items, c);
+  } STRMAP_FOREACH_END;
+
+  smartlist_sort(items, broken_state_count_compare);
+
+  log(severity, domain, "%d connections have failed%s", total,
+      smartlist_len(items) > MAX_REASONS_TO_REPORT ? ". Top reasons:" : ":");
+
+  SMARTLIST_FOREACH_BEGIN(items, const broken_state_count_t *, c) {
+    if (c_sl_idx > MAX_REASONS_TO_REPORT)
+      break;
+    log(severity, domain,
+        " %d connections died in state %s", (int)c->count, c->state);
+  } SMARTLIST_FOREACH_END(c);
+
+  SMARTLIST_FOREACH(items, broken_state_count_t *, c, tor_free(c));
+  smartlist_free(items);
+}
+
+/**************************************************************/
 
 /** Pack the cell_t host-order structure <b>src</b> into network-order
  * in the buffer <b>dest</b>. See tor-spec.txt for details about the
@@ -317,7 +454,7 @@ connection_or_finished_flushing(or_connection_t *conn)
 int
 connection_or_finished_connecting(or_connection_t *or_conn)
 {
-  int proxy_type;
+  const int proxy_type = or_conn->proxy_type;
   connection_t *conn;
   tor_assert(or_conn);
   conn = TO_CONN(or_conn);
@@ -326,15 +463,6 @@ connection_or_finished_connecting(or_connection_t *or_conn)
   log_debug(LD_HANDSHAKE,"OR connect() to router at %s:%u finished.",
             conn->address,conn->port);
   control_event_bootstrap(BOOTSTRAP_STATUS_HANDSHAKE, 0);
-
-  proxy_type = PROXY_NONE;
-
-  if (get_options()->HTTPSProxy)
-    proxy_type = PROXY_CONNECT;
-  else if (get_options()->Socks4Proxy)
-    proxy_type = PROXY_SOCKS4;
-  else if (get_options()->Socks5Proxy)
-    proxy_type = PROXY_SOCKS5;
 
   if (proxy_type != PROXY_NONE) {
     /* start proxy handshake */
@@ -354,6 +482,51 @@ connection_or_finished_connecting(or_connection_t *or_conn)
     return -1;
   }
   return 0;
+}
+
+/* Called when we're about to finally unlink and free an OR connection:
+ * perform necessary accounting and cleanup */
+void
+connection_or_about_to_close(or_connection_t *or_conn)
+{
+  time_t now = time(NULL);
+  connection_t *conn = TO_CONN(or_conn);
+
+  /* Remember why we're closing this connection. */
+  if (conn->state != OR_CONN_STATE_OPEN) {
+    /* Inform any pending (not attached) circs that they should
+     * give up. */
+    circuit_n_conn_done(TO_OR_CONN(conn), 0);
+    /* now mark things down as needed */
+    if (connection_or_nonopen_was_started_here(or_conn)) {
+      const or_options_t *options = get_options();
+      connection_or_note_state_when_broken(or_conn);
+      rep_hist_note_connect_failed(or_conn->identity_digest, now);
+      entry_guard_register_connect_status(or_conn->identity_digest,0,
+                                          !options->HTTPSProxy, now);
+      if (conn->state >= OR_CONN_STATE_TLS_HANDSHAKING) {
+        int reason = tls_error_to_orconn_end_reason(or_conn->tls_error);
+        control_event_or_conn_status(or_conn, OR_CONN_EVENT_FAILED,
+                                     reason);
+        if (!authdir_mode_tests_reachability(options))
+          control_event_bootstrap_problem(
+                orconn_end_reason_to_control_string(reason), reason);
+      }
+    }
+  } else if (conn->hold_open_until_flushed) {
+    /* We only set hold_open_until_flushed when we're intentionally
+     * closing a connection. */
+    rep_hist_note_disconnect(or_conn->identity_digest, now);
+    control_event_or_conn_status(or_conn, OR_CONN_EVENT_CLOSED,
+                tls_error_to_orconn_end_reason(or_conn->tls_error));
+  } else if (!tor_digest_is_zero(or_conn->identity_digest)) {
+    rep_hist_note_connection_died(or_conn->identity_digest, now);
+    control_event_or_conn_status(or_conn, OR_CONN_EVENT_CLOSED,
+                tls_error_to_orconn_end_reason(or_conn->tls_error));
+  }
+  /* Now close all the attached circuits on it. */
+  circuit_unlink_all_from_or_conn(TO_OR_CONN(conn),
+                                  END_CIRC_REASON_OR_CONN_CLOSED);
 }
 
 /** Return 1 if identity digest <b>id_digest</b> is known to be a
@@ -380,7 +553,7 @@ connection_or_digest_is_known_relay(const char *id_digest)
  */
 static void
 connection_or_update_token_buckets_helper(or_connection_t *conn, int reset,
-                                          or_options_t *options)
+                                          const or_options_t *options)
 {
   int rate, burst; /* per-connection rate limiting params */
   if (connection_or_digest_is_known_relay(conn->identity_digest)) {
@@ -412,7 +585,7 @@ connection_or_update_token_buckets_helper(or_connection_t *conn, int reset,
                                   burst, tick);
     old_cfg = conn->bucket_cfg;
     if (conn->_base.bufev)
-      bufferevent_set_rate_limit(conn->_base.bufev, cfg);
+      tor_set_bufferevent_rate_limit(conn->_base.bufev, cfg);
     if (old_cfg)
       ev_token_bucket_cfg_free(old_cfg);
     conn->bucket_cfg = cfg;
@@ -436,7 +609,8 @@ connection_or_update_token_buckets_helper(or_connection_t *conn, int reset,
  * Go through all the OR connections and update their token buckets to make
  * sure they don't exceed their maximum values. */
 void
-connection_or_update_token_buckets(smartlist_t *conns, or_options_t *options)
+connection_or_update_token_buckets(smartlist_t *conns,
+                                   const or_options_t *options)
 {
   SMARTLIST_FOREACH(conns, connection_t *, conn,
   {
@@ -585,7 +759,7 @@ connection_or_get_for_extend(const char *digest,
   for (; conn; conn = conn->next_with_same_id) {
     tor_assert(conn->_base.magic == OR_CONNECTION_MAGIC);
     tor_assert(conn->_base.type == CONN_TYPE_OR);
-    tor_assert(!memcmp(conn->identity_digest, digest, DIGEST_LEN));
+    tor_assert(tor_memeq(conn->identity_digest, digest, DIGEST_LEN));
     if (conn->_base.marked_for_close)
       continue;
     /* Never return a non-open connection. */
@@ -788,7 +962,7 @@ connection_or_set_bad_connections(const char *digest, int force)
     return;
 
   DIGESTMAP_FOREACH(orconn_identity_map, identity, or_connection_t *, conn) {
-    if (!digest || !memcmp(digest, conn->identity_digest, DIGEST_LEN))
+    if (!digest || tor_memeq(digest, conn->identity_digest, DIGEST_LEN))
       connection_or_group_set_badness(conn, force);
   } DIGESTMAP_FOREACH_END;
 }
@@ -827,10 +1001,14 @@ connection_or_connect(const tor_addr_t *_addr, uint16_t port,
                       const char *id_digest)
 {
   or_connection_t *conn;
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   int socket_error = 0;
-  int using_proxy = 0;
   tor_addr_t addr;
+
+  int r;
+  tor_addr_t proxy_addr;
+  uint16_t proxy_port;
+  int proxy_type;
 
   tor_assert(_addr);
   tor_assert(id_digest);
@@ -848,19 +1026,20 @@ connection_or_connect(const tor_addr_t *_addr, uint16_t port,
   conn->_base.state = OR_CONN_STATE_CONNECTING;
   control_event_or_conn_status(conn, OR_CONN_EVENT_LAUNCHED, 0);
 
-  /* use a proxy server if available */
-  if (options->HTTPSProxy) {
-    using_proxy = 1;
-    tor_addr_copy(&addr, &options->HTTPSProxyAddr);
-    port = options->HTTPSProxyPort;
-  } else if (options->Socks4Proxy) {
-    using_proxy = 1;
-    tor_addr_copy(&addr, &options->Socks4ProxyAddr);
-    port = options->Socks4ProxyPort;
-  } else if (options->Socks5Proxy) {
-    using_proxy = 1;
-    tor_addr_copy(&addr, &options->Socks5ProxyAddr);
-    port = options->Socks5ProxyPort;
+  /* If we are using a proxy server, find it and use it. */
+  r = get_proxy_addrport(&proxy_addr, &proxy_port, &proxy_type, TO_CONN(conn));
+  if (r == 0) {
+    conn->proxy_type = proxy_type;
+    if (proxy_type != PROXY_NONE) {
+      tor_addr_copy(&addr, &proxy_addr);
+      port = proxy_port;
+      conn->_base.proxy_state = PROXY_INFANT;
+    }
+  } else {
+    log_warn(LD_GENERAL, "Tried to connect through proxy, but proxy address "
+             "could not be found.");
+    connection_free(TO_CONN(conn));
+    return NULL;
   }
 
   switch (connection_connect(TO_CONN(conn), conn->_base.address,
@@ -868,7 +1047,7 @@ connection_or_connect(const tor_addr_t *_addr, uint16_t port,
     case -1:
       /* If the connection failed immediately, and we're using
        * a proxy, our proxy is down. Don't blame the Tor server. */
-      if (!using_proxy)
+      if (conn->_base.proxy_state == PROXY_INFANT)
         entry_guard_register_connect_status(conn->identity_digest,
                                             0, 1, time(NULL));
       connection_or_connect_failed(conn,
@@ -923,7 +1102,7 @@ connection_tls_start_handshake(or_connection_t *conn, int receiving)
     }
     conn->_base.bufev = b;
     if (conn->bucket_cfg)
-      bufferevent_set_rate_limit(conn->_base.bufev, conn->bucket_cfg);
+      tor_set_bufferevent_rate_limit(conn->_base.bufev, conn->bucket_cfg);
     connection_enable_rate_limiting(TO_CONN(conn));
 
     connection_configure_bufferevent_callbacks(TO_CONN(conn));
@@ -996,13 +1175,16 @@ connection_tls_continue_handshake(or_connection_t *conn)
       if (! tor_tls_used_v1_handshake(conn->tls)) {
         if (!tor_tls_is_server(conn->tls)) {
           if (conn->_base.state == OR_CONN_STATE_TLS_HANDSHAKING) {
-            // log_notice(LD_OR,"Done. state was TLS_HANDSHAKING.");
+            log_debug(LD_OR, "Done with initial SSL handshake (client-side). "
+                             "Requesting renegotiation.");
             conn->_base.state = OR_CONN_STATE_TLS_CLIENT_RENEGOTIATING;
             goto again;
           }
           // log_notice(LD_OR,"Done. state was %d.", conn->_base.state);
         } else {
           /* improved handshake, but not a client. */
+          log_debug(LD_OR, "Done with initial SSL handshake (server-side). "
+                           "Expecting renegotiation.");
           tor_tls_set_renegotiate_callback(conn->tls,
                                            connection_or_tls_renegotiated_cb,
                                            conn);
@@ -1144,7 +1326,7 @@ connection_or_check_valid_tls_handshake(or_connection_t *conn,
                                         char *digest_rcvd_out)
 {
   crypto_pk_env_t *identity_rcvd=NULL;
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   int severity = server_mode(options) ? LOG_PROTOCOL_WARN : LOG_WARN;
   const char *safe_address =
     started_here ? conn->_base.address :
@@ -1221,7 +1403,7 @@ connection_or_check_valid_tls_handshake(or_connection_t *conn,
     int as_advertised = 1;
     tor_assert(has_cert);
     tor_assert(has_identity);
-    if (memcmp(digest_rcvd_out, conn->identity_digest, DIGEST_LEN)) {
+    if (tor_memneq(digest_rcvd_out, conn->identity_digest, DIGEST_LEN)) {
       /* I was aiming for a particular digest. I didn't get it! */
       char seen[HEX_DIGEST_LEN+1];
       char expected[HEX_DIGEST_LEN+1];
@@ -1565,9 +1747,8 @@ connection_or_send_netinfo(or_connection_t *conn)
     len = append_address_to_payload(out, &my_addr);
     if (len < 0)
       return -1;
-    out += len;
   } else {
-    *out++ = 0;
+    *out = 0;
   }
 
   connection_or_write_cell_to_buf(&cell, conn);

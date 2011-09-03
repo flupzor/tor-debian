@@ -1,7 +1,7 @@
 
 noinst_LIBRARIES = libor.a libor-crypto.a libor-event.a
 
-EXTRA_DIST = common_sha1.i sha256.c
+EXTRA_DIST = common_sha1.i sha256.c Makefile.nmake
 
 #CFLAGS  = -Wall -Wpointer-arith -O2
 
@@ -15,9 +15,11 @@ libor_a_SOURCES = \
   address.c					\
   compat.c					\
   container.c					\
+  di_ops.c					\
   log.c						\
   memarea.c					\
   mempool.c					\
+  procmon.c					\
   util.c					\
   util_codedigest.c				\
   $(libor_extra_source)
@@ -38,9 +40,11 @@ noinst_HEADERS = 				\
   compat_libevent.h				\
   container.h					\
   crypto.h					\
+  di_ops.h					\
   ht.h						\
   memarea.h					\
   mempool.h					\
+  procmon.h					\
   strlcat.c					\
   strlcpy.c					\
   torgzip.h					\

@@ -1093,7 +1093,7 @@ check_signature_token(const char *digest,
   }
 //  log_debug(LD_DIR,"Signed %s hash starts %s", doctype,
 //            hex_str(signed_digest,4));
-  if (memcmp(digest, signed_digest, digest_len)) {
+  if (tor_memneq(digest, signed_digest, digest_len)) {
     log_warn(LD_DIR, "Error reading %s: signature does not match.", doctype);
     tor_free(signed_digest);
     return -1;
@@ -1208,7 +1208,8 @@ router_parse_list_from_string(const char **s, const char *eos,
                                               prepend_annotations);
       if (router) {
         log_debug(LD_DIR, "Read router '%s', purpose '%s'",
-                  router->nickname, router_purpose_to_string(router->purpose));
+                  router_describe(router),
+                  router_purpose_to_string(router->purpose));
         signed_desc = &router->cache_info;
         elt = router;
       }
@@ -1459,6 +1460,11 @@ router_parse_entry_from_string(const char *s, const char *end,
     goto err;
 
   tok = find_by_keyword(tokens, K_ONION_KEY);
+  if (!crypto_pk_public_exponent_ok(tok->key)) {
+    log_warn(LD_DIR,
+             "Relay's onion key had invalid exponent.");
+    goto err;
+  }
   router->onion_pkey = tok->key;
   tok->key = NULL; /* Prevent free */
 
@@ -1480,7 +1486,7 @@ router_parse_entry_from_string(const char *s, const char *end,
                escaped(tok->args[0]));
       goto err;
     }
-    if (memcmp(d,router->cache_info.identity_digest, DIGEST_LEN)!=0) {
+    if (tor_memneq(d,router->cache_info.identity_digest, DIGEST_LEN)) {
       log_warn(LD_DIR, "Fingerprint '%s' does not match identity digest.",
                tok->args[0]);
       goto err;
@@ -1528,10 +1534,10 @@ router_parse_entry_from_string(const char *s, const char *end,
     }
   }
 
-  if ((tok = find_opt_by_keyword(tokens, K_CACHES_EXTRA_INFO)))
+  if (find_opt_by_keyword(tokens, K_CACHES_EXTRA_INFO))
     router->caches_extra_info = 1;
 
-  if ((tok = find_opt_by_keyword(tokens, K_ALLOW_SINGLE_HOP_EXITS)))
+  if (find_opt_by_keyword(tokens, K_ALLOW_SINGLE_HOP_EXITS))
     router->allow_single_hop_exits = 1;
 
   if ((tok = find_opt_by_keyword(tokens, K_EXTRA_INFO_DIGEST))) {
@@ -1544,7 +1550,7 @@ router_parse_entry_from_string(const char *s, const char *end,
     }
   }
 
-  if ((tok = find_opt_by_keyword(tokens, K_HIDDEN_SERVICE_DIR))) {
+  if (find_opt_by_keyword(tokens, K_HIDDEN_SERVICE_DIR)) {
     router->wants_to_be_hs_dir = 1;
   }
 
@@ -1795,7 +1801,7 @@ authority_cert_parse_from_string(const char *s, const char **end_of_string)
                            cert->cache_info.identity_digest))
     goto err;
 
-  if (memcmp(cert->cache_info.identity_digest, fp_declared, DIGEST_LEN)) {
+  if (tor_memneq(cert->cache_info.identity_digest, fp_declared, DIGEST_LEN)) {
     log_warn(LD_DIR, "Digest of certificate key didn't match declared "
              "fingerprint");
     goto err;
@@ -1843,7 +1849,7 @@ authority_cert_parse_from_string(const char *s, const char **end_of_string)
      * buy us much. */
     if (old_cert->cache_info.signed_descriptor_len == len &&
         old_cert->cache_info.signed_descriptor_body &&
-        !memcmp(s, old_cert->cache_info.signed_descriptor_body, len)) {
+        tor_memeq(s, old_cert->cache_info.signed_descriptor_body, len)) {
       log_debug(LD_DIR, "We already checked the signature on this "
                 "certificate; no need to do so again.");
       found = 1;
@@ -2085,6 +2091,8 @@ routerstatus_parse_entry_from_string(memarea_t *area,
       rs->version_supports_begindir = 1;
       rs->version_supports_extrainfo_upload = 1;
       rs->version_supports_conditional_consensus = 1;
+      rs->version_supports_microdesc_cache = 1;
+      rs->version_supports_optimistic_data = 1;
     } else {
       rs->version_supports_begindir =
         tor_version_as_new_as(tok->args[0], "0.2.0.1-alpha");
@@ -2094,6 +2102,16 @@ routerstatus_parse_entry_from_string(memarea_t *area,
         tor_version_as_new_as(tok->args[0], "0.2.0.8-alpha");
       rs->version_supports_conditional_consensus =
         tor_version_as_new_as(tok->args[0], "0.2.1.1-alpha");
+      /* XXXX023 NM microdescs: 0.2.3.1-alpha isn't widely used yet, but
+       * not all 0.2.3.0-alpha "versions" actually support microdesc cacheing
+       * right.  There's a compromise here.  Since this is 5 May, let's
+       * err on the side of having some possible caches to use.  Once more
+       * caches are running 0.2.3.1-alpha, we can bump this version number.
+       */
+      rs->version_supports_microdesc_cache =
+        tor_version_as_new_as(tok->args[0], "0.2.3.0-alpha");
+      rs->version_supports_optimistic_data =
+        tor_version_as_new_as(tok->args[0], "0.2.3.1-alpha");
     }
     if (vote_rs) {
       vote_rs->version = tor_strdup(tok->args[0]);
@@ -2194,7 +2212,7 @@ int
 compare_routerstatus_entries(const void **_a, const void **_b)
 {
   const routerstatus_t *a = *_a, *b = *_b;
-  return memcmp(a->identity_digest, b->identity_digest, DIGEST_LEN);
+  return fast_memcmp(a->identity_digest, b->identity_digest, DIGEST_LEN);
 }
 
 /** Helper: used in call to _smartlist_uniq to clear out duplicate entries. */
@@ -2287,7 +2305,7 @@ networkstatus_v2_parse_from_string(const char *s)
     log_warn(LD_DIR, "Couldn't compute signing key digest");
     goto err;
   }
-  if (memcmp(tmp_digest, ns->identity_digest, DIGEST_LEN)) {
+  if (tor_memneq(tmp_digest, ns->identity_digest, DIGEST_LEN)) {
     log_warn(LD_DIR,
              "network-status fingerprint did not match dir-signing-key");
     goto err;
@@ -2488,7 +2506,7 @@ networkstatus_verify_bw_weights(networkstatus_t *ns)
       }
     } else {
       log_warn(LD_BUG, "Missing consensus bandwidth for router %s",
-          rs->nickname);
+               routerstatus_describe(rs));
     }
   } SMARTLIST_FOREACH_END(rs);
 
@@ -2991,7 +3009,7 @@ networkstatus_parse_vote_from_string(const char *s, const char **eos_out,
         goto err;
       }
       if (ns->type != NS_TYPE_CONSENSUS &&
-          memcmp(ns->cert->cache_info.identity_digest,
+          tor_memneq(ns->cert->cache_info.identity_digest,
                  voter->identity_digest, DIGEST_LEN)) {
         log_warn(LD_DIR,"Mismatch between identities in certificate and vote");
         goto err;
@@ -3097,7 +3115,8 @@ networkstatus_parse_vote_from_string(const char *s, const char **eos_out,
       rs1 = smartlist_get(ns->routerstatus_list, i-1);
       rs2 = smartlist_get(ns->routerstatus_list, i);
     }
-    if (memcmp(rs1->identity_digest, rs2->identity_digest, DIGEST_LEN) >= 0) {
+    if (fast_memcmp(rs1->identity_digest, rs2->identity_digest, DIGEST_LEN)
+        >= 0) {
       log_warn(LD_DIR, "Vote networkstatus entries not sorted by identity "
                "digest");
       goto err;
@@ -3216,7 +3235,7 @@ networkstatus_parse_vote_from_string(const char *s, const char **eos_out,
     }
 
     if (ns->type != NS_TYPE_CONSENSUS) {
-      if (memcmp(declared_identity, ns->cert->cache_info.identity_digest,
+      if (tor_memneq(declared_identity, ns->cert->cache_info.identity_digest,
                  DIGEST_LEN)) {
         log_warn(LD_DIR, "Digest mismatch between declared and actual on "
                  "network-status vote.");
@@ -3496,10 +3515,10 @@ networkstatus_parse_detached_signatures(const char *s, const char *eos)
 
     siglist = detached_get_signatures(sigs, flavor);
     is_duplicate = 0;
-    SMARTLIST_FOREACH(siglist, document_signature_t *, s, {
-      if (s->alg == alg &&
-          !memcmp(id_digest, s->identity_digest, DIGEST_LEN) &&
-          !memcmp(sk_digest, s->signing_key_digest, DIGEST_LEN)) {
+    SMARTLIST_FOREACH(siglist, document_signature_t *, dsig, {
+      if (dsig->alg == alg &&
+          tor_memeq(id_digest, dsig->identity_digest, DIGEST_LEN) &&
+          tor_memeq(sk_digest, dsig->signing_key_digest, DIGEST_LEN)) {
         is_duplicate = 1;
       }
     });
@@ -3758,9 +3777,9 @@ token_check_object(memarea_t *area, const char *kwd,
       break;
     case NEED_KEY_1024: /* There must be a 1024-bit public key. */
     case NEED_SKEY_1024: /* There must be a 1024-bit private key. */
-      if (tok->key && crypto_pk_keysize(tok->key) != PK_BYTES) {
+      if (tok->key && crypto_pk_num_bits(tok->key) != PK_BYTES*8) {
         tor_snprintf(ebuf, sizeof(ebuf), "Wrong size on key for %s: %d bits",
-                     kwd, (int)crypto_pk_keysize(tok->key));
+                     kwd, crypto_pk_num_bits(tok->key));
         RET_ERR(ebuf);
       }
       /* fall through */
@@ -4330,6 +4349,11 @@ microdescs_parse_from_string(const char *s, const char *eos,
     }
 
     tok = find_by_keyword(tokens, K_ONION_KEY);
+    if (!crypto_pk_public_exponent_ok(tok->key)) {
+      log_warn(LD_DIR,
+               "Relay's onion key had invalid exponent.");
+      goto next;
+    }
     md->onion_pkey = tok->key;
     tok->key = NULL;
 
@@ -4537,7 +4561,7 @@ tor_version_compare(tor_version_t *a, tor_version_t *b)
   else if ((i = a->git_tag_len - b->git_tag_len))
     return i;
   else if (a->git_tag_len)
-    return memcmp(a->git_tag, b->git_tag, a->git_tag_len);
+    return fast_memcmp(a->git_tag, b->git_tag, a->git_tag_len);
   else
     return 0;
 }
@@ -4756,7 +4780,7 @@ rend_parse_v2_service_descriptor(rend_service_descriptor_t **parsed_out,
   crypto_pk_get_digest(result->pk, public_key_hash);
   rend_get_descriptor_id_bytes(test_desc_id, public_key_hash,
                                secret_id_part);
-  if (memcmp(desc_id_out, test_desc_id, DIGEST_LEN)) {
+  if (tor_memneq(desc_id_out, test_desc_id, DIGEST_LEN)) {
     log_warn(LD_REND, "Parsed descriptor ID does not match "
              "computed descriptor ID.");
     goto err;
@@ -4821,7 +4845,7 @@ rend_decrypt_introduction_points(char **ipos_decrypted,
     crypto_free_digest_env(digest);
     for (pos = 2; pos < 2 + client_entries_len;
          pos += REND_BASIC_AUTH_CLIENT_ENTRY_LEN) {
-      if (!memcmp(ipos_encrypted + pos, client_id,
+      if (tor_memeq(ipos_encrypted + pos, client_id,
                   REND_BASIC_AUTH_CLIENT_ID_LEN)) {
         /* Attempt to decrypt introduction points. */
         cipher = crypto_create_init_cipher(descriptor_cookie, 0);
@@ -4845,7 +4869,7 @@ rend_decrypt_introduction_points(char **ipos_decrypted,
           tor_free(dec);
           return -1;
         }
-        if (memcmpstart(dec, declen, "introduction-point ")) {
+        if (fast_memcmpstart(dec, declen, "introduction-point ")) {
           log_warn(LD_REND, "Decrypted introduction points don't "
                             "look like we could parse them.");
           tor_free(dec);
@@ -4914,7 +4938,7 @@ rend_parse_introduction_points(rend_service_descriptor_t *parsed,
   parsed->intro_nodes = smartlist_create();
   area = memarea_new();
 
-  while (!memcmpstart(current_ipo, end_of_intro_points-current_ipo,
+  while (!fast_memcmpstart(current_ipo, end_of_intro_points-current_ipo,
                       "introduction-point ")) {
     /* Determine end of string. */
     const char *eos = tor_memstr(current_ipo, end_of_intro_points-current_ipo,
@@ -4981,10 +5005,22 @@ rend_parse_introduction_points(rend_service_descriptor_t *parsed,
     }
     /* Parse onion key. */
     tok = find_by_keyword(tokens, R_IPO_ONION_KEY);
+    if (!crypto_pk_public_exponent_ok(tok->key)) {
+      log_warn(LD_REND,
+               "Introduction point's onion key had invalid exponent.");
+      rend_intro_point_free(intro);
+      goto err;
+    }
     info->onion_key = tok->key;
     tok->key = NULL; /* Prevent free */
     /* Parse service key. */
     tok = find_by_keyword(tokens, R_IPO_SERVICE_KEY);
+    if (!crypto_pk_public_exponent_ok(tok->key)) {
+      log_warn(LD_REND,
+               "Introduction point key had invalid exponent.");
+      rend_intro_point_free(intro);
+      goto err;
+    }
     intro->intro_key = tok->key;
     tok->key = NULL; /* Prevent free */
     /* Add extend info to list of introduction points. */

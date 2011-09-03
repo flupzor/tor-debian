@@ -298,7 +298,7 @@ test_dir_versions(void)
 
 #define tt_versionstatus_op(vs1, op, vs2)                               \
   tt_assert_test_type(vs1,vs2,#vs1" "#op" "#vs2,version_status_t,       \
-                      (_val1 op _val2),"%d")
+                      (_val1 op _val2),"%d",TT_EXIT_TEST_FUNCTION)
 #define test_v_i_o(val, ver, lst)                                       \
   tt_versionstatus_op(val, ==, tor_version_is_obsolete(ver, lst))
 
@@ -1169,10 +1169,10 @@ test_dir_v3_networkstatus(void)
 
     /* Extract a detached signature from con3. */
     detached_text1 = get_detached_sigs(con3, con_md3);
-    tor_assert(detached_text1);
+    tt_assert(detached_text1);
     /* Try to parse it. */
     dsig1 = networkstatus_parse_detached_signatures(detached_text1, NULL);
-    tor_assert(dsig1);
+    tt_assert(dsig1);
 
     /* Are parsed values as expected? */
     test_eq(dsig1->valid_after, con3->valid_after);

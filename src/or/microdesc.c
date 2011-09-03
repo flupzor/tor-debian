@@ -9,6 +9,7 @@
 #include "networkstatus.h"
 #include "nodelist.h"
 #include "policies.h"
+#include "router.h"
 #include "routerlist.h"
 #include "routerparse.h"
 
@@ -54,7 +55,7 @@ _microdesc_hash(microdesc_t *md)
 static INLINE int
 _microdesc_eq(microdesc_t *a, microdesc_t *b)
 {
-  return !memcmp(a->digest, b->digest, DIGEST256_LEN);
+  return tor_memeq(a->digest, b->digest, DIGEST256_LEN);
 }
 
 HT_PROTOTYPE(microdesc_map, microdesc_t, node,
@@ -237,6 +238,7 @@ microdescs_add_list_to_cache(microdesc_cache_t *cache,
     md->no_save = no_save;
 
     HT_INSERT(microdesc_map, &cache->map, md);
+    md->held_in_map = 1;
     smartlist_add(added, md);
     ++cache->n_seen;
     cache->total_len_seen += md->bodylen;
@@ -251,6 +253,9 @@ microdescs_add_list_to_cache(microdesc_cache_t *cache,
       SMARTLIST_FOREACH(added, microdesc_t *, md, nodelist_add_microdesc(md));
   }
 
+  if (smartlist_len(added))
+    router_dir_info_changed();
+
   return added;
 }
 
@@ -262,6 +267,7 @@ microdesc_cache_clear(microdesc_cache_t *cache)
   for (entry = HT_START(microdesc_map, &cache->map); entry; entry = next) {
     microdesc_t *md = *entry;
     next = HT_NEXT_RMV(microdesc_map, &cache->map, entry);
+    md->held_in_map = 0;
     microdesc_free(md);
   }
   HT_CLEAR(microdesc_map, &cache->map);
@@ -350,6 +356,7 @@ microdesc_cache_clean(microdesc_cache_t *cache, time_t cutoff, int force)
       ++dropped;
       victim = *mdp;
       mdp = HT_NEXT_RMV(microdesc_map, &cache->map, mdp);
+      victim->held_in_map = 0;
       bytes_dropped += victim->bodylen;
       microdesc_free(victim);
     } else {
@@ -445,10 +452,11 @@ microdesc_cache_rebuild(microdesc_cache_t *cache, int force)
     smartlist_add(wrote, md);
   }
 
-  finish_writing_to_file(open_file); /*XXX Check me.*/
-
   if (cache->cache_content)
     tor_munmap_file(cache->cache_content);
+
+  finish_writing_to_file(open_file); /*XXX Check me.*/
+
   cache->cache_content = tor_mmap_file(cache->cache_fname);
 
   if (!cache->cache_content && smartlist_len(wrote)) {
@@ -461,7 +469,7 @@ microdesc_cache_rebuild(microdesc_cache_t *cache, int force)
     tor_assert(md->saved_location == SAVED_IN_CACHE);
     md->body = (char*)cache->cache_content->data + md->off;
     if (PREDICT_UNLIKELY(
-                 md->bodylen < 9 || memcmp(md->body, "onion-key", 9) != 0)) {
+             md->bodylen < 9 || fast_memneq(md->body, "onion-key", 9) != 0)) {
       /* XXXX023 once bug 2022 is solved, we can kill this block and turn it
        * into just the tor_assert(!memcmp) */
       off_t avail = cache->cache_content->size - md->off;
@@ -473,7 +481,7 @@ microdesc_cache_rebuild(microdesc_cache_t *cache, int force)
               " with \"onion-key\".  Instead I got %s.",
               (int)md->off, escaped(bad_str));
       tor_free(bad_str);
-      tor_assert(!memcmp(md->body, "onion-key", 9));
+      tor_assert(fast_memeq(md->body, "onion-key", 9));
     }
   } SMARTLIST_FOREACH_END(md);
 
@@ -483,7 +491,7 @@ microdesc_cache_rebuild(microdesc_cache_t *cache, int force)
   cache->journal_len = 0;
   cache->bytes_dropped = 0;
 
-  new_size = (int)cache->cache_content->size;
+  new_size = cache->cache_content ? (int)cache->cache_content->size : 0;
   log_info(LD_DIR, "Done rebuilding microdesc cache. "
            "Saved %d bytes; %d still used.",
            orig_size-new_size, new_size);
@@ -498,7 +506,43 @@ microdesc_free(microdesc_t *md)
 {
   if (!md)
     return;
-  /* Must be removed from hash table! */
+
+  /* Make sure that the microdesc was really removed from the appropriate data
+     structures. */
+  if (md->held_in_map) {
+    microdesc_cache_t *cache = get_microdesc_cache();
+    microdesc_t *md2 = HT_FIND(microdesc_map, &cache->map, md);
+    if (md2 == md) {
+      log_warn(LD_BUG, "microdesc_free() called, but md was still in "
+               "microdesc_map");
+      HT_REMOVE(microdesc_map, &cache->map, md);
+    } else {
+      log_warn(LD_BUG, "microdesc_free() called with held_in_map set, but "
+               "microdesc was not in the map.");
+    }
+    tor_fragile_assert();
+  }
+  if (md->held_by_node) {
+    int found=0;
+    const smartlist_t *nodes = nodelist_get_list();
+    SMARTLIST_FOREACH(nodes, node_t *, node, {
+        if (node->md == md) {
+          ++found;
+          node->md = NULL;
+        }
+      });
+    if (found) {
+      log_warn(LD_BUG, "microdesc_free() called, but md was still referenced "
+               "%d node(s)", found);
+    } else {
+      log_warn(LD_BUG, "microdesc_free() called with held_by_node set, but "
+               "md was not refrenced by any nodes");
+    }
+    tor_fragile_assert();
+  }
+  //tor_assert(md->held_in_map == 0);
+  //tor_assert(md->held_by_node == 0);
+
   if (md->onion_pkey)
     crypto_free_pk_env(md->onion_pkey);
   if (md->body && md->saved_location != SAVED_IN_CACHE)
@@ -570,6 +614,8 @@ microdesc_list_missing_digest256(networkstatus_t *ns, microdesc_cache_t *cache,
       continue;
     if (skip && digestmap_get(skip, rs->descriptor_digest))
       continue;
+    if (tor_mem_is_zero(rs->descriptor_digest, DIGEST256_LEN))
+      continue; /* This indicates a bug somewhere XXXX023*/
     /* XXXX Also skip if we're a noncache and wouldn't use this router.
      * XXXX NM Microdesc
      */
@@ -588,7 +634,7 @@ microdesc_list_missing_digest256(networkstatus_t *ns, microdesc_cache_t *cache,
 void
 update_microdesc_downloads(time_t now)
 {
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   networkstatus_t *consensus;
   smartlist_t *missing;
   digestmap_t *pending;
@@ -602,11 +648,8 @@ update_microdesc_downloads(time_t now)
   if (!consensus)
     return;
 
-  if (!directory_caches_dir_info(options)) {
-    /* Right now, only caches fetch microdescriptors.
-     * XXXX NM Microdescs */
+  if (!we_fetch_microdescriptors(options))
     return;
-  }
 
   pending = digestmap_new();
   list_pending_microdesc_downloads(pending);
@@ -645,5 +688,48 @@ update_microdescs_from_networkstatus(time_t now)
     if (md && ns->valid_after > md->last_listed)
       md->last_listed = ns->valid_after;
   } SMARTLIST_FOREACH_END(rs);
+}
+
+/** Return true iff we should prefer to use microdescriptors rather than
+ * routerdescs for building circuits. */
+int
+we_use_microdescriptors_for_circuits(const or_options_t *options)
+{
+  int ret = options->UseMicrodescriptors;
+  if (ret == -1) {
+    /* UseMicrodescriptors is "auto"; we need to decide: */
+    /* So we decide that we'll use microdescriptors iff we are not a server */
+    ret = ! server_mode(options);
+  }
+  return ret;
+}
+
+/** Return true iff we should try to download microdescriptors at all. */
+int
+we_fetch_microdescriptors(const or_options_t *options)
+{
+  if (directory_caches_dir_info(options))
+    return 1;
+  return we_use_microdescriptors_for_circuits(options);
+}
+
+/** Return true iff we should try to download router descriptors at all. */
+int
+we_fetch_router_descriptors(const or_options_t *options)
+{
+  if (directory_caches_dir_info(options))
+    return 1;
+  return ! we_use_microdescriptors_for_circuits(options);
+}
+
+/** Return the consensus flavor we actually want to use to build circuits. */
+int
+usable_consensus_flavor(void)
+{
+  if (we_use_microdescriptors_for_circuits(get_options())) {
+    return FLAV_MICRODESC;
+  } else {
+    return FLAV_NS;
+  }
 }
 

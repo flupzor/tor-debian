@@ -42,6 +42,8 @@ int smartlist_string_pos(const smartlist_t *, const char *elt) ATTR_PURE;
 int smartlist_string_isin_case(const smartlist_t *sl, const char *element)
   ATTR_PURE;
 int smartlist_string_num_isin(const smartlist_t *sl, int num) ATTR_PURE;
+int smartlist_strings_eq(const smartlist_t *sl1, const smartlist_t *sl2)
+  ATTR_PURE;
 int smartlist_digest_isin(const smartlist_t *sl, const char *element)
   ATTR_PURE;
 int smartlist_overlap(const smartlist_t *sl1, const smartlist_t *sl2)
@@ -259,7 +261,7 @@ char *smartlist_join_strings2(smartlist_t *sl, const char *join,
  * Example use:
  *  SMARTLIST_FOREACH_JOIN(routerstatus_list, routerstatus_t *, rs,
  *                     routerinfo_list, routerinfo_t *, ri,
- *                     memcmp(rs->identity_digest, ri->identity_digest, 20),
+ *                    tor_memcmp(rs->identity_digest, ri->identity_digest, 20),
  *                     log_info(LD_GENERAL,"No match for %s", ri->nickname)) {
  *    log_info(LD_GENERAL, "%s matches routerstatus %p", ri->nickname, rs);
  * } SMARTLIST_FOREACH_JOIN_END(rs, ri);
@@ -274,7 +276,7 @@ char *smartlist_join_strings2(smartlist_t *sl, const char *join,
  *    ri = smartlist_get(routerinfo_list, ri_sl_idx);
  *    while (rs_sl_idx < rs_sl_len) {
  *      rs = smartlist_get(routerstatus_list, rs_sl_idx);
- *      rs_ri_cmp = memcmp(rs->identity_digest, ri->identity_digest, 20);
+ *      rs_ri_cmp = tor_memcmp(rs->identity_digest, ri->identity_digest, 20);
  *      if (rs_ri_cmp > 0) {
  *        break;
  *      } else if (rs_ri_cmp == 0) {

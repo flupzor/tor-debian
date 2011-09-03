@@ -119,9 +119,11 @@ int crypto_pk_write_private_key_to_filename(crypto_pk_env_t *env,
 int crypto_pk_check_key(crypto_pk_env_t *env);
 int crypto_pk_cmp_keys(crypto_pk_env_t *a, crypto_pk_env_t *b);
 size_t crypto_pk_keysize(crypto_pk_env_t *env);
+int crypto_pk_num_bits(crypto_pk_env_t *env);
 crypto_pk_env_t *crypto_pk_dup_key(crypto_pk_env_t *orig);
 crypto_pk_env_t *crypto_pk_copy_full(crypto_pk_env_t *orig);
 int crypto_pk_key_is_private(const crypto_pk_env_t *key);
+int crypto_pk_public_exponent_ok(crypto_pk_env_t *env);
 
 int crypto_pk_public_encrypt(crypto_pk_env_t *env, char *to, size_t tolen,
                              const char *from, size_t fromlen, int padding);

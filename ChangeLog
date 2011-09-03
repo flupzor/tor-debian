@@ -1,5 +1,667 @@
-Changes in version 0.2.3.1-alpha - 2011-05-05
+Changes in version 0.2.3.3-alpha - 2011-09-01
+  Tor 0.2.3.3-alpha adds a new "stream isolation" feature to improve Tor's
+  security, and provides client-side support for the microdescriptor
+  and optimistic data features introduced earlier in the 0.2.3.x
+  series. It also includes numerous critical bugfixes in the (optional)
+  bufferevent-based networking backend.
 
+  o Major features (stream isolation):
+    - You can now configure Tor so that streams from different
+      applications are isolated on different circuits, to prevent an
+      attacker who sees your streams as they leave an exit node from
+      linking your sessions to one another. To do this, choose some way
+      to distinguish the applications: have them connect to different
+      SocksPorts, or have one of them use SOCKS4 while the other uses
+      SOCKS5, or have them pass different authentication strings to the
+      SOCKS proxy. Then, use the new SocksPort syntax to configure the
+      degree of isolation you need. This implements Proposal 171.
+    - There's a new syntax for specifying multiple client ports (such as
+      SOCKSPort, TransPort, DNSPort, NATDPort): you can now just declare
+      multiple *Port entries with full addr:port syntax on each.
+      The old *ListenAddress format is still supported, but you can't
+      mix it with the new *Port syntax.
+
+  o Major features (other):
+    - Enable microdescriptor fetching by default for clients. This allows
+      clients to download a much smaller amount of directory information.
+      To disable it (and go back to the old-style consensus and
+      descriptors), set "UseMicrodescriptors 0" in your torrc file.
+    - Tor's firewall-helper feature, introduced in 0.2.3.1-alpha (see the
+      "PortForwarding" config option), now supports Windows.
+    - When using an exit relay running 0.2.3.x, clients can now
+      "optimistically" send data before the exit relay reports that
+      the stream has opened. This saves a round trip when starting
+      connections where the client speaks first (such as web browsing).
+      This behavior is controlled by a consensus parameter (currently
+      disabled). To turn it on or off manually, use the "OptimisticData"
+      torrc option. Implements proposal 181; code by Ian Goldberg.
+
+  o Major bugfixes (bufferevents, fixes on 0.2.3.1-alpha):
+    - When using IOCP on Windows, we need to enable Libevent windows
+      threading support.
+    - The IOCP backend now works even when the user has not specified
+      the (internal, debugging-only) _UseFilteringSSLBufferevents option.
+      Fixes part of bug 3752.
+    - Correctly record the bytes we've read and written when using
+      bufferevents, so that we can include them in our bandwidth history
+      and advertised bandwidth. Fixes bug 3803.
+    - Apply rate-limiting only at the bottom of a chain of filtering
+      bufferevents. This prevents us from filling up internal read
+      buffers and violating rate-limits when filtering bufferevents
+      are enabled. Fixes part of bug 3804.
+    - Add high-watermarks to the output buffers for filtered
+      bufferevents. This prevents us from filling up internal write
+      buffers and wasting CPU cycles when filtering bufferevents are
+      enabled. Fixes part of bug 3804.
+    - Correctly notice when data has been written from a bufferevent
+      without flushing it completely. Fixes bug 3805.
+    - Fix a bug where server-side tunneled bufferevent-based directory
+      streams would get closed prematurely. Fixes bug 3814.
+    - Fix a use-after-free error with per-connection rate-limiting
+      buckets. Fixes bug 3888.
+
+  o Major bugfixes (also part of 0.2.2.31-rc):
+    - If we're configured to write our ControlPorts to disk, only write
+      them after switching UID and creating the data directory. This way,
+      we don't fail when starting up with a nonexistent DataDirectory
+      and a ControlPortWriteToFile setting based on that directory. Fixes
+      bug 3747; bugfix on Tor 0.2.2.26-beta.
+
+  o Minor features:
+    - Added a new CONF_CHANGED event so that controllers can be notified
+      of any configuration changes made by other controllers, or by the
+      user. Implements ticket 1692.
+    - Use evbuffer_copyout() in inspect_evbuffer(). This fixes a memory
+      leak when using bufferevents, and lets Libevent worry about how to
+      best copy data out of a buffer.
+    - Replace files in stats/ rather than appending to them. Now that we
+      include statistics in extra-info descriptors, it makes no sense to
+      keep old statistics forever. Implements ticket 2930.
+
+  o Minor features (build compatibility):
+    - Limited, experimental support for building with nmake and MSVC.
+    - Provide a substitute implementation of lround() for MSVC, which
+      apparently lacks it. Patch from Gisle Vanem.
+
+  o Minor features (also part of 0.2.2.31-rc):
+    - Update to the August 2 2011 Maxmind GeoLite Country database.
+
+  o Minor bugfixes (on 0.2.3.x-alpha):
+    - Fix a spurious warning when parsing SOCKS requests with
+      bufferevents enabled. Fixes bug 3615; bugfix on 0.2.3.2-alpha.
+    - Get rid of a harmless warning that could happen on relays running
+      with bufferevents. The warning was caused by someone doing an http
+      request to a relay's orport. Also don't warn for a few related
+      non-errors. Fixes bug 3700; bugfix on 0.2.3.1-alpha.
+
+  o Minor bugfixes (on 2.2.x and earlier):
+    - Correct the man page to explain that HashedControlPassword and
+      CookieAuthentication can both be set, in which case either method
+      is sufficient to authenticate to Tor. Bugfix on 0.2.0.7-alpha,
+      when we decided to allow these config options to both be set. Issue
+      raised by bug 3898.
+    - The "--quiet" and "--hush" options now apply not only to Tor's
+      behavior before logs are configured, but also to Tor's behavior in
+      the absense of configured logs. Fixes bug 3550; bugfix on
+      0.2.0.10-alpha.
+
+  o Minor bugfixes (also part of 0.2.2.31-rc):
+    - Write several files in text mode, on OSes that distinguish text
+      mode from binary mode (namely, Windows). These files are:
+      'buffer-stats', 'dirreq-stats', and 'entry-stats' on relays
+      that collect those statistics; 'client_keys' and 'hostname' for
+      hidden services that use authentication; and (in the tor-gencert
+      utility) newly generated identity and signing keys. Previously,
+      we wouldn't specify text mode or binary mode, leading to an
+      assertion failure. Fixes bug 3607. Bugfix on 0.2.1.1-alpha (when
+      the DirRecordUsageByCountry option which would have triggered
+      the assertion failure was added), although this assertion failure
+      would have occurred in tor-gencert on Windows in 0.2.0.1-alpha.
+    - Selectively disable deprecation warnings on OS X because Lion
+      started deprecating the shipped copy of openssl. Fixes bug 3643.
+    - Remove an extra pair of quotation marks around the error
+      message in control-port STATUS_GENERAL BUG events. Bugfix on
+      0.1.2.6-alpha; fixes bug 3732.
+    - When unable to format an address as a string, report its value
+      as "???" rather than reusing the last formatted address. Bugfix
+      on 0.2.1.5-alpha.
+
+  o Code simplifications and refactoring:
+    - Rewrite the listener-selection logic so that parsing which ports
+      we want to listen on is now separate from binding to the ports
+      we want.
+
+  o Build changes:
+    - Building Tor with bufferevent support now requires Libevent
+      2.0.13-stable or later. Previous versions of Libevent had bugs in
+      SSL-related bufferevents and related issues that would make Tor
+      work badly with bufferevents. Requiring 2.0.13-stable also allows
+      Tor with bufferevents to take advantage of Libevent APIs
+      introduced after 2.0.8-rc.
+
+
+Changes in version 0.2.2.32 - 2011-08-27
+  The Tor 0.2.2 release series is dedicated to the memory of Andreas
+  Pfitzmann (1958-2010), a pioneer in anonymity and privacy research,
+  a founder of the PETS community, a leader in our field, a mentor,
+  and a friend. He left us with these words: "I had the possibility
+  to contribute to this world that is not as it should be. I hope I
+  could help in some areas to make the world a better place, and that
+  I could also encourage other people to be engaged in improving the
+  world. Please, stay engaged. This world needs you, your love, your
+  initiative -- now I cannot be part of that anymore."
+
+  Tor 0.2.2.32, the first stable release in the 0.2.2 branch, is finally
+  ready. More than two years in the making, this release features improved
+  client performance and hidden service reliability, better compatibility
+  for Android, correct behavior for bridges that listen on more than
+  one address, more extensible and flexible directory object handling,
+  better reporting of network statistics, improved code security, and
+  many many other features and bugfixes.
+
+
+Changes in version 0.2.2.31-rc - 2011-08-17
+  Tor 0.2.2.31-rc is the second and hopefully final release candidate
+  for the Tor 0.2.2.x series.
+
+  o Major bugfixes:
+    - Remove an extra pair of quotation marks around the error
+      message in control-port STATUS_GENERAL BUG events. Bugfix on
+      0.1.2.6-alpha; fixes bug 3732.
+    - If we're configured to write our ControlPorts to disk, only write
+      them after switching UID and creating the data directory. This way,
+      we don't fail when starting up with a nonexistent DataDirectory
+      and a ControlPortWriteToFile setting based on that directory. Fixes
+      bug 3747; bugfix on Tor 0.2.2.26-beta.
+
+  o Minor features:
+    - Update to the August 2 2011 Maxmind GeoLite Country database.
+
+  o Minor bugfixes:
+    - Allow GETINFO fingerprint to return a fingerprint even when
+      we have not yet built a router descriptor. Fixes bug 3577;
+      bugfix on 0.2.0.1-alpha.
+    - Write several files in text mode, on OSes that distinguish text
+      mode from binary mode (namely, Windows). These files are:
+      'buffer-stats', 'dirreq-stats', and 'entry-stats' on relays
+      that collect those statistics; 'client_keys' and 'hostname' for
+      hidden services that use authentication; and (in the tor-gencert
+      utility) newly generated identity and signing keys. Previously,
+      we wouldn't specify text mode or binary mode, leading to an
+      assertion failure. Fixes bug 3607. Bugfix on 0.2.1.1-alpha (when
+      the DirRecordUsageByCountry option which would have triggered
+      the assertion failure was added), although this assertion failure
+      would have occurred in tor-gencert on Windows in 0.2.0.1-alpha.
+    - Selectively disable deprecation warnings on OS X because Lion
+      started deprecating the shipped copy of openssl. Fixes bug 3643.
+    - When unable to format an address as a string, report its value
+      as "???" rather than reusing the last formatted address. Bugfix
+      on 0.2.1.5-alpha.
+
+
+Changes in version 0.2.3.2-alpha - 2011-07-18
+  Tor 0.2.3.2-alpha introduces two new experimental features:
+  microdescriptors and pluggable transports. It also continues cleaning
+  up a variety of recently introduced features.
+
+  o Major features:
+    - Clients can now use microdescriptors instead of regular descriptors
+      to build circuits. Microdescriptors are authority-generated
+      summaries of regular descriptors' contents, designed to change
+      very rarely (see proposal 158 for details). This feature is
+      designed to save bandwidth, especially for clients on slow internet
+      connections. It's off by default for now, since nearly no caches
+      support it, but it will be on-by-default for clients in a future
+      version. You can use the UseMicrodescriptors option to turn it on.
+    - Tor clients using bridges can now be configured to use a separate
+      'transport' proxy for each bridge. This approach helps to resist
+      censorship by allowing bridges to use protocol obfuscation
+      plugins. It implements part of proposal 180. Implements ticket 2841.
+    - While we're trying to bootstrap, record how many TLS connections
+      fail in each state, and report which states saw the most failures
+      in response to any bootstrap failures. This feature may speed up
+      diagnosis of censorship events. Implements ticket 3116.
+
+  o Major bugfixes (on 0.2.3.1-alpha):
+    - When configuring a large set of nodes in EntryNodes (as with
+      'EntryNodes {cc}' or 'EntryNodes 1.1.1.1/16'), choose only a
+      random subset to be guards, and choose them in random
+      order. Fixes bug 2798.
+    - Tor could crash when remembering a consensus in a non-used consensus
+      flavor without having a current consensus set. Fixes bug 3361.
+    - Comparing an unknown address to a microdescriptor's shortened exit
+      policy would always give a "rejected" result. Fixes bug 3599.
+    - Using microdescriptors as a client no longer prevents Tor from
+      uploading and downloading hidden service descriptors. Fixes
+      bug 3601.
+
+  o Minor features:
+    - Allow nameservers with IPv6 address. Resolves bug 2574.
+    - Accept attempts to include a password authenticator in the
+      handshake, as supported by SOCKS5. This handles SOCKS clients that
+      don't know how to omit a password when authenticating. Resolves
+      bug 1666.
+    - When configuring a large set of nodes in EntryNodes, and there are
+      enough of them listed as Guard so that we don't need to consider
+      the non-guard entries, prefer the ones listed with the Guard flag.
+    - Check for and recover from inconsistency in the microdescriptor
+      cache. This will make it harder for us to accidentally free a
+      microdescriptor without removing it from the appropriate data
+      structures. Fixes issue 3135; issue noted by "wanoskarnet".
+    - Log SSL state transitions at log level DEBUG, log domain
+      HANDSHAKE. This can be useful for debugging censorship events.
+      Implements ticket 3264.
+    - Add port 6523 (Gobby) to LongLivedPorts. Patch by intrigeri;
+      implements ticket 3439.
+
+  o Minor bugfixes (on 0.2.3.1-alpha):
+    - Do not free all general-purpose regular descriptors just
+      because microdescriptor use is enabled. Fixes bug 3113.
+    - Correctly link libevent_openssl when --enable-static-libevent
+      is passed to configure. Fixes bug 3118.
+    - Bridges should not complain during their heartbeat log messages that
+      they are unlisted in the consensus: that's more or less the point
+      of being a bridge. Fixes bug 3183.
+    - Report a SIGNAL event to controllers when acting on a delayed
+      SIGNAL NEWNYM command. Previously, we would report a SIGNAL
+      event to the controller if we acted on a SIGNAL NEWNYM command
+      immediately, and otherwise not report a SIGNAL event for the
+      command at all. Fixes bug 3349.
+    - Fix a crash when handling the SIGNAL controller command or
+      reporting ERR-level status events with bufferevents enabled. Found
+      by Robert Ransom. Fixes bug 3367.
+    - Always ship the tor-fw-helper manpage in our release tarballs.
+      Fixes bug 3389. Reported by Stephen Walker.
+    - Fix a class of double-mark-for-close bugs when bufferevents
+      are enabled. Fixes bug 3403.
+    - Update tor-fw-helper to support libnatpmp-20110618. Fixes bug 3434.
+    - Add SIGNAL to the list returned by the 'GETINFO events/names'
+      control-port command. Fixes part of bug 3465.
+    - Prevent using negative indices during unit test runs when read_all()
+      fails. Spotted by coverity.
+    - Fix a rare memory leak when checking the nodelist without it being
+      present. Found by coverity.
+    - Only try to download a microdescriptor-flavored consensus from
+      a directory cache that provides them.
+
+  o Minor bugfixes (on 0.2.2.x and earlier):
+    - Assert that hidden-service-related operations are not performed
+      using single-hop circuits. Previously, Tor would assert that
+      client-side streams are not attached to single-hop circuits,
+      but not that other sensitive operations on the client and service
+      side are not performed using single-hop circuits. Fixes bug 3332;
+      bugfix on 0.0.6.
+    - Don't publish a new relay descriptor when we reload our onion key,
+      unless the onion key has actually changed. Fixes bug 3263 and
+      resolves another cause of bug 1810. Bugfix on 0.1.1.11-alpha.
+    - Allow GETINFO fingerprint to return a fingerprint even when
+      we have not yet built a router descriptor. Fixes bug 3577;
+      bugfix on 0.2.0.1-alpha.
+    - Make 'tor --digests' list hashes of all Tor source files. Bugfix
+      on 0.2.2.4-alpha; fixes bug 3427.
+
+  o Code simplification and refactoring:
+    - Use tor_sscanf() in place of scanf() in more places through the
+      code. This makes us a little more locale-independent, and
+      should help shut up code-analysis tools that can't tell
+      a safe sscanf string from a dangerous one.
+    - Use tt_assert(), not tor_assert(), for checking for test failures.
+      This makes the unit tests more able to go on in the event that
+      one of them fails.
+    - Split connection_about_to_close() into separate functions for each
+      connection type.
+
+  o Build changes:
+    - On Windows, we now define the _WIN32_WINNT macros only if they
+      are not already defined. This lets the person building Tor decide,
+      if they want, to require a later version of Windows.
+
+
+Changes in version 0.2.2.30-rc - 2011-07-07
+  Tor 0.2.2.30-rc is the first release candidate for the Tor 0.2.2.x
+  series. It fixes a few smaller bugs, but generally appears stable.
+  Please test it and let us know whether it is!
+
+  o Minor bugfixes:
+    - Send a SUCCEEDED stream event to the controller when a reverse
+      resolve succeeded. Fixes bug 3536; bugfix on 0.0.8pre1. Issue
+      discovered by katmagic.
+    - Always NUL-terminate the sun_path field of a sockaddr_un before
+      passing it to the kernel. (Not a security issue: kernels are
+      smart enough to reject bad sockaddr_uns.) Found by Coverity;
+      CID #428. Bugfix on Tor 0.2.0.3-alpha.
+    - Don't stack-allocate the list of supplementary GIDs when we're
+      about to log them. Stack-allocating NGROUPS_MAX gid_t elements
+      could take up to 256K, which is way too much stack. Found by
+      Coverity; CID #450. Bugfix on 0.2.1.7-alpha.
+    - Add BUILDTIMEOUT_SET to the list returned by the 'GETINFO
+      events/names' control-port command. Bugfix on 0.2.2.9-alpha;
+      fixes part of bug 3465.
+    - Fix a memory leak when receiving a descriptor for a hidden
+      service we didn't ask for. Found by Coverity; CID #30. Bugfix
+      on 0.2.2.26-beta.
+
+  o Minor features:
+    - Update to the July 1 2011 Maxmind GeoLite Country database.
+
+
+Changes in version 0.2.2.29-beta - 2011-06-20
+  Tor 0.2.2.29-beta reverts an accidental behavior change for users who
+  have bridge lines in their torrc but don't want to use them; gets
+  us closer to having the control socket feature working on Debian;
+  and fixes a variety of smaller bugs.
+
+  o Major bugfixes:
+    - Revert the UseBridges option to its behavior before 0.2.2.28-beta.
+      When we changed the default behavior to "use bridges if any
+      are listed in the torrc", we surprised users who had bridges
+      in their torrc files but who didn't actually want to use them.
+      Partial resolution for bug 3354.
+
+  o Privacy fixes:
+    - Don't attach new streams to old rendezvous circuits after SIGNAL
+      NEWNYM. Previously, we would keep using an existing rendezvous
+      circuit if it remained open (i.e. if it were kept open by a
+      long-lived stream, or if a new stream were attached to it before
+      Tor could notice that it was old and no longer in use). Bugfix on
+      0.1.1.15-rc; fixes bug 3375.
+
+  o Minor bugfixes:
+    - Fix a bug when using ControlSocketsGroupWritable with User. The
+      directory's group would be checked against the current group, not
+      the configured group. Patch by Jérémy Bobbio. Fixes bug 3393;
+      bugfix on 0.2.2.26-beta.
+    - Make connection_printf_to_buf()'s behaviour sane. Its callers
+      expect it to emit a CRLF iff the format string ends with CRLF;
+      it actually emitted a CRLF iff (a) the format string ended with
+      CRLF or (b) the resulting string was over 1023 characters long or
+      (c) the format string did not end with CRLF *and* the resulting
+      string was 1021 characters long or longer. Bugfix on 0.1.1.9-alpha;
+      fixes part of bug 3407.
+    - Make send_control_event_impl()'s behaviour sane. Its callers
+      expect it to always emit a CRLF at the end of the string; it
+      might have emitted extra control characters as well. Bugfix on
+      0.1.1.9-alpha; fixes another part of bug 3407.
+    - Make crypto_rand_int() check the value of its input correctly.
+      Previously, it accepted values up to UINT_MAX, but could return a
+      negative number if given a value above INT_MAX+1. Found by George
+      Kadianakis. Fixes bug 3306; bugfix on 0.2.2pre14.
+    - Avoid a segfault when reading a malformed circuit build state
+      with more than INT_MAX entries. Found by wanoskarnet. Bugfix on
+      0.2.2.4-alpha.
+    - When asked about a DNS record type we don't support via a
+      client DNSPort, reply with NOTIMPL rather than an empty
+      reply. Patch by intrigeri. Fixes bug 3369; bugfix on 2.0.1-alpha.
+    - Fix a rare memory leak during stats writing. Found by coverity.
+
+  o Minor features:
+    - Update to the June 1 2011 Maxmind GeoLite Country database.
+
+  o Code simplifications and refactoring:
+    - Remove some dead code as indicated by coverity.
+    - Remove a few dead assignments during router parsing. Found by
+      coverity.
+    - Add some forgotten return value checks during unit tests. Found
+      by coverity.
+    - Don't use 1-bit wide signed bit fields. Found by coverity.
+
+
+Changes in version 0.2.2.28-beta - 2011-06-04
+  Tor 0.2.2.28-beta makes great progress towards a new stable release: we
+  fixed a big bug in whether relays stay in the consensus consistently,
+  we moved closer to handling bridges and hidden services correctly,
+  and we started the process of better handling the dreaded "my Vidalia
+  died, and now my Tor demands a password when I try to reconnect to it"
+  usability issue.
+
+  o Major bugfixes:
+    - Don't decide to make a new descriptor when receiving a HUP signal.
+      This bug has caused a lot of 0.2.2.x relays to disappear from the
+      consensus periodically. Fixes the most common case of triggering
+      bug 1810; bugfix on 0.2.2.7-alpha.
+    - Actually allow nameservers with IPv6 addresses. Fixes bug 2574.
+    - Don't try to build descriptors if "ORPort auto" is set and we
+      don't know our actual ORPort yet. Fix for bug 3216; bugfix on
+      0.2.2.26-beta.
+    - Resolve a crash that occurred when setting BridgeRelay to 1 with
+      accounting enabled. Fixes bug 3228; bugfix on 0.2.2.18-alpha.
+    - Apply circuit timeouts to opened hidden-service-related circuits
+      based on the correct start time. Previously, we would apply the
+      circuit build timeout based on time since the circuit's creation;
+      it was supposed to be applied based on time since the circuit
+      entered its current state. Bugfix on 0.0.6; fixes part of bug 1297.
+    - Use the same circuit timeout for client-side introduction
+      circuits as for other four-hop circuits, rather than the timeout
+      for single-hop directory-fetch circuits; the shorter timeout may
+      have been appropriate with the static circuit build timeout in
+      0.2.1.x and earlier, but caused many hidden service access attempts
+      to fail with the adaptive CBT introduced in 0.2.2.2-alpha. Bugfix
+      on 0.2.2.2-alpha; fixes another part of bug 1297.
+    - In ticket 2511 we fixed a case where you could use an unconfigured
+      bridge if you had configured it as a bridge the last time you ran
+      Tor. Now fix another edge case: if you had configured it as a bridge
+      but then switched to a different bridge via the controller, you
+      would still be willing to use the old one. Bugfix on 0.2.0.1-alpha;
+      fixes bug 3321.
+
+  o Major features:
+    - Add an __OwningControllerProcess configuration option and a
+      TAKEOWNERSHIP control-port command. Now a Tor controller can ensure
+      that when it exits, Tor will shut down. Implements feature 3049.
+    - If "UseBridges 1" is set and no bridges are configured, Tor will
+      now refuse to build any circuits until some bridges are set.
+      If "UseBridges auto" is set, Tor will use bridges if they are
+      configured and we are not running as a server, but otherwise will
+      make circuits as usual. The new default is "auto". Patch by anonym,
+      so the Tails LiveCD can stop automatically revealing you as a Tor
+      user on startup.
+
+  o Minor bugfixes:
+    - Fix warnings from GCC 4.6's "-Wunused-but-set-variable" option.
+    - Remove a trailing asterisk from "exit-policy/default" in the
+      output of the control port command "GETINFO info/names". Bugfix
+      on 0.1.2.5-alpha.
+    - Use a wide type to hold sockets when built for 64-bit Windows builds.
+      Fixes bug 3270.
+    - Warn when the user configures two HiddenServiceDir lines that point
+      to the same directory. Bugfix on 0.0.6 (the version introducing
+      HiddenServiceDir); fixes bug 3289.
+    - Remove dead code from rend_cache_lookup_v2_desc_as_dir. Fixes
+      part of bug 2748; bugfix on 0.2.0.10-alpha.
+    - Log malformed requests for rendezvous descriptors as protocol
+      warnings, not warnings. Also, use a more informative log message
+      in case someone sees it at log level warning without prior
+      info-level messages. Fixes the other part of bug 2748; bugfix
+      on 0.2.0.10-alpha.
+    - Clear the table recording the time of the last request for each
+      hidden service descriptor from each HS directory on SIGNAL NEWNYM.
+      Previously, we would clear our HS descriptor cache on SIGNAL
+      NEWNYM, but if we had previously retrieved a descriptor (or tried
+      to) from every directory responsible for it, we would refuse to
+      fetch it again for up to 15 minutes. Bugfix on 0.2.2.25-alpha;
+      fixes bug 3309.
+    - Fix a log message that said "bits" while displaying a value in
+      bytes. Found by wanoskarnet. Fixes bug 3318; bugfix on
+      0.2.0.1-alpha.
+    - When checking for 1024-bit keys, check for 1024 bits, not 128
+      bytes. This allows Tor to correctly discard keys of length 1017
+      through 1023. Bugfix on 0.0.9pre5.
+
+  o Minor features:
+    - Relays now log the reason for publishing a new relay descriptor,
+      so we have a better chance of hunting down instances of bug 1810.
+      Resolves ticket 3252.
+    - Revise most log messages that refer to nodes by nickname to
+      instead use the "$key=nickname at address" format. This should be
+      more useful, especially since nicknames are less and less likely
+      to be unique. Resolves ticket 3045.
+    - Log (at info level) when purging pieces of hidden-service-client
+      state because of SIGNAL NEWNYM.
+
+  o Removed options:
+    - Remove undocumented option "-F" from tor-resolve: it hasn't done
+      anything since 0.2.1.16-rc.
+
+
+Changes in version 0.2.2.27-beta - 2011-05-18
+  Tor 0.2.2.27-beta fixes a bridge-related stability bug in the previous
+  release, and also adds a few more general bugfixes.
+
+  o Major bugfixes:
+    - Fix a crash bug when changing bridges in a running Tor process.
+      Fixes bug 3213; bugfix on 0.2.2.26-beta.
+    - When the controller configures a new bridge, don't wait 10 to 60
+      seconds before trying to fetch its descriptor. Bugfix on
+      0.2.0.3-alpha; fixes bug 3198 (suggested by 2355).
+
+  o Minor bugfixes:
+    - Require that onion keys have exponent 65537 in microdescriptors too.
+      Fixes more of bug 3207; bugfix on 0.2.2.26-beta.
+    - Tor used to limit HttpProxyAuthenticator values to 48 characters.
+      Changed the limit to 512 characters by removing base64 newlines.
+      Fixes bug 2752. Fix by Michael Yakubovich.
+    - When a client starts or stops using bridges, never use a circuit
+      that was built before the configuration change. This behavior could
+      put at risk a user who uses bridges to ensure that her traffic
+      only goes to the chosen addresses. Bugfix on 0.2.0.3-alpha; fixes
+      bug 3200.
+
+
+Changes in version 0.2.2.26-beta - 2011-05-17
+  Tor 0.2.2.26-beta fixes a variety of potential privacy problems. It
+  also introduces a new "socksport auto" approach that should make it
+  easier to run multiple Tors on the same system, and does a lot of
+  cleanup to get us closer to a release candidate.
+
+  o Security/privacy fixes:
+    - Replace all potentially sensitive memory comparison operations
+      with versions whose runtime does not depend on the data being
+      compared. This will help resist a class of attacks where an
+      adversary can use variations in timing information to learn
+      sensitive data. Fix for one case of bug 3122. (Safe memcmp
+      implementation by Robert Ransom based partially on code by DJB.)
+    - When receiving a hidden service descriptor, check that it is for
+      the hidden service we wanted. Previously, Tor would store any
+      hidden service descriptors that a directory gave it, whether it
+      wanted them or not. This wouldn't have let an attacker impersonate
+      a hidden service, but it did let directories pre-seed a client
+      with descriptors that it didn't want. Bugfix on 0.0.6.
+    - On SIGHUP, do not clear out all TrackHostExits mappings, client
+      DNS cache entries, and virtual address mappings: that's what
+      NEWNYM is for. Fixes bug 1345; bugfix on 0.1.0.1-rc.
+
+  o Major features:
+    - The options SocksPort, ControlPort, and so on now all accept a
+      value "auto" that opens a socket on an OS-selected port. A
+      new ControlPortWriteToFile option tells Tor to write its
+      actual control port or ports to a chosen file. If the option
+      ControlPortFileGroupReadable is set, the file is created as
+      group-readable. Now users can run two Tor clients on the same
+      system without needing to manually mess with parameters. Resolves
+      part of ticket 3076.
+    - Set SO_REUSEADDR on all sockets, not just listeners. This should
+      help busy exit nodes avoid running out of useable ports just
+      because all the ports have been used in the near past. Resolves
+      issue 2850.
+
+  o Minor features:
+    - New "GETINFO net/listeners/(type)" controller command to return
+      a list of addresses and ports that are bound for listeners for a
+      given connection type. This is useful when the user has configured
+      "SocksPort auto" and the controller needs to know which port got
+      chosen. Resolves another part of ticket 3076.
+    - Add a new ControlSocketsGroupWritable configuration option: when
+      it is turned on, ControlSockets are group-writeable by the default
+      group of the current user. Patch by Jérémy Bobbio; implements
+      ticket 2972.
+    - Tor now refuses to create a ControlSocket in a directory that is
+      world-readable (or group-readable if ControlSocketsGroupWritable
+      is 0). This is necessary because some operating systems do not
+      enforce permissions on an AF_UNIX sockets. Permissions on the
+      directory holding the socket, however, seems to work everywhere.
+    - Rate-limit a warning about failures to download v2 networkstatus
+      documents. Resolves part of bug 1352.
+    - Backport code from 0.2.3.x that allows directory authorities to
+      clean their microdescriptor caches. Needed to resolve bug 2230.
+    - When an HTTPS proxy reports "403 Forbidden", we now explain
+      what it means rather than calling it an unexpected status code.
+      Closes bug 2503. Patch from Michael Yakubovich.
+    - Update to the May 1 2011 Maxmind GeoLite Country database.
+
+  o Minor bugfixes:
+    - Authorities now clean their microdesc cache periodically and when
+      reading from disk initially, not only when adding new descriptors.
+      This prevents a bug where we could lose microdescriptors. Bugfix
+      on 0.2.2.6-alpha. Fixes bug 2230.
+    - Do not crash when our configuration file becomes unreadable, for
+      example due to a permissions change, between when we start up
+      and when a controller calls SAVECONF. Fixes bug 3135; bugfix
+      on 0.0.9pre6.
+    - Avoid a bug that would keep us from replacing a microdescriptor
+      cache on Windows. (We would try to replace the file while still
+      holding it open. That's fine on Unix, but Windows doesn't let us
+      do that.) Bugfix on 0.2.2.6-alpha; bug found by wanoskarnet.
+    - Add missing explanations for the authority-related torrc options
+      RephistTrackTime, BridgePassword, and V3AuthUseLegacyKey in the
+      man page. Resolves issue 2379.
+    - As an authority, do not upload our own vote or signature set to
+      ourself. It would tell us nothing new, and as of 0.2.2.24-alpha,
+      it would get flagged as a duplicate. Resolves bug 3026.
+    - Accept hidden service descriptors if we think we might be a hidden
+      service directory, regardless of what our consensus says. This
+      helps robustness, since clients and hidden services can sometimes
+      have a more up-to-date view of the network consensus than we do,
+      and if they think that the directory authorities list us a HSDir,
+      we might actually be one. Related to bug 2732; bugfix on
+      0.2.0.10-alpha.
+    - When a controller changes TrackHostExits, remove mappings for
+      hosts that should no longer have their exits tracked. Bugfix on
+      0.1.0.1-rc.
+    - When a controller changes VirtualAddrNetwork, remove any mappings
+      for hosts that were automapped to the old network. Bugfix on
+      0.1.1.19-rc.
+    - When a controller changes one of the AutomapHosts* options, remove
+      any mappings for hosts that should no longer be automapped. Bugfix
+      on 0.2.0.1-alpha.
+    - Do not reset the bridge descriptor download status every time we
+      re-parse our configuration or get a configuration change. Fixes
+      bug 3019; bugfix on 0.2.0.3-alpha.
+
+  o Minor bugfixes (code cleanup):
+    - When loading the microdesc journal, remember its current size.
+      In 0.2.2, this helps prevent the microdesc journal from growing
+      without limit on authorities (who are the only ones to use it in
+      0.2.2). Fixes a part of bug 2230; bugfix on 0.2.2.6-alpha.
+      Fix posted by "cypherpunks."
+    - The microdesc journal is supposed to get rebuilt only if it is
+      at least _half_ the length of the store, not _twice_ the length
+      of the store. Bugfix on 0.2.2.6-alpha; fixes part of bug 2230.
+    - Fix a potential null-pointer dereference while computing a
+      consensus. Bugfix on tor-0.2.0.3-alpha, found with the help of
+      clang's analyzer.
+    - Avoid a possible null-pointer dereference when rebuilding the mdesc
+      cache without actually having any descriptors to cache. Bugfix on
+      0.2.2.6-alpha. Issue discovered using clang's static analyzer.
+    - If we fail to compute the identity digest of a v3 legacy keypair,
+      warn, and don't use a buffer-full of junk instead. Bugfix on
+      0.2.1.1-alpha; fixes bug 3106.
+    - Resolve an untriggerable issue in smartlist_string_num_isin(),
+      where if the function had ever in the future been used to check
+      for the presence of a too-large number, it would have given an
+      incorrect result. (Fortunately, we only used it for 16-bit
+      values.) Fixes bug 3175; bugfix on 0.1.0.1-rc.
+    - Require that introduction point keys and onion handshake keys
+      have a public exponent of 65537. Starts to fix bug 3207; bugfix
+      on 0.2.0.10-alpha.
+
+  o Removed features:
+    - Caches no longer download and serve v2 networkstatus documents
+      unless FetchV2Networkstatus flag is set: these documents haven't
+      haven't been used by clients or relays since 0.2.0.x. Resolves
+      bug 3022.
+
+
+Changes in version 0.2.3.1-alpha - 2011-05-05
   Tor 0.2.3.1-alpha adds some new experimental features, including support
   for an improved network IO backend, IOCP networking on Windows,
   microdescriptor caching, "fast-start" support for streams, and automatic
@@ -10,7 +672,7 @@ Changes in version 0.2.3.1-alpha - 2011-05-05
   bugs. Users who would rather test out a more stable branch should
   stay with 0.2.2.x for now.
 
-  o Major features
+  o Major features:
     - Tor can now optionally build with the "bufferevents" buffered IO
       backend provided by Libevent 2. To use this feature, make sure you
       have the latest possible version of Libevent, and pass the
@@ -51,9 +713,9 @@ Changes in version 0.2.3.1-alpha - 2011-05-05
       by downloading microdescriptors instead of router descriptors.
 
   o Minor features:
-    - Make logging resolution configurable with a new LogGranularity
-      option, and change the default from 1 millisecond to 1
-      second. Implements enhancement 1668.
+    - Make logging resolution configurable with a new LogTimeGranularity
+      option, and change the default from 1 millisecond to 1 second.
+      Implements enhancement 1668.
     - We log which torrc file we're using on startup. Implements ticket
       2444.
     - Ordinarily, Tor does not count traffic from private addresses (like
@@ -72,6 +734,9 @@ Changes in version 0.2.3.1-alpha - 2011-05-05
       bidirectional use of connections to disk every 24 hours.
     - Add a GeoIP file digest to the extra-info descriptor. Implements
       enhancement 1883.
+    - The NodeFamily option -- which let you declare that you want to
+      consider nodes to be part of a family whether they list themselves
+      that way or not -- now allows IP address ranges and country codes.
     - Add a new 'Heartbeat' log message type to periodically log a message
       describing Tor's status at level Notice. This feature is meant for
       operators who log at notice, and want to make sure that their Tor
@@ -94,7 +759,7 @@ Changes in version 0.2.3.1-alpha - 2011-05-05
       This prevents a bug where we could lose microdescriptors. Bugfix
       on 0.2.2.6-alpha.
 
-  o Minor features (controller)
+  o Minor features (controller):
     - Add a new SIGNAL event to the controller interface so that
       controllers can be notified when Tor handles a signal. Resolves
       issue 1955. Patch by John Brooks.
@@ -103,7 +768,7 @@ Changes in version 0.2.3.1-alpha - 2011-05-05
     - Implement some GETINFO controller fields to provide information about
       the Tor process's pid, euid, username, and resource limits.
 
-  o Build changes
+  o Build changes:
     - Our build system requires automake 1.6 or later to create the
       Makefile.in files. Previously, you could have used 1.4.
       This only affects developers and people building Tor from git;
@@ -392,7 +1057,7 @@ Changes in version 0.2.2.24-alpha - 2011-04-08
     - Directory authorities now log the source of a rejected POSTed v3
       networkstatus vote.
     - Make compilation with clang possible when using
-      --enable-gcc-warnings by removing two warning optionss that clang
+      --enable-gcc-warnings by removing two warning options that clang
       hasn't implemented yet and by fixing a few warnings. Implements
       ticket 2696.
     - When expiring circuits, use microsecond timers rather than
@@ -553,6 +1218,57 @@ Changes in version 0.2.2.23-alpha - 2011-03-08
     - Stop shipping the Tor specs files and development proposal documents
       in the tarball. They are now in a separate git repository at
       git://git.torproject.org/torspec.git
+
+
+Changes in version 0.2.1.30 - 2011-02-23
+  Tor 0.2.1.30 fixes a variety of less critical bugs. The main other
+  change is a slight tweak to Tor's TLS handshake that makes relays
+  and bridges that run this new version reachable from Iran again.
+  We don't expect this tweak will win the arms race long-term, but it
+  buys us time until we roll out a better solution.
+
+  o Major bugfixes:
+    - Stop sending a CLOCK_SKEW controller status event whenever
+      we fetch directory information from a relay that has a wrong clock.
+      Instead, only inform the controller when it's a trusted authority
+      that claims our clock is wrong. Bugfix on 0.1.2.6-alpha; fixes
+      the rest of bug 1074.
+    - Fix a bounds-checking error that could allow an attacker to
+      remotely crash a directory authority. Bugfix on 0.2.1.5-alpha.
+      Found by "piebeer".
+    - If relays set RelayBandwidthBurst but not RelayBandwidthRate,
+      Tor would ignore their RelayBandwidthBurst setting,
+      potentially using more bandwidth than expected. Bugfix on
+      0.2.0.1-alpha. Reported by Paul Wouters. Fixes bug 2470.
+    - Ignore and warn if the user mistakenly sets "PublishServerDescriptor
+      hidserv" in her torrc. The 'hidserv' argument never controlled
+      publication of hidden service descriptors. Bugfix on 0.2.0.1-alpha.
+
+  o Minor features:
+    - Adjust our TLS Diffie-Hellman parameters to match those used by
+      Apache's mod_ssl.
+    - Update to the February 1 2011 Maxmind GeoLite Country database.
+
+  o Minor bugfixes:
+    - Check for and reject overly long directory certificates and
+      directory tokens before they have a chance to hit any assertions.
+      Bugfix on 0.2.1.28. Found by "doorss".
+    - Bring the logic that gathers routerinfos and assesses the
+      acceptability of circuits into line. This prevents a Tor OP from
+      getting locked in a cycle of choosing its local OR as an exit for a
+      path (due to a .exit request) and then rejecting the circuit because
+      its OR is not listed yet. It also prevents Tor clients from using an
+      OR running in the same instance as an exit (due to a .exit request)
+      if the OR does not meet the same requirements expected of an OR
+      running elsewhere. Fixes bug 1859; bugfix on 0.1.0.1-rc.
+
+  o Packaging changes:
+    - Stop shipping the Tor specs files and development proposal documents
+      in the tarball. They are now in a separate git repository at
+      git://git.torproject.org/torspec.git
+    - Do not include Git version tags as though they are SVN tags when
+      generating a tarball from inside a repository that has switched
+      between branches. Bugfix on 0.2.1.15-rc; fixes bug 2402.
 
 
 Changes in version 0.2.2.22-alpha - 2011-01-25
@@ -1451,9 +2167,10 @@ Changes in version 0.2.2.14-alpha - 2010-07-12
 
   o Minor features:
     - New config option "WarnUnsafeSocks 0" disables the warning that
-      occurs whenever Tor receives only an IP address instead of a
-      hostname. Setups that do DNS locally over Tor are fine, and we
-      shouldn't spam the logs in that case.
+      occurs whenever Tor receives a socks handshake using a version of
+      the socks protocol that can only provide an IP address (rather
+      than a hostname). Setups that do DNS locally over Tor are fine,
+      and we shouldn't spam the logs in that case.
     - Convert the HACKING file to asciidoc, and add a few new sections
       to it, explaining how we use Git, how we make changelogs, and
       what should go in a patch.
@@ -2215,8 +2932,9 @@ Changes in version 0.2.2.5-alpha - 2009-10-11
   o Major bugfixes:
     - Make the tarball compile again. Oops. Bugfix on 0.2.2.4-alpha.
 
-  o New directory authorities:
-    - Move dizum to an alternate IP address.
+  o Directory authorities:
+    - Temporarily (just for this release) move dizum to an alternate
+      IP address.
 
 
 Changes in version 0.2.2.4-alpha - 2009-10-10
@@ -2386,8 +3104,8 @@ Changes in version 0.2.2.1-alpha - 2009-08-26
       oldest-bug prize.
 
   o New options for gathering stats safely:
-    - Directories that set "DirReqStatistics 1" write statistics on
-      directory request to disk every 24 hours. As compared to the
+    - Directory mirrors that set "DirReqStatistics 1" write statistics
+      about directory requests to disk every 24 hours. As compared to the
       --enable-geoip-stats flag in 0.2.1.x, there are a few improvements:
       1) stats are written to disk exactly every 24 hours; 2) estimated
       shares of v2 and v3 requests are determined as mean values, not at
@@ -2425,9 +3143,9 @@ Changes in version 0.2.2.1-alpha - 2009-08-26
       the git commit (when we're building from a git checkout).
 
   o Minor bugfixes:
-    - If any the v3 certs we download are unparseable, we should actually
-      notice the failure so we don't retry indefinitely. Bugfix on
-      0.2.0.x; reported by "rotator".
+    - If any of the v3 certs we download are unparseable, we should
+      actually notice the failure so we don't retry indefinitely. Bugfix
+      on 0.2.0.x; reported by "rotator".
     - If the cached cert file is unparseable, warn but don't exit.
     - Fix possible segmentation fault on directory authorities. Bugfix on
       0.2.1.14-rc.
@@ -5103,7 +5821,7 @@ Changes in version 0.2.0.10-alpha - 2007-11-10
     - New --quiet command-line option to suppress the default console log.
       Good in combination with --hash-password.
     - Authorities send back an X-Descriptor-Not-New header in response to
-      an accepted-but-discarded descriptor upload.  Partially implements
+      an accepted-but-discarded descriptor upload. Partially implements
       fix for bug 535.
     - Make the log message for "tls error. breaking." more useful.
     - Better log messages about certificate downloads, to attempt to

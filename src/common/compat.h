@@ -9,8 +9,12 @@
 #include "orconfig.h"
 #include "torint.h"
 #ifdef MS_WINDOWS
+#ifndef WIN32_WINNT
 #define WIN32_WINNT 0x400
+#endif
+#ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x400
+#endif
 #define WIN32_LEAN_AND_MEAN
 #if defined(_MSC_VER) && (_MSC_VER < 1300)
 #include <winsock.h>
@@ -395,15 +399,24 @@ int tor_fd_seekend(int fd);
 typedef int socklen_t;
 #endif
 
-int tor_close_socket(int s);
-int tor_open_socket(int domain, int type, int protocol);
-int tor_accept_socket(int sockfd, struct sockaddr *addr, socklen_t *len);
+#ifdef MS_WINDOWS
+#define tor_socket_t intptr_t
+#define SOCKET_OK(s) ((unsigned)(s) != INVALID_SOCKET)
+#else
+#define tor_socket_t int
+#define SOCKET_OK(s) ((s) >= 0)
+#endif
+
+int tor_close_socket(tor_socket_t s);
+tor_socket_t tor_open_socket(int domain, int type, int protocol);
+tor_socket_t tor_accept_socket(int sockfd, struct sockaddr *addr,
+                                  socklen_t *len);
 int get_n_open_sockets(void);
 
 #define tor_socket_send(s, buf, len, flags) send(s, buf, len, flags)
 #define tor_socket_recv(s, buf, len, flags) recv(s, buf, len, flags)
 
-/** Implementatino of struct in6_addr for platforms that do not have it.
+/** Implementation of struct in6_addr for platforms that do not have it.
  * Generally, these platforms are ones without IPv6 support, but we want to
  * have a working in6_addr there anyway, so we can use it to parse IPv6
  * addresses. */
@@ -469,8 +482,8 @@ int tor_inet_aton(const char *cp, struct in_addr *addr) ATTR_NONNULL((1,2));
 const char *tor_inet_ntop(int af, const void *src, char *dst, size_t len);
 int tor_inet_pton(int af, const char *src, void *dst);
 int tor_lookup_hostname(const char *name, uint32_t *addr) ATTR_NONNULL((1,2));
-void set_socket_nonblocking(int socket);
-int tor_socketpair(int family, int type, int protocol, int fd[2]);
+void set_socket_nonblocking(tor_socket_t socket);
+int tor_socketpair(int family, int type, int protocol, tor_socket_t fd[2]);
 int network_init(void);
 
 /* For stupid historical reasons, windows sockets have an independent
@@ -497,7 +510,7 @@ int network_init(void);
   ((e) == WSAEMFILE || (e) == WSAENOBUFS)
 /** Return true if e is EADDRINUSE or the local equivalent. */
 #define ERRNO_IS_EADDRINUSE(e)      ((e) == WSAEADDRINUSE)
-int tor_socket_errno(int sock);
+int tor_socket_errno(tor_socket_t sock);
 const char *tor_socket_strerror(int e);
 #else
 #define ERRNO_IS_EAGAIN(e)           ((e) == EAGAIN)
@@ -556,6 +569,8 @@ int switch_id(const char *user);
 #ifdef HAVE_PWD_H
 char *get_user_homedir(const char *username);
 #endif
+
+int get_parent_directory(char *fname);
 
 int spawn_func(void (*func)(void *), void *data);
 void spawn_exit(void) ATTR_NORETURN;

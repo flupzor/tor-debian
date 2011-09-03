@@ -79,6 +79,28 @@ typedef struct {
                           * at which we last failed to connect to it. */
 } entry_guard_t;
 
+/** Information about a configured bridge. Currently this just matches the
+ * ones in the torrc file, but one day we may be able to learn about new
+ * bridges on our own, and remember them in the state file. */
+typedef struct {
+  /** Address of the bridge. */
+  tor_addr_t addr;
+  /** TLS port for the bridge. */
+  uint16_t port;
+  /** Boolean: We are re-parsing our bridge list, and we are going to remove
+   * this one if we don't find it in the list of configured bridges. */
+  unsigned marked_for_removal : 1;
+  /** Expected identity digest, or all zero bytes if we don't know what the
+   * digest should be. */
+  char identity[DIGEST_LEN];
+
+  /** Name of pluggable transport protocol taken from its config line. */
+  char *transport_name;
+
+  /** When should we next try to fetch a descriptor for this bridge? */
+  download_status_t fetch_status;
+} bridge_info_t;
+
 /** A list of our chosen entry guards. */
 static smartlist_t *entry_guards = NULL;
 /** A value of 1 means that the entry_guards list has changed
@@ -100,6 +122,10 @@ static int count_acceptable_nodes(smartlist_t *routers);
 static int onion_append_hop(crypt_path_t **head_ptr, extend_info_t *choice);
 
 static void entry_guards_changed(void);
+
+static const transport_t *transport_get_by_name(const char *name);
+static void transport_free(transport_t *transport);
+static void bridge_free(bridge_info_t *bridge);
 
 /**
  * This function decides if CBT learning should be disabled. It returns
@@ -263,7 +289,7 @@ circuit_build_times_test_frequency(void)
 }
 
 /**
- * Retrieve and bounds-check the cbtmintimeout consensus paramter.
+ * Retrieve and bounds-check the cbtmintimeout consensus parameter.
  *
  * Effect: This is the minimum allowed timeout value in milliseconds.
  * The minimum is to prevent rounding to 0 (we only check once
@@ -560,7 +586,9 @@ circuit_build_times_create_histogram(circuit_build_times_t *cbt,
  * Return the Pareto start-of-curve parameter Xm.
  *
  * Because we are not a true Pareto curve, we compute this as the
- * weighted average of the N=3 most frequent build time bins.
+ * weighted average of the N most frequent build time bins. N is either
+ * 1 if we don't have enough circuit build time data collected, or
+ * determined by the consensus parameter cbtnummodes (default 3).
  */
 static build_time_t
 circuit_build_times_get_xm(circuit_build_times_t *cbt)
@@ -573,6 +601,9 @@ circuit_build_times_get_xm(circuit_build_times_t *cbt)
   int n=0;
   int num_modes = circuit_build_times_default_num_xm_modes();
 
+  tor_assert(nbins > 0);
+  tor_assert(num_modes > 0);
+
   // Only use one mode if < 1000 buildtimes. Not enough data
   // for multiple.
   if (cbt->total_build_times < CBT_NCIRCUITS_TO_OBSERVE)
@@ -580,6 +611,7 @@ circuit_build_times_get_xm(circuit_build_times_t *cbt)
 
   nth_max_bin = (build_time_t*)tor_malloc_zero(num_modes*sizeof(build_time_t));
 
+  /* Determine the N most common build times */
   for (i = 0; i < nbins; i++) {
     if (histogram[i] >= histogram[nth_max_bin[0]]) {
       nth_max_bin[0] = i;
@@ -600,6 +632,10 @@ circuit_build_times_get_xm(circuit_build_times_t *cbt)
     log_info(LD_CIRC, "Xm mode #%d: %u %u", n, CBT_BIN_TO_MS(nth_max_bin[n]),
              histogram[nth_max_bin[n]]);
   }
+
+  /* The following assert is safe, because we don't get called when we
+   * haven't observed at least CBT_MIN_MIN_CIRCUITS_TO_OBSERVE circuits. */
+  tor_assert(bin_counts > 0);
 
   ret /= bin_counts;
   tor_free(histogram);
@@ -669,7 +705,15 @@ circuit_build_times_shuffle_and_store_array(circuit_build_times_t *cbt,
     log_notice(LD_CIRC, "The number of circuit times that this Tor version "
                "uses to calculate build times is less than the number stored "
                "in your state file. Decreasing the circuit time history from "
-               "%d to %d.", num_times, CBT_NCIRCUITS_TO_OBSERVE);
+               "%lu to %d.", (unsigned long)num_times,
+               CBT_NCIRCUITS_TO_OBSERVE);
+  }
+
+  if (n > INT_MAX-1) {
+    log_warn(LD_CIRC, "For some insane reasons, you had %lu circuit build "
+             "observations in your state file. That's far too many; probably "
+             "there's a bug here.", (unsigned long)n);
+    n = INT_MAX-1;
   }
 
   /* This code can only be run on a compact array */
@@ -1484,7 +1528,7 @@ get_unique_circ_id_by_conn(or_connection_t *conn)
 }
 
 /** If <b>verbose</b> is false, allocate and return a comma-separated list of
- * the currently built elements of circuit_t.  If <b>verbose</b> is true, also
+ * the currently built elements of <b>circ</b>. If <b>verbose</b> is true, also
  * list information about link status in a more verbose format using spaces.
  * If <b>verbose_names</b> is false, give nicknames for Named routers and hex
  * digests for others; if <b>verbose_names</b> is true, use $DIGEST=Name style
@@ -1570,7 +1614,7 @@ circuit_list_path_impl(origin_circuit_t *circ, int verbose, int verbose_names)
 }
 
 /** If <b>verbose</b> is false, allocate and return a comma-separated
- * list of the currently built elements of circuit_t.  If
+ * list of the currently built elements of <b>circ</b>.  If
  * <b>verbose</b> is true, also list information about link status in
  * a more verbose format using spaces.
  */
@@ -1581,7 +1625,7 @@ circuit_list_path(origin_circuit_t *circ, int verbose)
 }
 
 /** Allocate and return a comma-separated list of the currently built elements
- * of circuit_t, giving each as a verbose nickname.
+ * of <b>circ</b>, giving each as a verbose nickname.
  */
 char *
 circuit_list_path_for_controller(origin_circuit_t *circ)
@@ -1590,7 +1634,7 @@ circuit_list_path_for_controller(origin_circuit_t *circ)
 }
 
 /** Log, at severity <b>severity</b>, the nicknames of each router in
- * circ's cpath. Also log the length of the cpath, and the intended
+ * <b>circ</b>'s cpath. Also log the length of the cpath, and the intended
  * exit point.
  */
 void
@@ -1602,7 +1646,7 @@ circuit_log_path(int severity, unsigned int domain, origin_circuit_t *circ)
 }
 
 /** Tell the rep(utation)hist(ory) module about the status of the links
- * in circ.  Hops that have become OPEN are marked as successfully
+ * in <b>circ</b>.  Hops that have become OPEN are marked as successfully
  * extended; the _first_ hop that isn't open (if any) is marked as
  * unable to extend.
  */
@@ -1738,10 +1782,9 @@ circuit_handle_first_hop(origin_circuit_t *circ)
 
   if (!n_conn) {
     /* not currently connected in a useful way. */
-    const char *name = strlen(firsthop->extend_info->nickname) ?
-      firsthop->extend_info->nickname : fmt_addr(&firsthop->extend_info->addr);
-    log_info(LD_CIRC, "Next router is %s: %s ",
-             safe_str_client(name), msg?msg:"???");
+    log_info(LD_CIRC, "Next router is %s: %s",
+             safe_str_client(extend_info_describe(firsthop->extend_info)),
+             msg?msg:"???");
     circ->_base.n_hop = extend_info_dup(firsthop->extend_info);
 
     if (should_launch) {
@@ -1808,7 +1851,7 @@ circuit_n_conn_done(or_connection_t *or_conn, int status)
           continue;
       } else {
         /* We expected a key. See if it's the right one. */
-        if (memcmp(or_conn->identity_digest,
+        if (tor_memneq(or_conn->identity_digest,
                    circ->n_hop->identity_digest, DIGEST_LEN))
           continue;
       }
@@ -1931,7 +1974,7 @@ inform_testing_reachability(void)
 static INLINE int
 should_use_create_fast_for_circuit(origin_circuit_t *circ)
 {
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   tor_assert(circ->cpath);
   tor_assert(circ->cpath->extend_info);
 
@@ -2024,7 +2067,7 @@ circuit_send_next_onion_skin(origin_circuit_t *circ)
     circuit_set_state(TO_CIRCUIT(circ), CIRCUIT_STATE_BUILDING);
     log_info(LD_CIRC,"First hop: finished sending %s cell to '%s'",
              fast ? "CREATE_FAST" : "CREATE",
-             node ? node_get_nickname(node) : "<unnamed>");
+             node ? node_describe(node) : "<unnamed>");
   } else {
     tor_assert(circ->cpath->state == CPATH_STATE_OPEN);
     tor_assert(circ->_base.state == CIRCUIT_STATE_BUILDING);
@@ -2066,7 +2109,7 @@ circuit_send_next_onion_skin(origin_circuit_t *circ)
       if (circ->build_state->onehop_tunnel)
         control_event_bootstrap(BOOTSTRAP_STATUS_REQUESTING_STATUS, 0);
       if (!can_complete_circuit && !circ->build_state->onehop_tunnel) {
-        or_options_t *options = get_options();
+        const or_options_t *options = get_options();
         can_complete_circuit=1;
         /* FFFF Log a count of known routers here */
         log_notice(LD_GENERAL,
@@ -2074,6 +2117,7 @@ circuit_send_next_onion_skin(origin_circuit_t *circ)
             "Looks like client functionality is working.");
         control_event_bootstrap(BOOTSTRAP_STATUS_DONE, 0);
         control_event_client_status(LOG_NOTICE, "CIRCUIT_ESTABLISHED");
+        clear_broken_connection_map(1);
         if (server_mode(options) && !check_whether_orport_reachable()) {
           inform_testing_reachability();
           consider_testing_reachability(1, 1);
@@ -2216,7 +2260,7 @@ circuit_extend(cell_t *cell, circuit_t *circ)
   /* Next, check if we're being asked to connect to the hop that the
    * extend cell came from. There isn't any reason for that, and it can
    * assist circular-path attacks. */
-  if (!memcmp(id_digest, TO_OR_CIRCUIT(circ)->p_conn->identity_digest,
+  if (tor_memeq(id_digest, TO_OR_CIRCUIT(circ)->p_conn->identity_digest,
               DIGEST_LEN)) {
     log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
            "Client asked me to extend back to the previous hop.");
@@ -2590,7 +2634,7 @@ node_handles_some_port(const node_t *node, smartlist_t *needed_ports)
     port = *(uint16_t *)smartlist_get(needed_ports, i);
     tor_assert(port);
     if (node)
-      r = compare_addr_to_node_policy(0, port, node);
+      r = compare_tor_addr_to_node_policy(NULL, port, node);
     else
       continue;
     if (r != ADDR_POLICY_REJECTED && r != ADDR_POLICY_PROBABLY_REJECTED)
@@ -2633,7 +2677,7 @@ choose_good_exit_server_general(int need_uptime, int need_capacity)
   smartlist_t *connections;
   int best_support = -1;
   int n_best_support=0;
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   const smartlist_t *the_nodes;
   const node_t *node=NULL;
 
@@ -2676,8 +2720,7 @@ choose_good_exit_server_general(int need_uptime, int need_capacity)
       n_supported[i] = -1;
       continue; /* skip routers that are known to be down or bad exits */
     }
-    if (options->_ExcludeExitNodesUnion &&
-        routerset_contains_node(options->_ExcludeExitNodesUnion, node)) {
+    if (routerset_contains_node(options->_ExcludeExitNodesUnion, node)) {
       n_supported[i] = -1;
       continue; /* user asked us not to use it, no matter what */
     }
@@ -2808,7 +2851,7 @@ choose_good_exit_server_general(int need_uptime, int need_capacity)
 
   tor_free(n_supported);
   if (node) {
-    log_info(LD_CIRC, "Chose exit server '%s'", node_get_nickname(node));
+    log_info(LD_CIRC, "Chose exit server '%s'", node_describe(node));
     return node;
   }
   if (options->ExitNodes) {
@@ -2834,7 +2877,7 @@ static const node_t *
 choose_good_exit_server(uint8_t purpose,
                         int need_uptime, int need_capacity, int is_internal)
 {
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   router_crn_flags_t flags = CRN_NEED_DESC;
   if (need_uptime)
     flags |= CRN_NEED_UPTIME;
@@ -2864,7 +2907,7 @@ choose_good_exit_server(uint8_t purpose,
 static void
 warn_if_last_router_excluded(origin_circuit_t *circ, const extend_info_t *exit)
 {
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   routerset_t *rs = options->ExcludeNodes;
   const char *description;
   uint8_t purpose = circ->_base.purpose;
@@ -2915,7 +2958,7 @@ warn_if_last_router_excluded(origin_circuit_t *circ, const extend_info_t *exit)
       log_warn(LD_BUG, "Using %s '%s' which is listed in ExcludeNodes%s, "
                "even though StrictNodes is set. Please report. "
                "(Circuit purpose: %s)",
-               description, exit->nickname,
+               description, extend_info_describe(exit),
                rs==options->ExcludeNodes?"":" or ExcludeExitNodes",
                circuit_purpose_to_string(purpose));
     } else {
@@ -2924,7 +2967,7 @@ warn_if_last_router_excluded(origin_circuit_t *circ, const extend_info_t *exit)
                "prevent this (and possibly break your Tor functionality), "
                "set the StrictNodes configuration option. "
                "(Circuit purpose: %s)",
-               description, exit->nickname,
+               description, extend_info_describe(exit),
                rs==options->ExcludeNodes?"":" or ExcludeExitNodes",
                circuit_purpose_to_string(purpose));
     }
@@ -2954,7 +2997,8 @@ onion_pick_cpath_exit(origin_circuit_t *circ, extend_info_t *exit)
 
   if (exit) { /* the circuit-builder pre-requested one */
     warn_if_last_router_excluded(circ, exit);
-    log_info(LD_CIRC,"Using requested exit node '%s'", exit->nickname);
+    log_info(LD_CIRC,"Using requested exit node '%s'",
+             extend_info_describe(exit));
     exit = extend_info_dup(exit);
   } else { /* we have to decide one */
     const node_t *node =
@@ -3004,8 +3048,8 @@ circuit_extend_to_new_exit(origin_circuit_t *circ, extend_info_t *exit)
   circuit_append_new_exit(circ, exit);
   circuit_set_state(TO_CIRCUIT(circ), CIRCUIT_STATE_BUILDING);
   if ((err_reason = circuit_send_next_onion_skin(circ))<0) {
-    log_warn(LD_CIRC, "Couldn't extend circuit to new point '%s'.",
-             exit->nickname);
+    log_warn(LD_CIRC, "Couldn't extend circuit to new point %s.",
+             extend_info_describe(exit));
     circuit_mark_for_close(TO_CIRCUIT(circ), -err_reason);
     return -1;
   }
@@ -3077,7 +3121,7 @@ choose_good_middle_server(uint8_t purpose,
   const node_t *r, *choice;
   crypt_path_t *cpath;
   smartlist_t *excluded;
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   router_crn_flags_t flags = CRN_NEED_DESC;
   tor_assert(_CIRCUIT_PURPOSE_MIN <= purpose &&
              purpose <= _CIRCUIT_PURPOSE_MAX);
@@ -3085,13 +3129,11 @@ choose_good_middle_server(uint8_t purpose,
   log_debug(LD_CIRC, "Contemplating intermediate hop: random choice.");
   excluded = smartlist_create();
   if ((r = build_state_get_exit_node(state))) {
-    smartlist_add(excluded, (void*) r);
-    nodelist_add_node_family(excluded, r);
+    nodelist_add_node_and_family(excluded, r);
   }
   for (i = 0, cpath = head; i < cur_len; ++i, cpath=cpath->next) {
     if ((r = node_get_by_id(cpath->extend_info->identity_digest))) {
-      smartlist_add(excluded, (void*)r);
-      nodelist_add_node_family(excluded, r);
+      nodelist_add_node_and_family(excluded, r);
     }
   }
 
@@ -3119,7 +3161,7 @@ choose_good_entry_server(uint8_t purpose, cpath_build_state_t *state)
 {
   const node_t *choice;
   smartlist_t *excluded;
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   router_crn_flags_t flags = CRN_NEED_GUARD|CRN_NEED_DESC;
   const node_t *node;
 
@@ -3135,8 +3177,7 @@ choose_good_entry_server(uint8_t purpose, cpath_build_state_t *state)
   if (state && (node = build_state_get_exit_node(state))) {
     /* Exclude the exit node from the state, if we have one.  Also exclude its
      * family. */
-    smartlist_add(excluded, (void*)node);
-    nodelist_add_node_family(excluded, node);
+    nodelist_add_node_and_family(excluded, node);
   }
   if (firewall_is_fascist_or()) {
     /* Exclude all ORs that we can't reach through our firewall */
@@ -3151,8 +3192,7 @@ choose_good_entry_server(uint8_t purpose, cpath_build_state_t *state)
     SMARTLIST_FOREACH(entry_guards, entry_guard_t *, entry,
       {
         if ((node = node_get_by_id(entry->identity))) {
-          smartlist_add(excluded, (void*)node);
-          nodelist_add_node_family(excluded, node);
+          nodelist_add_node_and_family(excluded, node);
         }
       });
   }
@@ -3229,7 +3269,8 @@ onion_extend_cpath(origin_circuit_t *circ)
   }
 
   log_debug(LD_CIRC,"Chose router %s for hop %d (exit is %s)",
-            info->nickname, cur_len+1, build_state_get_exit_nickname(state));
+            extend_info_describe(info),
+            cur_len+1, build_state_get_exit_nickname(state));
 
   onion_append_hop(&circ->cpath, info);
   extend_info_free(info);
@@ -3369,7 +3410,8 @@ build_state_get_exit_nickname(cpath_build_state_t *state)
  */
 static int
 entry_guard_set_status(entry_guard_t *e, const node_t *node,
-                       time_t now, or_options_t *options, const char **reason)
+                       time_t now, const or_options_t *options,
+                       const char **reason)
 {
   char buf[HEX_DIGEST_LEN+1];
   int changed = 0;
@@ -3384,6 +3426,8 @@ entry_guard_set_status(entry_guard_t *e, const node_t *node,
   else if (options->UseBridges && (!node->ri ||
                                    node->ri->purpose != ROUTER_PURPOSE_BRIDGE))
     *reason = "not a bridge";
+  else if (options->UseBridges && !node_is_a_configured_bridge(node))
+    *reason = "not a configured bridge";
   else if (!options->UseBridges && !node->is_possible_guard &&
            !routerset_contains_node(options->EntryNodes,node))
     *reason = "not recommended as a guard";
@@ -3450,7 +3494,7 @@ entry_is_live(entry_guard_t *e, int need_uptime, int need_capacity,
               int assume_reachable, const char **msg)
 {
   const node_t *node;
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   tor_assert(msg);
 
   if (e->bad_since) {
@@ -3473,14 +3517,17 @@ entry_is_live(entry_guard_t *e, int need_uptime, int need_capacity,
       *msg = "not a bridge";
       return NULL;
     }
+    if (!node_is_a_configured_bridge(node)) {
+      *msg = "not a configured bridge";
+      return NULL;
+    }
   } else { /* !get_options()->UseBridges */
     if (node_get_purpose(node) != ROUTER_PURPOSE_GENERAL) {
       *msg = "not general-purpose";
       return NULL;
     }
   }
-  if (options->EntryNodes &&
-      routerset_contains_node(options->EntryNodes, node)) {
+  if (routerset_contains_node(options->EntryNodes, node)) {
     /* they asked for it, they get it */
     need_uptime = need_capacity = 0;
   }
@@ -3517,7 +3564,7 @@ static INLINE entry_guard_t *
 is_an_entry_guard(const char *digest)
 {
   SMARTLIST_FOREACH(entry_guards, entry_guard_t *, entry,
-                    if (!memcmp(digest, entry->identity, DIGEST_LEN))
+                    if (tor_memeq(digest, entry->identity, DIGEST_LEN))
                       return entry;
                    );
   return NULL;
@@ -3531,20 +3578,24 @@ log_entry_guards(int severity)
   smartlist_t *elements = smartlist_create();
   char *s;
 
-  SMARTLIST_FOREACH(entry_guards, entry_guard_t *, e,
+  SMARTLIST_FOREACH_BEGIN(entry_guards, entry_guard_t *, e)
     {
       const char *msg = NULL;
       char *cp;
       if (entry_is_live(e, 0, 1, 0, &msg))
-        tor_asprintf(&cp, "%s (up %s)",
+        tor_asprintf(&cp, "%s [%s] (up %s)",
                      e->nickname,
+                     hex_str(e->identity, DIGEST_LEN),
                      e->made_contact ? "made-contact" : "never-contacted");
       else
-        tor_asprintf(&cp, "%s (%s, %s)",
-                     e->nickname, msg,
+        tor_asprintf(&cp, "%s [%s] (%s, %s)",
+                     e->nickname,
+                     hex_str(e->identity, DIGEST_LEN),
+                     msg,
                      e->made_contact ? "made-contact" : "never-contacted");
       smartlist_add(elements, cp);
-    });
+    }
+  SMARTLIST_FOREACH_END(e);
 
   s = smartlist_join_strings(elements, ",", 0, NULL);
   SMARTLIST_FOREACH(elements, char*, cp, tor_free(cp));
@@ -3568,7 +3619,7 @@ control_event_guard_deferred(void)
 #if 0
   int n = 0;
   const char *msg;
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   if (!entry_guards)
     return;
   SMARTLIST_FOREACH(entry_guards, entry_guard_t *, entry,
@@ -3591,7 +3642,7 @@ control_event_guard_deferred(void)
  * already in our entry_guards list, put it at the *beginning*.
  * Else, put the one we pick at the end of the list. */
 static const node_t *
-add_an_entry_guard(const node_t *chosen, int reset_status)
+add_an_entry_guard(const node_t *chosen, int reset_status, int prepend)
 {
   const node_t *node;
   entry_guard_t *entry;
@@ -3612,8 +3663,8 @@ add_an_entry_guard(const node_t *chosen, int reset_status)
       return NULL;
   }
   entry = tor_malloc_zero(sizeof(entry_guard_t));
-  log_info(LD_CIRC, "Chose '%s' as new entry guard.",
-           node_get_nickname(node));
+  log_info(LD_CIRC, "Chose %s as new entry guard.",
+           node_describe(node));
   strlcpy(entry->nickname, node_get_nickname(node), sizeof(entry->nickname));
   memcpy(entry->identity, node->identity, DIGEST_LEN);
   /* Choose expiry time smudged over the past month. The goal here
@@ -3623,9 +3674,9 @@ add_an_entry_guard(const node_t *chosen, int reset_status)
    * this guard. For details, see the Jan 2010 or-dev thread. */
   entry->chosen_on_date = time(NULL) - crypto_rand_int(3600*24*30);
   entry->chosen_by_version = tor_strdup(VERSION);
-  if (chosen) /* prepend */
+  if (prepend)
     smartlist_insert(entry_guards, 0, entry);
-  else /* append */
+  else
     smartlist_add(entry_guards, entry);
   control_event_guard(entry->nickname, entry->identity, "NEW");
   control_event_guard_deferred();
@@ -3636,14 +3687,14 @@ add_an_entry_guard(const node_t *chosen, int reset_status)
 /** If the use of entry guards is configured, choose more entry guards
  * until we have enough in the list. */
 static void
-pick_entry_guards(or_options_t *options)
+pick_entry_guards(const or_options_t *options)
 {
   int changed = 0;
 
   tor_assert(entry_guards);
 
   while (num_live_entry_guards() < options->NumEntryGuards) {
-    if (!add_an_entry_guard(NULL, 0))
+    if (!add_an_entry_guard(NULL, 0, 0))
       break;
     changed = 1;
   }
@@ -3769,10 +3820,9 @@ remove_dead_entry_guards(time_t now)
  * think that things are unlisted.
  */
 void
-entry_guards_compute_status(or_options_t *options, time_t now)
+entry_guards_compute_status(const or_options_t *options, time_t now)
 {
   int changed = 0;
-  int severity = LOG_DEBUG;
   digestmap_t *reasons;
 
   if (! entry_guards)
@@ -3799,15 +3849,14 @@ entry_guards_compute_status(or_options_t *options, time_t now)
   if (remove_dead_entry_guards(now))
     changed = 1;
 
-  severity = changed ? LOG_DEBUG : LOG_INFO;
-
   if (changed) {
     SMARTLIST_FOREACH_BEGIN(entry_guards, entry_guard_t *, entry) {
       const char *reason = digestmap_get(reasons, entry->identity);
       const char *live_msg = "";
       const node_t *r = entry_is_live(entry, 0, 1, 0, &live_msg);
-      log_info(LD_CIRC, "Summary: Entry '%s' is %s, %s%s%s, and %s%s.",
+      log_info(LD_CIRC, "Summary: Entry %s [%s] is %s, %s%s%s, and %s%s.",
                entry->nickname,
+               hex_str(entry->identity, DIGEST_LEN),
                entry->unreachable_since ? "unreachable" : "reachable",
                entry->bad_since ? "unusable" : "usable",
                reason ? ", ": "",
@@ -3850,7 +3899,7 @@ entry_guard_register_connect_status(const char *digest, int succeeded,
 
   SMARTLIST_FOREACH(entry_guards, entry_guard_t *, e,
     {
-      if (!memcmp(e->identity, digest, DIGEST_LEN)) {
+      if (tor_memeq(e->identity, digest, DIGEST_LEN)) {
         entry = e;
         idx = e_sl_idx;
         break;
@@ -3958,12 +4007,12 @@ entry_nodes_should_be_added(void)
   should_add_entry_nodes = 1;
 }
 
-/** Add all nodes in EntryNodes that aren't currently guard nodes to the list
- * of guard nodes, at the front. */
+/** Adjust the entry guards list so that it only contains entries from
+ * EntryNodes, adding new entries from EntryNodes to the list as needed. */
 static void
-entry_guards_prepend_from_config(or_options_t *options)
+entry_guards_set_from_config(const or_options_t *options)
 {
-  smartlist_t *entry_nodes, *entry_fps;
+  smartlist_t *entry_nodes, *worse_entry_nodes, *entry_fps;
   smartlist_t *old_entry_guards_on_list, *old_entry_guards_not_on_list;
   tor_assert(entry_guards);
 
@@ -3984,18 +4033,13 @@ entry_guards_prepend_from_config(or_options_t *options)
   }
 
   entry_nodes = smartlist_create();
+  worse_entry_nodes = smartlist_create();
   entry_fps = smartlist_create();
   old_entry_guards_on_list = smartlist_create();
   old_entry_guards_not_on_list = smartlist_create();
 
   /* Split entry guards into those on the list and those not. */
 
-  /* XXXX023 Now that we allow countries and IP ranges in EntryNodes, this is
-   *  potentially an enormous list. For now, we disable such values for
-   *  EntryNodes in options_validate(); really, this wants a better solution.
-   *  Perhaps we should do this calculation once whenever the list of routers
-   *  changes or the entrynodes setting changes.
-   */
   routerset_get_all_nodes(entry_nodes, options->EntryNodes,
                           options->ExcludeNodes, 0);
   SMARTLIST_FOREACH(entry_nodes, const node_t *,node,
@@ -4008,27 +4052,47 @@ entry_guards_prepend_from_config(or_options_t *options)
       smartlist_add(old_entry_guards_not_on_list, e);
   });
 
-  /* Remove all currently configured entry guards from entry_routers. */
-  SMARTLIST_FOREACH(entry_nodes, const node_t *, node, {
+  /* Remove all currently configured guard nodes, excluded nodes, unreachable
+   * nodes, or non-Guard nodes from entry_nodes. */
+  SMARTLIST_FOREACH_BEGIN(entry_nodes, const node_t *, node) {
     if (is_an_entry_guard(node->identity)) {
       SMARTLIST_DEL_CURRENT(entry_nodes, node);
+      continue;
+    } else if (routerset_contains_node(options->ExcludeNodes, node)) {
+      SMARTLIST_DEL_CURRENT(entry_nodes, node);
+      continue;
+    } else if (!fascist_firewall_allows_node(node)) {
+      SMARTLIST_DEL_CURRENT(entry_nodes, node);
+      continue;
+    } else if (! node->is_possible_guard) {
+      smartlist_add(worse_entry_nodes, (node_t*)node);
+      SMARTLIST_DEL_CURRENT(entry_nodes, node);
     }
-  });
+  } SMARTLIST_FOREACH_END(node);
 
   /* Now build the new entry_guards list. */
   smartlist_clear(entry_guards);
   /* First, the previously configured guards that are in EntryNodes. */
   smartlist_add_all(entry_guards, old_entry_guards_on_list);
+  /* Next, scramble the rest of EntryNodes, putting the guards first. */
+  smartlist_shuffle(entry_nodes);
+  smartlist_shuffle(worse_entry_nodes);
+  smartlist_add_all(entry_nodes, worse_entry_nodes);
+
   /* Next, the rest of EntryNodes */
-  SMARTLIST_FOREACH(entry_nodes, const node_t *, node, {
-    add_an_entry_guard(node, 0);
-  });
+  SMARTLIST_FOREACH_BEGIN(entry_nodes, const node_t *, node) {
+    add_an_entry_guard(node, 0, 0);
+    if (smartlist_len(entry_guards) > options->NumEntryGuards * 10)
+      break;
+  } SMARTLIST_FOREACH_END(node);
+  log_notice(LD_GENERAL, "%d entries in guards", smartlist_len(entry_guards));
   /* Finally, free the remaining previously configured guards that are not in
    * EntryNodes. */
   SMARTLIST_FOREACH(old_entry_guards_not_on_list, entry_guard_t *, e,
                     entry_guard_free(e));
 
   smartlist_free(entry_nodes);
+  smartlist_free(worse_entry_nodes);
   smartlist_free(entry_fps);
   smartlist_free(old_entry_guards_on_list);
   smartlist_free(old_entry_guards_not_on_list);
@@ -4040,7 +4104,7 @@ entry_guards_prepend_from_config(or_options_t *options)
  * list already and we must stick to it.
  */
 int
-entry_list_is_constrained(or_options_t *options)
+entry_list_is_constrained(const or_options_t *options)
 {
   if (options->EntryNodes)
     return 1;
@@ -4057,7 +4121,7 @@ entry_list_is_constrained(or_options_t *options)
 const node_t *
 choose_random_entry(cpath_build_state_t *state)
 {
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   smartlist_t *live_entry_guards = smartlist_create();
   smartlist_t *exit_family = smartlist_create();
   const node_t *chosen_exit =
@@ -4068,7 +4132,7 @@ choose_random_entry(cpath_build_state_t *state)
   int preferred_min, consider_exit_family = 0;
 
   if (chosen_exit) {
-    nodelist_add_node_family(exit_family, chosen_exit);
+    nodelist_add_node_and_family(exit_family, chosen_exit);
     consider_exit_family = 1;
   }
 
@@ -4076,7 +4140,7 @@ choose_random_entry(cpath_build_state_t *state)
     entry_guards = smartlist_create();
 
   if (should_add_entry_nodes)
-    entry_guards_prepend_from_config(options);
+    entry_guards_set_from_config(options);
 
   if (!entry_list_is_constrained(options) &&
       smartlist_len(entry_guards) < options->NumEntryGuards)
@@ -4101,7 +4165,7 @@ choose_random_entry(cpath_build_state_t *state)
           goto choose_and_finish; /* only choose from the ones we like */
         if (options->StrictNodes) {
           /* in theory this case should never happen, since
-           * entry_guards_prepend_from_config() drops unwanted relays */
+           * entry_guards_set_from_config() drops unwanted relays */
           tor_fragile_assert();
         } else {
           log_info(LD_CIRC,
@@ -4139,7 +4203,7 @@ choose_random_entry(cpath_build_state_t *state)
       /* XXX if guard doesn't imply fast and stable, then we need
        * to tell add_an_entry_guard below what we want, or it might
        * be a long time til we get it. -RD */
-      node = add_an_entry_guard(NULL, 0);
+      node = add_an_entry_guard(NULL, 0, 0);
       if (node) {
         entry_guards_changed();
         /* XXX we start over here in case the new node we added shares
@@ -4470,40 +4534,159 @@ getinfo_helper_entry_guards(control_connection_t *conn,
   return 0;
 }
 
-/** Information about a configured bridge. Currently this just matches the
- * ones in the torrc file, but one day we may be able to learn about new
- * bridges on our own, and remember them in the state file. */
-typedef struct {
-  /** Address of the bridge. */
-  tor_addr_t addr;
-  /** TLS port for the bridge. */
-  uint16_t port;
-  /** Expected identity digest, or all zero bytes if we don't know what the
-   * digest should be. */
-  char identity[DIGEST_LEN];
-  /** When should we next try to fetch a descriptor for this bridge? */
-  download_status_t fetch_status;
-} bridge_info_t;
-
 /** A list of configured bridges. Whenever we actually get a descriptor
- * for one, we add it as an entry guard. */
+ * for one, we add it as an entry guard.  Note that the order of bridges
+ * in this list does not necessarily correspond to the order of bridges
+ * in the torrc. */
 static smartlist_t *bridge_list = NULL;
 
-/** Initialize the bridge list to empty, creating it if needed. */
+/** Mark every entry of the bridge list to be removed on our next call to
+ * sweep_bridge_list unless it has first been un-marked. */
 void
+mark_bridge_list(void)
+{
+  if (!bridge_list)
+    bridge_list = smartlist_create();
+  SMARTLIST_FOREACH(bridge_list, bridge_info_t *, b,
+                    b->marked_for_removal = 1);
+}
+
+/** Remove every entry of the bridge list that was marked with
+ * mark_bridge_list if it has not subsequently been un-marked. */
+void
+sweep_bridge_list(void)
+{
+  if (!bridge_list)
+    bridge_list = smartlist_create();
+  SMARTLIST_FOREACH_BEGIN(bridge_list, bridge_info_t *, b) {
+    if (b->marked_for_removal) {
+      SMARTLIST_DEL_CURRENT(bridge_list, b);
+      bridge_free(b);
+    }
+  } SMARTLIST_FOREACH_END(b);
+}
+
+/** Initialize the bridge list to empty, creating it if needed. */
+static void
 clear_bridge_list(void)
 {
   if (!bridge_list)
     bridge_list = smartlist_create();
-  SMARTLIST_FOREACH(bridge_list, bridge_info_t *, b, tor_free(b));
+  SMARTLIST_FOREACH(bridge_list, bridge_info_t *, b, bridge_free(b));
   smartlist_clear(bridge_list);
+}
+
+/** Free the bridge <b>bridge</b>. */
+static void
+bridge_free(bridge_info_t *bridge)
+{
+  if (!bridge)
+    return;
+
+  tor_free(bridge->transport_name);
+  tor_free(bridge);
+}
+
+/** A list of pluggable transports found in torrc. */
+static smartlist_t *transport_list = NULL;
+
+/** Initialize the pluggable transports list to empty, creating it if
+ *  needed. */
+void
+clear_transport_list(void)
+{
+  if (!transport_list)
+    transport_list = smartlist_create();
+  SMARTLIST_FOREACH(transport_list, transport_t *, t, transport_free(t));
+  smartlist_clear(transport_list);
+}
+
+/** Free the pluggable transport struct <b>transport</b>. */
+static void
+transport_free(transport_t *transport)
+{
+  if (!transport)
+    return;
+
+  tor_free(transport->name);
+  tor_free(transport);
+}
+
+/** Returns the transport in our transport list that has the name <b>name</b>.
+ *  Else returns NULL. */
+static const transport_t *
+transport_get_by_name(const char *name)
+{
+  tor_assert(name);
+
+  if (!transport_list)
+    return NULL;
+
+  SMARTLIST_FOREACH_BEGIN(transport_list, const transport_t *, transport) {
+    if (!strcmp(transport->name, name))
+      return transport;
+  } SMARTLIST_FOREACH_END(transport);
+
+  return NULL;
+}
+
+/** Remember a new pluggable transport proxy at <b>addr</b>:<b>port</b>.
+ *  <b>name</b> is set to the name of the protocol this proxy uses.
+ *  <b>socks_ver</b> is set to the SOCKS version of the proxy.
+ *
+ *  Returns 0 on success, -1 on fail. */
+int
+transport_add_from_config(const tor_addr_t *addr, uint16_t port,
+                          const char *name, int socks_ver)
+{
+  transport_t *t;
+
+  if (transport_get_by_name(name)) { /* check for duplicate names */
+    log_warn(LD_CONFIG, "More than one transport has '%s' as "
+             "its name.", name);
+    return -1;
+  }
+
+  t = tor_malloc_zero(sizeof(transport_t));
+  tor_addr_copy(&t->addr, addr);
+  t->port = port;
+  t->name = tor_strdup(name);
+  t->socks_version = socks_ver;
+
+  if (!transport_list)
+    transport_list = smartlist_create();
+
+  smartlist_add(transport_list, t);
+  return 0;
+}
+
+/** Warns the user of possible pluggable transport misconfiguration. */
+void
+validate_pluggable_transports_config(void)
+{
+  if (bridge_list) {
+    SMARTLIST_FOREACH_BEGIN(bridge_list, bridge_info_t *, b) {
+      /* Skip bridges without transports. */
+      if (!b->transport_name)
+        continue;
+      /* See if the user has Bridges that specify nonexistent
+         pluggable transports. We should warn the user in such case,
+         since it's probably misconfiguration. */
+      if (!transport_get_by_name(b->transport_name))
+        log_warn(LD_CONFIG, "You have a Bridge line using the %s "
+                 "pluggable transport, but there doesn't seem to be a "
+                 "corresponding ClientTransportPlugin line.",
+                 b->transport_name);
+    } SMARTLIST_FOREACH_END(b);
+  }
 }
 
 /** Return a bridge pointer if <b>ri</b> is one of our known bridges
  * (either by comparing keys if possible, else by comparing addr/port).
  * Else return NULL. */
 static bridge_info_t *
-get_configured_bridge_by_addr_port_digest(tor_addr_t *addr, uint16_t port,
+get_configured_bridge_by_addr_port_digest(const tor_addr_t *addr,
+                                          uint16_t port,
                                           const char *digest)
 {
   if (!bridge_list)
@@ -4514,7 +4697,7 @@ get_configured_bridge_by_addr_port_digest(tor_addr_t *addr, uint16_t port,
           !tor_addr_compare(&bridge->addr, addr, CMP_EXACT) &&
           bridge->port == port)
         return bridge;
-      if (!memcmp(bridge->identity, digest, DIGEST_LEN))
+      if (digest && tor_memeq(bridge->identity, digest, DIGEST_LEN))
         return bridge;
     }
   SMARTLIST_FOREACH_END(bridge);
@@ -4539,12 +4722,31 @@ routerinfo_is_a_configured_bridge(const routerinfo_t *ri)
   return get_configured_bridge_by_routerinfo(ri) ? 1 : 0;
 }
 
+/** Return 1 if <b>node</b> is one of our configured bridges, else 0. */
+int
+node_is_a_configured_bridge(const node_t *node)
+{
+  tor_addr_t addr;
+  uint16_t orport;
+  if (!node)
+    return 0;
+  if (node_get_addr(node, &addr) < 0)
+    return 0;
+  orport = node_get_orport(node);
+  if (orport == 0)
+    return 0;
+
+  return get_configured_bridge_by_addr_port_digest(
+                       &addr, orport, node->identity) != NULL;
+}
+
 /** We made a connection to a router at <b>addr</b>:<b>port</b>
  * without knowing its digest. Its digest turned out to be <b>digest</b>.
  * If it was a bridge, and we still don't know its digest, record it.
  */
 void
-learned_router_identity(tor_addr_t *addr, uint16_t port, const char *digest)
+learned_router_identity(const tor_addr_t *addr, uint16_t port,
+                        const char *digest)
 {
   bridge_info_t *bridge =
     get_configured_bridge_by_addr_port_digest(addr, port, digest);
@@ -4556,18 +4758,32 @@ learned_router_identity(tor_addr_t *addr, uint16_t port, const char *digest)
 }
 
 /** Remember a new bridge at <b>addr</b>:<b>port</b>. If <b>digest</b>
- * is set, it tells us the identity key too. */
+ * is set, it tells us the identity key too.  If we already had the
+ * bridge in our list, unmark it, and don't actually add anything new.
+ * If <b>transport_name</b> is non-NULL - the bridge is associated with a
+ * pluggable transport - we assign the transport to the bridge. */
 void
-bridge_add_from_config(const tor_addr_t *addr, uint16_t port, char *digest)
+bridge_add_from_config(const tor_addr_t *addr, uint16_t port,
+                       const char *digest, const char *transport_name)
 {
-  bridge_info_t *b = tor_malloc_zero(sizeof(bridge_info_t));
+  bridge_info_t *b;
+
+  if ((b = get_configured_bridge_by_addr_port_digest(addr, port, digest))) {
+    b->marked_for_removal = 0;
+    return;
+  }
+
+  b = tor_malloc_zero(sizeof(bridge_info_t));
   tor_addr_copy(&b->addr, addr);
   b->port = port;
   if (digest)
     memcpy(b->identity, digest, DIGEST_LEN);
+  if (transport_name)
+    b->transport_name = tor_strdup(transport_name);
   b->fetch_status.schedule = DL_SCHED_BRIDGE;
   if (!bridge_list)
     bridge_list = smartlist_create();
+
   smartlist_add(bridge_list, b);
 }
 
@@ -4595,10 +4811,46 @@ find_bridge_by_digest(const char *digest)
 {
   SMARTLIST_FOREACH(bridge_list, bridge_info_t *, bridge,
     {
-      if (!memcmp(bridge->identity, digest, DIGEST_LEN))
+      if (tor_memeq(bridge->identity, digest, DIGEST_LEN))
         return bridge;
     });
   return NULL;
+}
+
+/** If <b>addr</b> and <b>port</b> match the address and port of a
+ * bridge of ours that uses pluggable transports, place its transport
+ * in <b>transport</b>.
+ *
+ * Return 0 on success (found a transport, or found a bridge with no
+ * transport, or found no bridge); return -1 if we should be using a
+ * transport, but the transport could not be found.
+ */
+int
+find_transport_by_bridge_addrport(const tor_addr_t *addr, uint16_t port,
+                                  const transport_t **transport)
+{
+  *transport = NULL;
+  if (!bridge_list)
+    return 0;
+
+  SMARTLIST_FOREACH_BEGIN(bridge_list, const bridge_info_t *, bridge) {
+    if (tor_addr_eq(&bridge->addr, addr) &&
+        (bridge->port == port)) { /* bridge matched */
+      if (bridge->transport_name) { /* it also uses pluggable transports */
+        *transport = transport_get_by_name(bridge->transport_name);
+        if (*transport == NULL) { /* it uses pluggable transports, but
+                                     the transport could not be found! */
+          return -1;
+        }
+        return 0;
+      } else { /* bridge matched, but it doesn't use transports. */
+        break;
+      }
+    }
+  } SMARTLIST_FOREACH_END(bridge);
+
+  *transport = NULL;
+  return 0;
 }
 
 /** We need to ask <b>bridge</b> for its server descriptor. */
@@ -4606,7 +4858,7 @@ static void
 launch_direct_bridge_descriptor_fetch(bridge_info_t *bridge)
 {
   char *address;
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
 
   if (connection_get_by_type_addr_port_purpose(
       CONN_TYPE_DIR, &bridge->addr, bridge->port,
@@ -4647,9 +4899,9 @@ retry_bridge_descriptor_fetch_directly(const char *digest)
  * descriptor, fetch a new copy of its descriptor -- either directly
  * from the bridge or via a bridge authority. */
 void
-fetch_bridge_descriptors(or_options_t *options, time_t now)
+fetch_bridge_descriptors(const or_options_t *options, time_t now)
 {
-  int num_bridge_auths = get_n_authorities(BRIDGE_AUTHORITY);
+  int num_bridge_auths = get_n_authorities(BRIDGE_DIRINFO);
   int ask_bridge_directly;
   int can_use_bridge_authority;
 
@@ -4787,7 +5039,7 @@ learned_bridge_descriptor(routerinfo_t *ri, int from_cache)
       node = node_get_mutable_by_id(ri->cache_info.identity_digest);
       tor_assert(node);
       rewrite_node_address_for_bridge(bridge, node);
-      add_an_entry_guard(node, 1);
+      add_an_entry_guard(node, 1, 1);
 
       log_notice(LD_DIR, "new bridge descriptor '%s' (%s)", ri->nickname,
                  from_cache ? "cached" : "fresh");
@@ -4841,7 +5093,7 @@ any_pending_bridge_descriptor_fetches(void)
  * down. Else return 0. If <b>act</b> is 1, then mark the down guards
  * up; else just observe and report. */
 static int
-entries_retry_helper(or_options_t *options, int act)
+entries_retry_helper(const or_options_t *options, int act)
 {
   const node_t *node;
   int any_known = 0;
@@ -4880,7 +5132,7 @@ entries_retry_helper(or_options_t *options, int act)
 /** Do we know any descriptors for our bridges / entrynodes, and are
  * all the ones we have descriptors for down? */
 int
-entries_known_but_down(or_options_t *options)
+entries_known_but_down(const or_options_t *options)
 {
   tor_assert(entry_list_is_constrained(options));
   return entries_retry_helper(options, 0);
@@ -4888,7 +5140,7 @@ entries_known_but_down(or_options_t *options)
 
 /** Mark all down known bridges / entrynodes up. */
 void
-entries_retry_all(or_options_t *options)
+entries_retry_all(const or_options_t *options)
 {
   tor_assert(entry_list_is_constrained(options));
   entries_retry_helper(options, 1);
@@ -4906,7 +5158,10 @@ entry_guards_free_all(void)
     entry_guards = NULL;
   }
   clear_bridge_list();
+  clear_transport_list();
   smartlist_free(bridge_list);
+  smartlist_free(transport_list);
   bridge_list = NULL;
+  transport_list = NULL;
 }
 

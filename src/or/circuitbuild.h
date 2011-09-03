@@ -12,6 +12,18 @@
 #ifndef _TOR_CIRCUITBUILD_H
 #define _TOR_CIRCUITBUILD_H
 
+/** Represents a pluggable transport proxy used by a bridge. */
+typedef struct {
+  /** SOCKS version: One of PROXY_SOCKS4, PROXY_SOCKS5. */
+  int socks_version;
+  /** Name of pluggable transport protocol */
+  char *name;
+  /** Address of proxy */
+  tor_addr_t addr;
+  /** Port of proxy */
+  uint16_t port;
+} transport_t;
+
 char *circuit_list_path(origin_circuit_t *circ, int verbose);
 char *circuit_list_path_for_controller(origin_circuit_t *circ);
 void circuit_log_path(int severity, unsigned int domain,
@@ -51,11 +63,11 @@ void extend_info_free(extend_info_t *info);
 const node_t *build_state_get_exit_node(cpath_build_state_t *state);
 const char *build_state_get_exit_nickname(cpath_build_state_t *state);
 
-void entry_guards_compute_status(or_options_t *options, time_t now);
+void entry_guards_compute_status(const or_options_t *options, time_t now);
 int entry_guard_register_connect_status(const char *digest, int succeeded,
                                         int mark_relay_status, time_t now);
 void entry_nodes_should_be_added(void);
-int entry_list_is_constrained(or_options_t *options);
+int entry_list_is_constrained(const or_options_t *options);
 const node_t *choose_random_entry(cpath_build_state_t *state);
 int entry_guards_parse_state(or_state_t *state, int set, char **msg);
 void entry_guards_update_state(or_state_t *state);
@@ -63,19 +75,22 @@ int getinfo_helper_entry_guards(control_connection_t *conn,
                                 const char *question, char **answer,
                                 const char **errmsg);
 
-void clear_bridge_list(void);
+void mark_bridge_list(void);
+void sweep_bridge_list(void);
 int routerinfo_is_a_configured_bridge(const routerinfo_t *ri);
-void learned_router_identity(tor_addr_t *addr, uint16_t port,
+int node_is_a_configured_bridge(const node_t *node);
+void learned_router_identity(const tor_addr_t *addr, uint16_t port,
                              const char *digest);
 void bridge_add_from_config(const tor_addr_t *addr, uint16_t port,
-                            char *digest);
+                            const char *digest,
+                            const char *transport_name);
 void retry_bridge_descriptor_fetch_directly(const char *digest);
-void fetch_bridge_descriptors(or_options_t *options, time_t now);
+void fetch_bridge_descriptors(const or_options_t *options, time_t now);
 void learned_bridge_descriptor(routerinfo_t *ri, int from_cache);
 int any_bridge_descriptors_known(void);
 int any_pending_bridge_descriptor_fetches(void);
-int entries_known_but_down(or_options_t *options);
-void entries_retry_all(or_options_t *options);
+int entries_known_but_down(const or_options_t *options);
+void entries_retry_all(const or_options_t *options);
 
 void entry_guards_free_all(void);
 
@@ -123,6 +138,13 @@ int circuit_build_times_network_check_live(circuit_build_times_t *cbt);
 void circuit_build_times_network_circ_success(circuit_build_times_t *cbt);
 
 int circuit_build_times_get_bw_scale(networkstatus_t *ns);
+
+void clear_transport_list(void);
+int transport_add_from_config(const tor_addr_t *addr, uint16_t port,
+                               const char *name, int socks_ver);
+int find_transport_by_bridge_addrport(const tor_addr_t *addr, uint16_t port,
+                                      const transport_t **transport);
+void validate_pluggable_transports_config(void);
 
 #endif
 

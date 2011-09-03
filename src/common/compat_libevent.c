@@ -19,6 +19,10 @@
 
 #ifdef HAVE_EVENT2_EVENT_H
 #include <event2/event.h>
+#include <event2/thread.h>
+#ifdef USE_BUFFEREVENTS
+#include <event2/bufferevent.h>
+#endif
 #else
 #include <event.h>
 #endif
@@ -48,7 +52,7 @@ typedef uint32_t le_version_t;
  * it is. */
 #define LE_OLD V(0,0,0)
 /** Represents a version of libevent so weird we can't figure out what version
- * it it. */
+ * it is. */
 #define LE_OTHER V(0,0,99)
 
 static le_version_t tor_get_libevent_version(const char **v_out);
@@ -163,6 +167,16 @@ struct event_base *the_event_base = NULL;
 #endif
 #endif
 
+#ifdef USE_BUFFEREVENTS
+static int using_iocp_bufferevents = 0;
+
+int
+tor_libevent_using_iocp_bufferevents(void)
+{
+  return using_iocp_bufferevents;
+}
+#endif
+
 /** Initialize the Libevent library and set up the event base. */
 void
 tor_libevent_initialize(tor_libevent_cfg *torcfg)
@@ -183,8 +197,11 @@ tor_libevent_initialize(tor_libevent_cfg *torcfg)
     struct event_config *cfg = event_config_new();
 
 #if defined(MS_WINDOWS) && defined(USE_BUFFEREVENTS)
-    if (! torcfg->disable_iocp)
+    if (! torcfg->disable_iocp) {
+      evthread_use_windows_threads();
       event_config_set_flag(cfg, EVENT_BASE_FLAG_STARTUP_IOCP);
+      using_iocp_bufferevents = 1;
+    }
 #endif
 
 #if defined(LIBEVENT_VERSION_NUMBER) && LIBEVENT_VERSION_NUMBER >= V(2,0,7)
@@ -264,7 +281,7 @@ tor_decode_libevent_version(const char *v)
 
   /* Try the new preferred "1.4.11-stable" format.
    * Also accept "1.4.14b-stable". */
-  fields = sscanf(v, "%u.%u.%u%c%c", &major, &minor, &patchlevel, &c, &e);
+  fields = tor_sscanf(v, "%u.%u.%u%c%c", &major, &minor, &patchlevel, &c, &e);
   if (fields == 3 ||
       ((fields == 4 || fields == 5 ) && (c == '-' || c == '_')) ||
       (fields == 5 && TOR_ISALPHA(c) && (e == '-' || e == '_'))) {
@@ -272,7 +289,7 @@ tor_decode_libevent_version(const char *v)
   }
 
   /* Try the old "1.3e" format. */
-  fields = sscanf(v, "%u.%u%c%c", &major, &minor, &c, &extra);
+  fields = tor_sscanf(v, "%u.%u%c%c", &major, &minor, &c, &extra);
   if (fields == 3 && TOR_ISALPHA(c)) {
     return V_OLD(major, minor, c);
   } else if (fields == 2) {
@@ -599,6 +616,29 @@ tor_libevent_get_one_tick_timeout(void)
     one_tick = event_base_init_common_timeout(base, &tv);
   }
   return one_tick;
+}
+
+static struct bufferevent *
+tor_get_root_bufferevent(struct bufferevent *bev)
+{
+  struct bufferevent *u;
+  while ((u = bufferevent_get_underlying(bev)) != NULL)
+    bev = u;
+  return bev;
+}
+
+int
+tor_set_bufferevent_rate_limit(struct bufferevent *bev,
+                               struct ev_token_bucket_cfg *cfg)
+{
+  return bufferevent_set_rate_limit(tor_get_root_bufferevent(bev), cfg);
+}
+
+int
+tor_add_bufferevent_to_rate_limit_group(struct bufferevent *bev,
+                                        struct bufferevent_rate_limit_group *g)
+{
+  return bufferevent_add_to_rate_limit_group(tor_get_root_bufferevent(bev), g);
 }
 #endif
 

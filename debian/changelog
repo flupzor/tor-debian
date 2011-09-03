@@ -1,3 +1,21 @@
+tor (0.2.3.3-alpha-1) experimental; urgency=low
+
+  * New upstream version.
+  * Upload to experimental now that 0.2.2.x is out of rc and was uploaded to
+    unstable.
+  * Merged from debian-0.2.2: 0.2.2.29-beta-1
+    - The postinst script changes /var/run/tor to mode 02750 if it exists,
+      but the tor init script creates it with mode 02700 if it doesn't.
+      Change the init script to also create the directory with a group
+      writeable mode, the same as the postinst maintainer script, i.e. 02750.
+      .
+      This will allow users in the debian-tor group to access the control
+      socket (re: #552556).
+    - Enable Control Socket by default.  It lives in /var/run/tor/
+      (closes: #552556).
+
+ -- Peter Palfrader <weasel@debian.org>  Sat, 03 Sep 2011 13:20:24 +0200
+
 tor (0.2.3.1-alpha-1) tor-0.2.3.x; urgency=low
 
   * New upstream version.

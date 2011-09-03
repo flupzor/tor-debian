@@ -337,7 +337,7 @@ static int
 _compare_votes_by_authority_id(const void **_a, const void **_b)
 {
   const networkstatus_t *a = *_a, *b = *_b;
-  return memcmp(get_voter(a)->identity_digest,
+  return fast_memcmp(get_voter(a)->identity_digest,
                 get_voter(b)->identity_digest, DIGEST_LEN);
 }
 
@@ -354,7 +354,7 @@ _compare_dir_src_ents_by_authority_id(const void **_a, const void **_b)
   a_id = a->is_legacy ? a_v->legacy_id_digest : a_v->identity_digest;
   b_id = b->is_legacy ? b_v->legacy_id_digest : b_v->identity_digest;
 
-  return memcmp(a_id, b_id, DIGEST_LEN);
+  return fast_memcmp(a_id, b_id, DIGEST_LEN);
 }
 
 /** Given a sorted list of strings <b>in</b>, add every member to <b>out</b>
@@ -391,11 +391,12 @@ static int
 compare_vote_rs(const vote_routerstatus_t *a, const vote_routerstatus_t *b)
 {
   int r;
-  if ((r = memcmp(a->status.identity_digest, b->status.identity_digest,
+  if ((r = fast_memcmp(a->status.identity_digest, b->status.identity_digest,
                   DIGEST_LEN)))
     return r;
-  if ((r = memcmp(a->status.descriptor_digest, b->status.descriptor_digest,
-                  DIGEST_LEN)))
+  if ((r = fast_memcmp(a->status.descriptor_digest,
+                       b->status.descriptor_digest,
+                       DIGEST_LEN)))
     return r;
   if ((r = (int)(b->status.published_on - a->status.published_on)))
     return r;
@@ -441,9 +442,9 @@ compute_routerstatus_consensus(smartlist_t *votes, int consensus_method,
     if (cur && !compare_vote_rs(cur, rs)) {
       ++cur_n;
     } else {
-      if (cur_n > most_n ||
-          (cur && cur_n == most_n &&
-           cur->status.published_on > most_published)) {
+      if (cur && (cur_n > most_n ||
+                  (cur_n == most_n &&
+                   cur->status.published_on > most_published))) {
         most = cur;
         most_n = cur_n;
         most_published = cur->status.published_on;
@@ -1584,7 +1585,7 @@ networkstatus_compute_consensus(smartlist_t *votes,
                      * is the same flag as votes[j]->known_flags[b]. */
     int *named_flag; /* Index of the flag "Named" for votes[j] */
     int *unnamed_flag; /* Index of the flag "Unnamed" for votes[j] */
-    int chosen_named_idx, chosen_unnamed_idx;
+    int chosen_named_idx;
 
     strmap_t *name_to_id_map = strmap_new();
     char conflict[DIGEST_LEN];
@@ -1602,7 +1603,6 @@ networkstatus_compute_consensus(smartlist_t *votes,
     for (i = 0; i < smartlist_len(votes); ++i)
       unnamed_flag[i] = named_flag[i] = -1;
     chosen_named_idx = smartlist_string_pos(flags, "Named");
-    chosen_unnamed_idx = smartlist_string_pos(flags, "Unnamed");
 
     /* Build the flag index. */
     SMARTLIST_FOREACH(votes, networkstatus_t *, v,
@@ -1641,7 +1641,7 @@ networkstatus_compute_consensus(smartlist_t *votes,
               strmap_set_lc(name_to_id_map, rs->status.nickname,
                             rs->status.identity_digest);
             } else if (d != conflict &&
-                memcmp(d, rs->status.identity_digest, DIGEST_LEN)) {
+                fast_memcmp(d, rs->status.identity_digest, DIGEST_LEN)) {
               /* Authorities disagree about this nickname. */
               strmap_set_lc(name_to_id_map, rs->status.nickname, conflict);
             } else {
@@ -1665,7 +1665,7 @@ networkstatus_compute_consensus(smartlist_t *votes,
             } else if (!d) {
               /* We have no name officially mapped to this digest. */
               strmap_set_lc(name_to_id_map, rs->status.nickname, unknown);
-            } else if (!memcmp(d, rs->status.identity_digest, DIGEST_LEN)) {
+            } else if (fast_memeq(d, rs->status.identity_digest, DIGEST_LEN)) {
               /* Authorities disagree about this nickname. */
               strmap_set_lc(name_to_id_map, rs->status.nickname, conflict);
             } else {
@@ -1698,7 +1698,8 @@ networkstatus_compute_consensus(smartlist_t *votes,
         if (index[v_sl_idx] < size[v_sl_idx]) {
           rs = smartlist_get(v->routerstatus_list, index[v_sl_idx]);
           if (!lowest_id ||
-              memcmp(rs->status.identity_digest, lowest_id, DIGEST_LEN) < 0)
+              fast_memcmp(rs->status.identity_digest,
+                          lowest_id, DIGEST_LEN) < 0)
             lowest_id = rs->status.identity_digest;
         }
       });
@@ -1717,7 +1718,7 @@ networkstatus_compute_consensus(smartlist_t *votes,
         if (index[v_sl_idx] >= size[v_sl_idx])
           continue; /* out of entries. */
         rs = smartlist_get(v->routerstatus_list, index[v_sl_idx]);
-        if (memcmp(rs->status.identity_digest, lowest_id, DIGEST_LEN))
+        if (fast_memcmp(rs->status.identity_digest, lowest_id, DIGEST_LEN))
           continue; /* doesn't include this router. */
         /* At this point, we know that we're looking at a routerstatus with
          * identity "lowest".
@@ -1762,7 +1763,7 @@ networkstatus_compute_consensus(smartlist_t *votes,
       rs = compute_routerstatus_consensus(matching_descs, consensus_method,
                                           microdesc_digest);
       /* Copy bits of that into rs_out. */
-      tor_assert(!memcmp(lowest_id, rs->status.identity_digest, DIGEST_LEN));
+      tor_assert(fast_memeq(lowest_id, rs->status.identity_digest,DIGEST_LEN));
       memcpy(rs_out.identity_digest, lowest_id, DIGEST_LEN);
       memcpy(rs_out.descriptor_digest, rs->status.descriptor_digest,
              DIGEST_LEN);
@@ -1786,7 +1787,7 @@ networkstatus_compute_consensus(smartlist_t *votes,
         const char *d = strmap_get_lc(name_to_id_map, rs_out.nickname);
         if (!d) {
           is_named = is_unnamed = 0;
-        } else if (!memcmp(d, lowest_id, DIGEST_LEN)) {
+        } else if (fast_memeq(d, lowest_id, DIGEST_LEN)) {
           is_named = 1; is_unnamed = 0;
         } else {
           is_named = 0; is_unnamed = 1;
@@ -1884,11 +1885,11 @@ networkstatus_compute_consensus(smartlist_t *votes,
         SMARTLIST_FOREACH(matching_descs, vote_routerstatus_t *, vsr, {
           /* Check if the vote where this status comes from had the
            * proper descriptor */
-          tor_assert(!memcmp(rs_out.identity_digest,
+          tor_assert(fast_memeq(rs_out.identity_digest,
                              vsr->status.identity_digest,
                              DIGEST_LEN));
           if (vsr->status.has_exitsummary &&
-               !memcmp(rs_out.descriptor_digest,
+               fast_memeq(rs_out.descriptor_digest,
                        vsr->status.descriptor_digest,
                        DIGEST_LEN)) {
             tor_assert(vsr->status.exitsummary);
@@ -2204,7 +2205,8 @@ networkstatus_add_detached_signatures(networkstatus_t *target,
     }
     for (alg = DIGEST_SHA1; alg < N_DIGEST_ALGORITHMS; ++alg) {
       if (!tor_mem_is_zero(digests->d[alg], DIGEST256_LEN)) {
-        if (!memcmp(target->digests.d[alg], digests->d[alg], DIGEST256_LEN)) {
+        if (fast_memeq(target->digests.d[alg], digests->d[alg],
+                       DIGEST256_LEN)) {
           ++n_matches;
         } else {
           *msg_out = "Mismatched digest.";
@@ -2502,7 +2504,7 @@ authority_cert_dup(authority_cert_t *cert)
 void
 dirvote_get_preferred_voting_intervals(vote_timing_t *timing_out)
 {
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
 
   tor_assert(timing_out);
 
@@ -2576,7 +2578,7 @@ static struct {
 /** Set voting_schedule to hold the timing for the next vote we should be
  * doing. */
 void
-dirvote_recalculate_timing(or_options_t *options, time_t now)
+dirvote_recalculate_timing(const or_options_t *options, time_t now)
 {
   int interval, vote_delay, dist_delay;
   time_t start;
@@ -2627,7 +2629,7 @@ dirvote_recalculate_timing(or_options_t *options, time_t now)
 
 /** Entry point: Take whatever voting actions are pending as of <b>now</b>. */
 void
-dirvote_act(or_options_t *options, time_t now)
+dirvote_act(const or_options_t *options, time_t now)
 {
   if (!authdir_mode_v3(options))
     return;
@@ -2742,7 +2744,7 @@ dirvote_perform_vote(void)
 
   directory_post_to_dirservers(DIR_PURPOSE_UPLOAD_VOTE,
                                ROUTER_PURPOSE_GENERAL,
-                               V3_AUTHORITY,
+                               V3_DIRINFO,
                                pending_vote->vote_body->dir,
                                pending_vote->vote_body->dir_len, 0);
   log_notice(LD_DIR, "Vote posted.");
@@ -2761,7 +2763,7 @@ dirvote_fetch_missing_votes(void)
   SMARTLIST_FOREACH(router_get_trusted_dir_servers(),
                     trusted_dir_server_t *, ds,
     {
-      if (!(ds->type & V3_AUTHORITY))
+      if (!(ds->type & V3_DIRINFO))
         continue;
       if (!dirvote_get_vote(ds->v3_identity_digest,
                             DGV_BY_ID|DGV_INCLUDE_PENDING)) {
@@ -2874,7 +2876,7 @@ list_v3_auth_ids(void)
   char *keys;
   SMARTLIST_FOREACH(router_get_trusted_dir_servers(),
                     trusted_dir_server_t *, ds,
-    if ((ds->type & V3_AUTHORITY) &&
+    if ((ds->type & V3_DIRINFO) &&
         !tor_digest_is_zero(ds->v3_identity_digest))
       smartlist_add(known_v3_keys,
                     tor_strdup(hex_str(ds->v3_identity_digest, DIGEST_LEN))));
@@ -2968,11 +2970,11 @@ dirvote_add_vote(const char *vote_body, const char **msg_out, int *status_out)
 
   /* Now see whether we already have a vote from this authority. */
   SMARTLIST_FOREACH(pending_vote_list, pending_vote_t *, v, {
-      if (! memcmp(v->vote->cert->cache_info.identity_digest,
+      if (fast_memeq(v->vote->cert->cache_info.identity_digest,
                    vote->cert->cache_info.identity_digest,
                    DIGEST_LEN)) {
         networkstatus_voter_info_t *vi_old = get_voter(v->vote);
-        if (!memcmp(vi_old->vote_digest, vi->vote_digest, DIGEST_LEN)) {
+        if (fast_memeq(vi_old->vote_digest, vi->vote_digest, DIGEST_LEN)) {
           /* Ah, it's the same vote. Not a problem. */
           log_info(LD_DIR, "Discarding a vote we already have (from %s).",
                    vi->address);
@@ -3069,7 +3071,7 @@ dirvote_compute_consensuses(void)
   if (!pending_vote_list)
     pending_vote_list = smartlist_create();
 
-  n_voters = get_n_authorities(V3_AUTHORITY);
+  n_voters = get_n_authorities(V3_DIRINFO);
   n_votes = smartlist_len(pending_vote_list);
   if (n_votes <= n_voters/2) {
     log_warn(LD_DIR, "We don't have enough votes to generate a consensus: "
@@ -3208,7 +3210,7 @@ dirvote_compute_consensuses(void)
 
   directory_post_to_dirservers(DIR_PURPOSE_UPLOAD_SIGNATURES,
                                ROUTER_PURPOSE_GENERAL,
-                               V3_AUTHORITY,
+                               V3_DIRINFO,
                                pending_consensus_signatures,
                                strlen(pending_consensus_signatures), 0);
   log_notice(LD_DIR, "Signature(s) posted.");
@@ -3473,23 +3475,23 @@ dirvote_get_vote(const char *fp, int flags)
   if (by_id) {
     if (pending_vote_list && include_pending) {
       SMARTLIST_FOREACH(pending_vote_list, pending_vote_t *, pv,
-        if (!memcmp(get_voter(pv->vote)->identity_digest, fp, DIGEST_LEN))
+        if (fast_memeq(get_voter(pv->vote)->identity_digest, fp, DIGEST_LEN))
           return pv->vote_body);
     }
     if (previous_vote_list && include_previous) {
       SMARTLIST_FOREACH(previous_vote_list, pending_vote_t *, pv,
-        if (!memcmp(get_voter(pv->vote)->identity_digest, fp, DIGEST_LEN))
+        if (fast_memeq(get_voter(pv->vote)->identity_digest, fp, DIGEST_LEN))
           return pv->vote_body);
     }
   } else {
     if (pending_vote_list && include_pending) {
       SMARTLIST_FOREACH(pending_vote_list, pending_vote_t *, pv,
-        if (!memcmp(pv->vote->digests.d[DIGEST_SHA1], fp, DIGEST_LEN))
+        if (fast_memeq(pv->vote->digests.d[DIGEST_SHA1], fp, DIGEST_LEN))
           return pv->vote_body);
     }
     if (previous_vote_list && include_previous) {
       SMARTLIST_FOREACH(previous_vote_list, pending_vote_t *, pv,
-        if (!memcmp(pv->vote->digests.d[DIGEST_SHA1], fp, DIGEST_LEN))
+        if (fast_memeq(pv->vote->digests.d[DIGEST_SHA1], fp, DIGEST_LEN))
           return pv->vote_body);
     }
   }
@@ -3608,7 +3610,7 @@ vote_routerstatus_find_microdesc_hash(char *digest256_out,
      * the first part. */
     while (1) {
       num_len = strspn(cp, "1234567890");
-      if (num_len == mlen && !memcmp(mstr, cp, mlen)) {
+      if (num_len == mlen && fast_memeq(mstr, cp, mlen)) {
         /* This is the line. */
         char buf[BASE64_DIGEST256_LEN+1];
         /* XXXX ignores extraneous stuff if the digest is too long.  This

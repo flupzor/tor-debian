@@ -212,7 +212,7 @@ dirserv_load_fingerprint_file(void)
   authdir_config_t *fingerprint_list_new;
   int result;
   config_line_t *front=NULL, *list;
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
 
   fname = get_datadir_fname("approved-routers");
   log_info(LD_GENERAL,
@@ -518,14 +518,15 @@ dirserv_router_has_valid_address(routerinfo_t *ri)
   if (get_options()->DirAllowPrivateAddresses)
     return 0; /* whatever it is, we're fine with it */
   if (!tor_inet_aton(ri->address, &iaddr)) {
-    log_info(LD_DIRSERV,"Router '%s' published non-IP address '%s'. Refusing.",
-             ri->nickname, ri->address);
+    log_info(LD_DIRSERV,"Router %s published non-IP address '%s'. Refusing.",
+             router_describe(ri),
+             ri->address);
     return -1;
   }
   if (is_internal_IP(ntohl(iaddr.s_addr), 0)) {
     log_info(LD_DIRSERV,
-             "Router '%s' published internal IP address '%s'. Refusing.",
-             ri->nickname, ri->address);
+             "Router %s published internal IP address '%s'. Refusing.",
+             router_describe(ri), ri->address);
     return -1; /* it's a private IP, we should reject it */
   }
   return 0;
@@ -554,10 +555,11 @@ authdir_wants_to_reject_router(routerinfo_t *ri, const char **msg,
   /* Is there too much clock skew? */
   now = time(NULL);
   if (ri->cache_info.published_on > now+ROUTER_ALLOW_SKEW) {
-    log_fn(severity, LD_DIRSERV, "Publication time for nickname '%s' is too "
+    log_fn(severity, LD_DIRSERV, "Publication time for %s is too "
            "far (%d minutes) in the future; possible clock skew. Not adding "
            "(%s)",
-           ri->nickname, (int)((ri->cache_info.published_on-now)/60),
+           router_describe(ri),
+           (int)((ri->cache_info.published_on-now)/60),
            esc_router_info(ri));
     *msg = "Rejected: Your clock is set too far in the future, or your "
       "timezone is not correct.";
@@ -565,9 +567,10 @@ authdir_wants_to_reject_router(routerinfo_t *ri, const char **msg,
   }
   if (ri->cache_info.published_on < now-ROUTER_MAX_AGE_TO_PUBLISH) {
     log_fn(severity, LD_DIRSERV,
-           "Publication time for router with nickname '%s' is too far "
+           "Publication time for %s is too far "
            "(%d minutes) in the past. Not adding (%s)",
-           ri->nickname, (int)((now-ri->cache_info.published_on)/60),
+           router_describe(ri),
+           (int)((now-ri->cache_info.published_on)/60),
            esc_router_info(ri));
     *msg = "Rejected: Server is expired, or your clock is too far in the past,"
       " or your timezone is not correct.";
@@ -575,9 +578,10 @@ authdir_wants_to_reject_router(routerinfo_t *ri, const char **msg,
   }
   if (dirserv_router_has_valid_address(ri) < 0) {
     log_fn(severity, LD_DIRSERV,
-           "Router with nickname '%s' has invalid address '%s'. "
+           "Router %s has invalid address '%s'. "
            "Not adding (%s).",
-           ri->nickname, ri->address,
+           router_describe(ri),
+           ri->address,
            esc_router_info(ri));
     *msg = "Rejected: Address is not an IP, or IP is a private address.";
     return -1;
@@ -729,9 +733,9 @@ dirserv_add_descriptor(routerinfo_t *ri, const char **msg, const char *source)
       && router_differences_are_cosmetic(ri_old, ri)
       && !router_is_me(ri)) {
     log_info(LD_DIRSERV,
-             "Not replacing descriptor from '%s' (source: %s); "
+             "Not replacing descriptor from %s (source: %s); "
              "differences are cosmetic.",
-             ri->nickname, source);
+             router_describe(ri), source);
     *msg = "Not replacing router descriptor; no information has changed since "
       "the last one with this identity.";
     control_event_or_authdir_new_descriptor("DROPPED",
@@ -831,13 +835,15 @@ directory_remove_invalid(void)
   SMARTLIST_FOREACH_BEGIN(nodes, node_t *, node) {
     const char *msg;
     routerinfo_t *ent = node->ri;
+    char description[NODE_DESC_BUF_LEN];
     uint32_t r;
     if (!ent)
       continue;
     r = dirserv_router_get_status(ent, &msg);
+    router_get_description(description, ent);
     if (r & FP_REJECT) {
-      log_info(LD_DIRSERV, "Router '%s' is now rejected: %s",
-               ent->nickname, msg?msg:"");
+      log_info(LD_DIRSERV, "Router %s is now rejected: %s",
+               description, msg?msg:"");
       routerlist_remove(rl, ent, 0, time(NULL));
       changed = 1;
       continue;
@@ -845,33 +851,33 @@ directory_remove_invalid(void)
 #if 0
     if (bool_neq((r & FP_NAMED), ent->auth_says_is_named)) {
       log_info(LD_DIRSERV,
-               "Router '%s' is now %snamed.", ent->nickname,
+               "Router %s is now %snamed.", description,
                (r&FP_NAMED)?"":"un");
       ent->is_named = (r&FP_NAMED)?1:0;
       changed = 1;
     }
     if (bool_neq((r & FP_UNNAMED), ent->auth_says_is_unnamed)) {
       log_info(LD_DIRSERV,
-               "Router '%s' is now %snamed. (FP_UNNAMED)", ent->nickname,
+               "Router '%s' is now %snamed. (FP_UNNAMED)", description,
                (r&FP_NAMED)?"":"un");
       ent->is_named = (r&FP_NUNAMED)?0:1;
       changed = 1;
     }
 #endif
     if (bool_neq((r & FP_INVALID), !node->is_valid)) {
-      log_info(LD_DIRSERV, "Router '%s' is now %svalid.", ent->nickname,
+      log_info(LD_DIRSERV, "Router '%s' is now %svalid.", description,
                (r&FP_INVALID) ? "in" : "");
       node->is_valid = (r&FP_INVALID)?0:1;
       changed = 1;
     }
     if (bool_neq((r & FP_BADDIR), node->is_bad_directory)) {
-      log_info(LD_DIRSERV, "Router '%s' is now a %s directory", ent->nickname,
+      log_info(LD_DIRSERV, "Router '%s' is now a %s directory", description,
                (r & FP_BADDIR) ? "bad" : "good");
       node->is_bad_directory = (r&FP_BADDIR) ? 1: 0;
       changed = 1;
     }
     if (bool_neq((r & FP_BADEXIT), node->is_bad_exit)) {
-      log_info(LD_DIRSERV, "Router '%s' is now a %s exit", ent->nickname,
+      log_info(LD_DIRSERV, "Router '%s' is now a %s exit", description,
                (r & FP_BADEXIT) ? "bad" : "good");
       node->is_bad_exit = (r&FP_BADEXIT) ? 1: 0;
       changed = 1;
@@ -1026,7 +1032,7 @@ list_server_status_v1(smartlist_t *routers, char **router_status_out,
   smartlist_t *rs_entries;
   time_t now = time(NULL);
   time_t cutoff = now - ROUTER_MAX_AGE_TO_PUBLISH;
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   /* We include v2 dir auths here too, because they need to answer
    * controllers. Eventually we'll deprecate this whole function;
    * see also networkstatus_getinfo_by_purpose(). */
@@ -1193,7 +1199,7 @@ dirserv_dump_directory_to_string(char **dir_out,
 /** Return 1 if we fetch our directory material directly from the
  * authorities, rather than from a mirror. */
 int
-directory_fetches_from_authorities(or_options_t *options)
+directory_fetches_from_authorities(const or_options_t *options)
 {
   const routerinfo_t *me;
   uint32_t addr;
@@ -1220,7 +1226,7 @@ directory_fetches_from_authorities(or_options_t *options)
  * on the "mirror" schedule rather than the "client" schedule.
  */
 int
-directory_fetches_dir_info_early(or_options_t *options)
+directory_fetches_dir_info_early(const or_options_t *options)
 {
   return directory_fetches_from_authorities(options);
 }
@@ -1232,7 +1238,7 @@ directory_fetches_dir_info_early(or_options_t *options)
  * client as a directory guard.
  */
 int
-directory_fetches_dir_info_later(or_options_t *options)
+directory_fetches_dir_info_later(const or_options_t *options)
 {
   return options->UseBridges != 0;
 }
@@ -1240,7 +1246,7 @@ directory_fetches_dir_info_later(or_options_t *options)
 /** Return 1 if we want to cache v2 dir info (each status file).
  */
 int
-directory_caches_v2_dir_info(or_options_t *options)
+directory_caches_v2_dir_info(const or_options_t *options)
 {
   return options->DirPort != 0;
 }
@@ -1249,7 +1255,7 @@ directory_caches_v2_dir_info(or_options_t *options)
  * and we're willing to serve them to others. Else return 0.
  */
 int
-directory_caches_dir_info(or_options_t *options)
+directory_caches_dir_info(const or_options_t *options)
 {
   if (options->BridgeRelay || options->DirPort)
     return 1;
@@ -1265,7 +1271,7 @@ directory_caches_dir_info(or_options_t *options)
  * requests via the "begin_dir" interface, which doesn't require
  * having any separate port open. */
 int
-directory_permits_begindir_requests(or_options_t *options)
+directory_permits_begindir_requests(const or_options_t *options)
 {
   return options->BridgeRelay != 0 || options->DirPort != 0;
 }
@@ -1274,7 +1280,7 @@ directory_permits_begindir_requests(or_options_t *options)
  * requests via the controller interface, which doesn't require
  * having any separate port open. */
 int
-directory_permits_controller_requests(or_options_t *options)
+directory_permits_controller_requests(const or_options_t *options)
 {
   return options->DirPort != 0;
 }
@@ -1284,7 +1290,8 @@ directory_permits_controller_requests(or_options_t *options)
  * lately.
  */
 int
-directory_too_idle_to_fetch_descriptors(or_options_t *options, time_t now)
+directory_too_idle_to_fetch_descriptors(const or_options_t *options,
+                                        time_t now)
 {
   return !directory_caches_dir_info(options) &&
          !options->FetchUselessDescriptors &&
@@ -1552,11 +1559,11 @@ dirserv_pick_cached_dir_obj(cached_dir_t *cache_src,
                             cached_dir_t *auth_src,
                             time_t dirty, cached_dir_t *(*regenerate)(void),
                             const char *name,
-                            authority_type_t auth_type)
+                            dirinfo_type_t auth_type)
 {
-  or_options_t *options = get_options();
-  int authority = (auth_type == V1_AUTHORITY && authdir_mode_v1(options)) ||
-                  (auth_type == V2_AUTHORITY && authdir_mode_v2(options));
+  const or_options_t *options = get_options();
+  int authority = (auth_type == V1_DIRINFO && authdir_mode_v1(options)) ||
+                  (auth_type == V2_DIRINFO && authdir_mode_v2(options));
 
   if (!authority || authdir_mode_bridge(options)) {
     return cache_src;
@@ -1585,7 +1592,7 @@ dirserv_get_directory(void)
   return dirserv_pick_cached_dir_obj(cached_directory, the_directory,
                                      the_directory_is_dirty,
                                      dirserv_regenerate_directory,
-                                     "v1 server directory", V1_AUTHORITY);
+                                     "v1 server directory", V1_DIRINFO);
 }
 
 /** Only called by v1 auth dirservers.
@@ -1678,7 +1685,7 @@ dirserv_get_runningrouters(void)
                          &cached_runningrouters, &the_runningrouters,
                          runningrouters_is_dirty,
                          generate_runningrouters,
-                         "v1 network status list", V1_AUTHORITY);
+                         "v1 network status list", V1_DIRINFO);
 }
 
 /** Return the latest downloaded consensus networkstatus in encoded, signed,
@@ -2116,7 +2123,7 @@ routerstatus_format_entry(char *buf, size_t buf_len,
       /* This assert can fire for the control port, because
        * it can request NS documents before all descriptors
        * have been fetched. */
-      if (memcmp(desc->cache_info.signed_descriptor_digest,
+      if (tor_memneq(desc->cache_info.signed_descriptor_digest,
             rs->descriptor_digest,
             DIGEST_LEN)) {
         char rl_d[HEX_DIGEST_LEN+1];
@@ -2132,7 +2139,7 @@ routerstatus_format_entry(char *buf, size_t buf_len,
             "(router %s)\n",
             rl_d, rs_d, id);
 
-        tor_assert(!memcmp(desc->cache_info.signed_descriptor_digest,
+        tor_assert(tor_memeq(desc->cache_info.signed_descriptor_digest,
               rs->descriptor_digest,
               DIGEST_LEN));
       };
@@ -2234,9 +2241,9 @@ _compare_routerinfo_by_ip_and_bw(const void **a, const void **b)
 
   /* They're equal! Compare by identity digest, so there's a
    * deterministic order and we avoid flapping. */
-  return memcmp(first->cache_info.identity_digest,
-                second->cache_info.identity_digest,
-                DIGEST_LEN);
+  return fast_memcmp(first->cache_info.identity_digest,
+                     second->cache_info.identity_digest,
+                     DIGEST_LEN);
 }
 
 /** Given a list of routerinfo_t in <b>routers</b>, return a new digestmap_t
@@ -2245,7 +2252,7 @@ _compare_routerinfo_by_ip_and_bw(const void **a, const void **b)
 static digestmap_t *
 get_possible_sybil_list(const smartlist_t *routers)
 {
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   digestmap_t *omit_as_sybil;
   smartlist_t *routers_by_ip = smartlist_create();
   uint32_t last_addr;
@@ -2433,7 +2440,7 @@ measured_bw_line_parse(measured_bw_line_t *out, const char *orig_line)
         tor_free(line);
         return -1;
       }
-      strncpy(out->node_hex, cp, sizeof(out->node_hex));
+      strlcpy(out->node_hex, cp, sizeof(out->node_hex));
       got_node_id=1;
     }
   } while ((cp = tor_strtok_r(NULL, " \t", &strtok_state)));
@@ -2545,7 +2552,7 @@ networkstatus_t *
 dirserv_generate_networkstatus_vote_obj(crypto_pk_env_t *private_key,
                                         authority_cert_t *cert)
 {
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   networkstatus_t *v3_out = NULL;
   uint32_t addr;
   char *hostname = NULL, *client_versions = NULL, *server_versions = NULL;
@@ -2726,8 +2733,8 @@ dirserv_generate_networkstatus_vote_obj(crypto_pk_env_t *private_key,
   voter->sigs = smartlist_create();
   voter->address = hostname;
   voter->addr = addr;
-  voter->dir_port = options->DirPort;
-  voter->or_port = options->ORPort;
+  voter->dir_port = router_get_advertised_dir_port(options, 0);
+  voter->or_port = router_get_advertised_or_port(options);
   voter->contact = tor_strdup(contact);
   if (options->V3AuthUseLegacyKey) {
     authority_cert_t *c = get_my_v3_legacy_cert();
@@ -2760,7 +2767,7 @@ generate_v2_networkstatus_opinion(void)
   char *status = NULL, *client_versions = NULL, *server_versions = NULL,
     *identity_pkey = NULL, *hostname = NULL;
   char *outp, *endp;
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   char fingerprint[FINGERPRINT_LEN+1];
   char published[ISO_TIME_LEN+1];
   char digest[DIGEST_LEN];
@@ -2829,7 +2836,8 @@ generate_v2_networkstatus_opinion(void)
                "dir-options%s%s%s%s\n"
                "%s" /* client version line, server version line. */
                "dir-signing-key\n%s",
-               hostname, fmt_addr32(addr), (int)options->DirPort,
+               hostname, fmt_addr32(addr),
+               (int)router_get_advertised_dir_port(options, 0),
                fingerprint,
                contact,
                published,
@@ -2967,7 +2975,7 @@ dirserv_get_networkstatus_v2_fingerprints(smartlist_t *result,
     } else {
       SMARTLIST_FOREACH(router_get_trusted_dir_servers(),
                   trusted_dir_server_t *, ds,
-                  if (ds->type & V2_AUTHORITY)
+                  if (ds->type & V2_DIRINFO)
                     smartlist_add(result, tor_memdup(ds->digest, DIGEST_LEN)));
     }
     smartlist_sort_digests(result);
@@ -3185,12 +3193,13 @@ dirserv_orconn_tls_done(const char *address,
   SMARTLIST_FOREACH_BEGIN(rl->routers, routerinfo_t *, ri) {
     if (!strcasecmp(address, ri->address) && or_port == ri->or_port &&
         as_advertised &&
-        !memcmp(ri->cache_info.identity_digest, digest_rcvd, DIGEST_LEN)) {
+        fast_memeq(ri->cache_info.identity_digest, digest_rcvd, DIGEST_LEN)) {
       /* correct digest. mark this router reachable! */
       if (!bridge_auth || ri->purpose == ROUTER_PURPOSE_BRIDGE) {
         tor_addr_t addr, *addrp=NULL;
         log_info(LD_DIRSERV, "Found router %s to be reachable at %s:%d. Yay.",
-                 ri->nickname, address, ri->or_port );
+                 router_describe(ri),
+                 address, ri->or_port);
         if (tor_addr_from_str(&addr, ri->address) != -1)
           addrp = &addr;
         else

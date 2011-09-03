@@ -13,9 +13,8 @@
 #define _TOR_DIRECTORY_H
 
 int directories_have_accepted_server_descriptor(void);
-char *authority_type_to_string(authority_type_t auth);
 void directory_post_to_dirservers(uint8_t dir_purpose, uint8_t router_purpose,
-                                  authority_type_t type, const char *payload,
+                                  dirinfo_type_t type, const char *payload,
                                   size_t payload_len, size_t extrainfo_len);
 void directory_get_from_dirserver(uint8_t dir_purpose, uint8_t router_purpose,
                                   const char *resource,
@@ -49,7 +48,7 @@ int connection_dir_reached_eof(dir_connection_t *conn);
 int connection_dir_process_inbuf(dir_connection_t *conn);
 int connection_dir_finished_flushing(dir_connection_t *conn);
 int connection_dir_finished_connecting(dir_connection_t *conn);
-void connection_dir_request_failed(dir_connection_t *conn);
+void connection_dir_about_to_close(dir_connection_t *dir_conn);
 void directory_initiate_command(const char *address, const tor_addr_t *addr,
                                 uint16_t or_port, uint16_t dir_port,
                                 int supports_conditional_consensus,

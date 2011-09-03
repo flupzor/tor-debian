@@ -39,27 +39,31 @@ void router_orport_found_reachable(void);
 void router_dirport_found_reachable(void);
 void router_perform_bandwidth_test(int num_circs, time_t now);
 
-int authdir_mode(or_options_t *options);
-int authdir_mode_v1(or_options_t *options);
-int authdir_mode_v2(or_options_t *options);
-int authdir_mode_v3(or_options_t *options);
-int authdir_mode_any_main(or_options_t *options);
-int authdir_mode_any_nonhidserv(or_options_t *options);
-int authdir_mode_handles_descs(or_options_t *options, int purpose);
-int authdir_mode_publishes_statuses(or_options_t *options);
-int authdir_mode_tests_reachability(or_options_t *options);
-int authdir_mode_bridge(or_options_t *options);
+int authdir_mode(const or_options_t *options);
+int authdir_mode_v1(const or_options_t *options);
+int authdir_mode_v2(const or_options_t *options);
+int authdir_mode_v3(const or_options_t *options);
+int authdir_mode_any_main(const or_options_t *options);
+int authdir_mode_any_nonhidserv(const or_options_t *options);
+int authdir_mode_handles_descs(const or_options_t *options, int purpose);
+int authdir_mode_publishes_statuses(const or_options_t *options);
+int authdir_mode_tests_reachability(const or_options_t *options);
+int authdir_mode_bridge(const or_options_t *options);
 
-int server_mode(or_options_t *options);
-int public_server_mode(or_options_t *options);
+uint16_t router_get_advertised_or_port(const or_options_t *options);
+uint16_t router_get_advertised_dir_port(const or_options_t *options,
+                                        uint16_t dirport);
+
+int server_mode(const or_options_t *options);
+int public_server_mode(const or_options_t *options);
 int advertised_server_mode(void);
-int proxy_mode(or_options_t *options);
+int proxy_mode(const or_options_t *options);
 void consider_publishable_server(int force);
-int should_refuse_unknown_exits(or_options_t *options);
+int should_refuse_unknown_exits(const or_options_t *options);
 
 void router_upload_dir_desc_to_dirservers(int force);
 void mark_my_descriptor_dirty_if_older_than(time_t when);
-void mark_my_descriptor_dirty(void);
+void mark_my_descriptor_dirty(const char *reason);
 void check_descriptor_bandwidth_changed(time_t now);
 void check_descriptor_ipaddress_changed(time_t now);
 void router_new_address_suggestion(const char *suggestion,
@@ -73,7 +77,7 @@ int router_digest_is_me(const char *digest);
 int router_extrainfo_digest_is_me(const char *digest);
 int router_is_me(const routerinfo_t *router);
 int router_fingerprint_is_me(const char *fp);
-int router_pick_published_address(or_options_t *options, uint32_t *addr);
+int router_pick_published_address(const or_options_t *options, uint32_t *addr);
 int router_rebuild_descriptor(int force);
 int router_dump_router_to_string(char *s, size_t maxlen, routerinfo_t *router,
                                  crypto_pk_env_t *ident_key);
@@ -82,6 +86,30 @@ int extrainfo_dump_to_string(char **s, extrainfo_t *extrainfo,
 int is_legal_nickname(const char *s);
 int is_legal_nickname_or_hexdigest(const char *s);
 int is_legal_hexdigest(const char *s);
+
+/**
+ * Longest allowed output of format_node_description, plus 1 character for
+ * NUL.  This allows space for:
+ * "$FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF~xxxxxxxxxxxxxxxxxxx at"
+ * " [ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255]"
+ * plus a terminating NUL.
+ */
+#define NODE_DESC_BUF_LEN (MAX_VERBOSE_NICKNAME_LEN+4+TOR_ADDR_BUF_LEN)
+const char *format_node_description(char *buf,
+                                    const char *id_digest,
+                                    int is_named,
+                                    const char *nickname,
+                                    const tor_addr_t *addr,
+                                    uint32_t addr32h);
+const char *router_get_description(char *buf, const routerinfo_t *ri);
+const char *node_get_description(char *buf, const node_t *node);
+const char *routerstatus_get_description(char *buf, const routerstatus_t *rs);
+const char *extend_info_get_description(char *buf, const extend_info_t *ei);
+const char *router_describe(const routerinfo_t *ri);
+const char *node_describe(const node_t *node);
+const char *routerstatus_describe(const routerstatus_t *ri);
+const char *extend_info_describe(const extend_info_t *ei);
+
 void router_get_verbose_nickname(char *buf, const routerinfo_t *router);
 void routerstatus_get_verbose_nickname(char *buf,
                                        const routerstatus_t *router);

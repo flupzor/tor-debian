@@ -47,7 +47,7 @@ node_id_hash(const node_t *node)
 static INLINE unsigned int
 node_id_eq(const node_t *node1, const node_t *node2)
 {
-  return 0 == memcmp(node1->identity, node2->identity, DIGEST_LEN);
+  return tor_memeq(node1->identity, node2->identity, DIGEST_LEN);
 }
 
 HT_PROTOTYPE(nodelist_map, node_t, ht_ent, node_id_hash, node_id_eq);
@@ -158,8 +158,12 @@ nodelist_add_microdesc(microdesc_t *md)
   if (rs == NULL)
     return NULL;
   node = node_get_mutable_by_id(rs->identity_digest);
-  if (node)
+  if (node) {
+    if (node->md)
+      node->md->held_by_node = 0;
     node->md = md;
+    md->held_by_node = 1;
+  }
   return node;
 }
 
@@ -171,7 +175,7 @@ nodelist_add_microdesc(microdesc_t *md)
 void
 nodelist_set_consensus(networkstatus_t *ns)
 {
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   int authdir = authdir_mode_v2(options) || authdir_mode_v3(options);
   init_nodelist();
 
@@ -183,9 +187,13 @@ nodelist_set_consensus(networkstatus_t *ns)
     node->rs = rs;
     if (ns->flavor == FLAV_MICRODESC) {
       if (node->md == NULL ||
-          0!=memcmp(node->md->digest,rs->descriptor_digest,DIGEST256_LEN)) {
+          tor_memneq(node->md->digest,rs->descriptor_digest,DIGEST256_LEN)) {
+        if (node->md)
+          node->md->held_by_node = 0;
         node->md = microdesc_cache_lookup_by_digest256(NULL,
                                                        rs->descriptor_digest);
+        if (node->md)
+          node->md->held_by_node = 1;
       }
     }
 
@@ -240,8 +248,10 @@ void
 nodelist_remove_microdesc(const char *identity_digest, microdesc_t *md)
 {
   node_t *node = node_get_mutable_by_id(identity_digest);
-  if (node && node->md == md)
+  if (node && node->md == md) {
     node->md = NULL;
+    md->held_by_node = 0;
+  }
 }
 
 /** Tell the nodelist that <b>ri</b> is no longer in the routerlist. */
@@ -288,6 +298,8 @@ node_free(node_t *node)
 {
   if (!node)
     return;
+  if (node->md)
+    node->md->held_by_node = 0;
   tor_assert(node->nodelist_idx == -1);
   tor_free(node);
 }
@@ -304,6 +316,12 @@ nodelist_purge(void)
   /* Remove the non-usable nodes. */
   for (iter = HT_START(nodelist_map, &the_nodelist->nodes_by_id); iter; ) {
     node_t *node = *iter;
+
+    if (node->md && !node->rs) {
+      /* An md is only useful if there is an rs. */
+      node->md->held_by_node = 0;
+      node->md = NULL;
+    }
 
     if (node_is_usable(node)) {
       iter = HT_NEXT(nodelist_map, &the_nodelist->nodes_by_id, iter);
@@ -342,17 +360,19 @@ nodelist_assert_ok(void)
 {
   routerlist_t *rl = router_get_routerlist();
   networkstatus_t *ns = networkstatus_get_latest_consensus();
-  digestmap_t *dm = digestmap_new();
+  digestmap_t *dm;
 
   if (!the_nodelist)
     return;
+
+  dm = digestmap_new();
 
   /* every routerinfo in rl->routers should be in the nodelist. */
   if (rl) {
     SMARTLIST_FOREACH_BEGIN(rl->routers, routerinfo_t *, ri) {
       const node_t *node = node_get_by_id(ri->cache_info.identity_digest);
       tor_assert(node && node->ri == ri);
-      tor_assert(0 == memcmp(ri->cache_info.identity_digest,
+      tor_assert(fast_memeq(ri->cache_info.identity_digest,
                              node->identity, DIGEST_LEN));
       tor_assert(! digestmap_get(dm, node->identity));
       digestmap_set(dm, node->identity, (void*)node);
@@ -364,7 +384,7 @@ nodelist_assert_ok(void)
     SMARTLIST_FOREACH_BEGIN(ns->routerstatus_list, routerstatus_t *, rs) {
       const node_t *node = node_get_by_id(rs->identity_digest);
       tor_assert(node && node->rs == rs);
-      tor_assert(0 == memcmp(rs->identity_digest, node->identity, DIGEST_LEN));
+      tor_assert(fast_memeq(rs->identity_digest, node->identity, DIGEST_LEN));
       digestmap_set(dm, node->identity, (void*)node);
       if (ns->flavor == FLAV_MICRODESC) {
         /* If it's a microdesc consensus, every entry that has a
@@ -373,6 +393,8 @@ nodelist_assert_ok(void)
         microdesc_t *md =
           microdesc_cache_lookup_by_digest256(NULL, rs->descriptor_digest);
         tor_assert(md == node->md);
+        if (md)
+          tor_assert(md->held_by_node == 1);
       }
     } SMARTLIST_FOREACH_END(rs);
   }
@@ -422,7 +444,7 @@ node_get_by_hex_id(const char *hex_id)
       if (nn_char == '=') {
         const char *named_id =
           networkstatus_get_router_digest_by_nickname(nn_buf);
-        if (!named_id || memcmp(named_id, digest_buf, DIGEST_LEN))
+        if (!named_id || tor_memneq(named_id, digest_buf, DIGEST_LEN))
           return NULL;
       }
     }
@@ -540,7 +562,7 @@ node_is_named(const node_t *node)
   named_id = networkstatus_get_router_digest_by_nickname(nickname);
   if (!named_id)
     return 0;
-  return !memcmp(named_id, node->identity, DIGEST_LEN);
+  return tor_memeq(named_id, node->identity, DIGEST_LEN);
 }
 
 /** Return true iff <b>node</b> appears to be a directory authority or

@@ -13,8 +13,12 @@
 #include "orconfig.h"
 
 #ifdef MS_WINDOWS
+#ifndef WIN32_WINNT
 #define WIN32_WINNT 0x400
+#endif
+#ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x400
+#endif
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <wincrypt.h>
@@ -733,6 +737,18 @@ crypto_pk_key_is_private(const crypto_pk_env_t *key)
   return PRIVATE_KEY_OK(key);
 }
 
+/** Return true iff <b>env</b> contains a public key whose public exponent
+ * equals 65537.
+ */
+int
+crypto_pk_public_exponent_ok(crypto_pk_env_t *env)
+{
+  tor_assert(env);
+  tor_assert(env->key);
+
+  return BN_is_word(env->key->e, 65537);
+}
+
 /** Compare the public-key components of a and b.  Return -1 if a\<b, 0
  * if a==b, and 1 if a\>b.
  */
@@ -763,6 +779,17 @@ crypto_pk_keysize(crypto_pk_env_t *env)
   tor_assert(env->key);
 
   return (size_t) RSA_size(env->key);
+}
+
+/** Return the size of the public key modulus of <b>env</b>, in bits. */
+int
+crypto_pk_num_bits(crypto_pk_env_t *env)
+{
+  tor_assert(env);
+  tor_assert(env->key);
+  tor_assert(env->key->n);
+
+  return BN_num_bits(env->key->n);
 }
 
 /** Increase the reference count of <b>env</b>, and return it.
@@ -933,7 +960,7 @@ crypto_pk_public_checksig_digest(crypto_pk_env_t *env, const char *data,
     tor_free(buf);
     return -1;
   }
-  if (memcmp(buf, digest, DIGEST_LEN)) {
+  if (tor_memneq(buf, digest, DIGEST_LEN)) {
     log_warn(LD_CRYPTO, "Signature mismatched with digest.");
     tor_free(buf);
     return -1;
@@ -2122,13 +2149,14 @@ crypto_rand(char *to, size_t n)
 }
 
 /** Return a pseudorandom integer, chosen uniformly from the values
- * between 0 and <b>max</b>-1. */
+ * between 0 and <b>max</b>-1 inclusive.  <b>max</b> must be between 1 and
+ * INT_MAX+1, inclusive. */
 int
 crypto_rand_int(unsigned int max)
 {
   unsigned int val;
   unsigned int cutoff;
-  tor_assert(max < UINT_MAX);
+  tor_assert(max <= ((unsigned int)INT_MAX)+1);
   tor_assert(max > 0); /* don't div by 0 */
 
   /* We ignore any values that are >= 'cutoff,' to avoid biasing the

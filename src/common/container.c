@@ -210,13 +210,32 @@ smartlist_string_isin_case(const smartlist_t *sl, const char *element)
 int
 smartlist_string_num_isin(const smartlist_t *sl, int num)
 {
-  char buf[16];
+  char buf[32]; /* long enough for 64-bit int, and then some. */
   tor_snprintf(buf,sizeof(buf),"%d", num);
   return smartlist_string_isin(sl, buf);
 }
 
+/** Return true iff the two lists contain the same strings in the same
+ * order, or if they are both NULL. */
+int
+smartlist_strings_eq(const smartlist_t *sl1, const smartlist_t *sl2)
+{
+  if (sl1 == NULL)
+    return sl2 == NULL;
+  if (sl2 == NULL)
+    return 0;
+  if (smartlist_len(sl1) != smartlist_len(sl2))
+    return 0;
+  SMARTLIST_FOREACH(sl1, const char *, cp1, {
+      const char *cp2 = smartlist_get(sl2, cp1_sl_idx);
+      if (strcmp(cp1, cp2))
+        return 0;
+    });
+  return 1;
+}
+
 /** Return true iff <b>sl</b> has some element E such that
- * !memcmp(E,<b>element</b>,DIGEST_LEN)
+ * tor_memeq(E,<b>element</b>,DIGEST_LEN)
  */
 int
 smartlist_digest_isin(const smartlist_t *sl, const char *element)
@@ -224,7 +243,7 @@ smartlist_digest_isin(const smartlist_t *sl, const char *element)
   int i;
   if (!sl) return 0;
   for (i=0; i < sl->num_used; i++)
-    if (memcmp((const char*)sl->list[i],element,DIGEST_LEN)==0)
+    if (tor_memeq((const char*)sl->list[i],element,DIGEST_LEN))
       return 1;
   return 0;
 }
@@ -318,7 +337,8 @@ smartlist_insert(smartlist_t *sl, int idx, void *val)
 
 /**
  * Split a string <b>str</b> along all occurrences of <b>sep</b>,
- * adding the split strings, in order, to <b>sl</b>.
+ * appending the (newly allocated) split strings, in order, to
+ * <b>sl</b>.  Return the number of strings added to <b>sl</b>.
  *
  * If <b>flags</b>&amp;SPLIT_SKIP_SPACE is true, remove initial and
  * trailing space from each entry.
@@ -327,7 +347,7 @@ smartlist_insert(smartlist_t *sl, int idx, void *val)
  * If <b>flags</b>&amp;SPLIT_STRIP_SPACE is true, strip spaces from each
  * split string.
  *
- * If max>0, divide the string into no more than <b>max</b> pieces. If
+ * If <b>max</b>\>0, divide the string into no more than <b>max</b> pieces. If
  * <b>sep</b> is NULL, split on any sequence of horizontal space.
  */
 int
@@ -801,7 +821,7 @@ smartlist_pqueue_assert_ok(smartlist_t *sl,
 static int
 _compare_digests(const void **_a, const void **_b)
 {
-  return memcmp((const char*)*_a, (const char*)*_b, DIGEST_LEN);
+  return tor_memcmp((const char*)*_a, (const char*)*_b, DIGEST_LEN);
 }
 
 /** Sort the list of DIGEST_LEN-byte digests into ascending order. */
@@ -823,7 +843,7 @@ smartlist_uniq_digests(smartlist_t *sl)
 static int
 _compare_digests256(const void **_a, const void **_b)
 {
-  return memcmp((const char*)*_a, (const char*)*_b, DIGEST256_LEN);
+  return tor_memcmp((const char*)*_a, (const char*)*_b, DIGEST256_LEN);
 }
 
 /** Sort the list of DIGEST256_LEN-byte digests into ascending order. */
@@ -885,7 +905,7 @@ strmap_entry_hash(const strmap_entry_t *a)
 static INLINE int
 digestmap_entries_eq(const digestmap_entry_t *a, const digestmap_entry_t *b)
 {
-  return !memcmp(a->key, b->key, DIGEST_LEN);
+  return tor_memeq(a->key, b->key, DIGEST_LEN);
 }
 
 /** Helper: return a hash value for a digest_map_t. */

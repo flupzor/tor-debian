@@ -57,6 +57,7 @@ static int connection_exit_connect_dir(edge_connection_t *exitconn);
 static int address_is_in_virtual_range(const char *addr);
 static int consider_plaintext_ports(edge_connection_t *conn, uint16_t port);
 static void clear_trackexithost_mappings(const char *exitname);
+static int connection_ap_supports_optimistic_data(const edge_connection_t *);
 
 /** An AP stream has failed/finished. If it hasn't already sent back
  * a socks reply, send one now (based on endreason). Also set
@@ -154,10 +155,26 @@ connection_edge_process_inbuf(edge_connection_t *conn, int package_partial)
         return -1;
       }
       return 0;
+    case AP_CONN_STATE_CONNECT_WAIT:
+      if (connection_ap_supports_optimistic_data(conn)) {
+        log_info(LD_EDGE,
+                 "data from edge while in '%s' state. Sending it anyway. "
+                 "package_partial=%d, buflen=%ld",
+                 conn_state_to_string(conn->_base.type, conn->_base.state),
+                 package_partial,
+                 (long)connection_get_inbuf_len(TO_CONN(conn)));
+        if (connection_edge_package_raw_inbuf(conn, package_partial, NULL)<0) {
+          /* (We already sent an end cell if possible) */
+          connection_mark_for_close(TO_CONN(conn));
+          return -1;
+        }
+        return 0;
+      }
+      /* Fall through if the connection is on a circuit without optimistic
+       * data support. */
     case EXIT_CONN_STATE_CONNECTING:
     case AP_CONN_STATE_RENDDESC_WAIT:
     case AP_CONN_STATE_CIRCUIT_WAIT:
-    case AP_CONN_STATE_CONNECT_WAIT:
     case AP_CONN_STATE_RESOLVE_WAIT:
     case AP_CONN_STATE_CONTROLLER_WAIT:
       log_info(LD_EDGE,
@@ -408,6 +425,71 @@ connection_edge_finished_connecting(edge_connection_t *edge_conn)
   return connection_edge_process_inbuf(edge_conn, 1);
 }
 
+/** Common code to connection_(ap|exit)_about_to_close. */
+static void
+connection_edge_about_to_close(edge_connection_t *edge_conn)
+{
+  if (!edge_conn->edge_has_sent_end) {
+    connection_t *conn = TO_CONN(edge_conn);
+    log_warn(LD_BUG, "(Harmless.) Edge connection (marked at %s:%d) "
+             "hasn't sent end yet?",
+             conn->marked_for_close_file, conn->marked_for_close);
+    tor_fragile_assert();
+  }
+}
+
+/* Called when we're about to finally unlink and free an AP (client)
+ * connection: perform necessary accounting and cleanup */
+void
+connection_ap_about_to_close(edge_connection_t *edge_conn)
+{
+  circuit_t *circ;
+  connection_t *conn = TO_CONN(edge_conn);
+
+  if (edge_conn->socks_request->has_finished == 0) {
+    /* since conn gets removed right after this function finishes,
+     * there's no point trying to send back a reply at this point. */
+    log_warn(LD_BUG,"Closing stream (marked at %s:%d) without sending"
+             " back a socks reply.",
+             conn->marked_for_close_file, conn->marked_for_close);
+  }
+  if (!edge_conn->end_reason) {
+    log_warn(LD_BUG,"Closing stream (marked at %s:%d) without having"
+             " set end_reason.",
+             conn->marked_for_close_file, conn->marked_for_close);
+  }
+  if (edge_conn->dns_server_request) {
+    log_warn(LD_BUG,"Closing stream (marked at %s:%d) without having"
+             " replied to DNS request.",
+             conn->marked_for_close_file, conn->marked_for_close);
+    dnsserv_reject_request(edge_conn);
+  }
+  control_event_stream_bandwidth(edge_conn);
+  control_event_stream_status(edge_conn, STREAM_EVENT_CLOSED,
+                              edge_conn->end_reason);
+  circ = circuit_get_by_edge_conn(edge_conn);
+  if (circ)
+    circuit_detach_stream(circ, edge_conn);
+}
+
+/* Called when we're about to finally unlink and free an exit
+ * connection: perform necessary accounting and cleanup */
+void
+connection_exit_about_to_close(edge_connection_t *edge_conn)
+{
+  circuit_t *circ;
+  connection_t *conn = TO_CONN(edge_conn);
+
+  connection_edge_about_to_close(edge_conn);
+
+  circ = circuit_get_by_edge_conn(edge_conn);
+  if (circ)
+    circuit_detach_stream(circ, edge_conn);
+  if (conn->state == EXIT_CONN_STATE_RESOLVING) {
+    connection_dns_remove(edge_conn);
+  }
+}
+
 /** Define a schedule for how long to wait between retrying
  * application connections. Rather than waiting a fixed amount of
  * time between each retry, we wait 10 seconds each for the first
@@ -439,7 +521,7 @@ connection_ap_expire_beginning(void)
   edge_connection_t *conn;
   circuit_t *circ;
   time_t now = time(NULL);
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   int severity;
   int cutoff;
   int seconds_idle, seconds_since_born;
@@ -503,12 +585,12 @@ connection_ap_expire_beginning(void)
     }
     tor_assert(circ->purpose == CIRCUIT_PURPOSE_C_GENERAL);
     log_fn(cutoff < 15 ? LOG_INFO : severity, LD_APP,
-           "We tried for %d seconds to connect to '%s' using exit '%s'."
+           "We tried for %d seconds to connect to '%s' using exit %s."
            " Retrying on a new circuit.",
            seconds_idle,
            safe_str_client(conn->socks_request->address),
            conn->cpath_layer ?
-             conn->cpath_layer->extend_info->nickname : "*unnamed*");
+           extend_info_describe(conn->cpath_layer->extend_info): "*unnamed*");
     /* send an end down the circuit */
     connection_edge_end(conn, END_STREAM_REASON_TIMEOUT);
     /* un-mark it as ending, since we're going to reuse it */
@@ -577,7 +659,7 @@ connection_ap_fail_onehop(const char *failed_digest,
     if (!edge_conn->want_onehop)
       continue;
     if (hexdigest_to_digest(edge_conn->chosen_exit_name, digest) < 0 ||
-        memcmp(digest, failed_digest, DIGEST_LEN))
+        tor_memneq(digest, failed_digest, DIGEST_LEN))
       continue;
     if (tor_digest_is_zero(digest)) {
       /* we don't know the digest; have to compare addr:port */
@@ -657,6 +739,12 @@ connection_ap_detach_retriable(edge_connection_t *conn, origin_circuit_t *circ,
 {
   control_event_stream_status(conn, STREAM_EVENT_FAILED_RETRIABLE, reason);
   conn->_base.timestamp_lastread = time(NULL);
+
+  if (conn->pending_optimistic_data) {
+    generic_buffer_set_to_copy(&conn->sending_optimistic_data,
+                               conn->pending_optimistic_data);
+  }
+
   if (!get_options()->LeaveStreamsUnattached || conn->use_begindir) {
     /* If we're attaching streams ourself, or if this connection is
      * a tunneled directory connection, then just attach it. */
@@ -810,9 +898,10 @@ clear_trackexithost_mappings(const char *exitname)
 }
 
 /** Remove all TRACKEXIT mappings from the addressmap for which the target
- * host is unknown or no longer allowed. */
+ * host is unknown or no longer allowed, or for which the source address
+ * is no longer in trackexithosts. */
 void
-addressmap_clear_excluded_trackexithosts(or_options_t *options)
+addressmap_clear_excluded_trackexithosts(const or_options_t *options)
 {
   const routerset_t *allow_nodes = options->ExitNodes;
   const routerset_t *exclude_nodes = options->_ExcludeExitNodesUnion;
@@ -851,10 +940,54 @@ addressmap_clear_excluded_trackexithosts(or_options_t *options)
     tor_free(nodename);
     if (!node ||
         (allow_nodes && !routerset_contains_node(allow_nodes, node)) ||
-        routerset_contains_node(exclude_nodes, node)) {
+        routerset_contains_node(exclude_nodes, node) ||
+        !hostname_in_track_host_exits(options, address)) {
       /* We don't know this one, or we want to be rid of it. */
       addressmap_ent_remove(address, ent);
       MAP_DEL_CURRENT(address);
+    }
+  } STRMAP_FOREACH_END;
+}
+
+/** Remove all AUTOMAP mappings from the addressmap for which the
+ * source address no longer matches AutomapHostsSuffixes, which is
+ * no longer allowed by AutomapHostsOnResolve, or for which the
+ * target address is no longer in the virtual network. */
+void
+addressmap_clear_invalid_automaps(const or_options_t *options)
+{
+  int clear_all = !options->AutomapHostsOnResolve;
+  const smartlist_t *suffixes = options->AutomapHostsSuffixes;
+
+  if (!addressmap)
+    return;
+
+  if (!suffixes)
+    clear_all = 1; /* This should be impossible, but let's be sure. */
+
+  STRMAP_FOREACH_MODIFY(addressmap, src_address, addressmap_entry_t *, ent) {
+    int remove = clear_all;
+    if (ent->source != ADDRMAPSRC_AUTOMAP)
+      continue; /* not an automap mapping. */
+
+    if (!remove) {
+      int suffix_found = 0;
+      SMARTLIST_FOREACH(suffixes, const char *, suffix, {
+          if (!strcasecmpend(src_address, suffix)) {
+            suffix_found = 1;
+            break;
+          }
+      });
+      if (!suffix_found)
+        remove = 1;
+    }
+
+    if (!remove && ! address_is_in_virtual_range(ent->new_address))
+      remove = 1;
+
+    if (remove) {
+      addressmap_ent_remove(src_address, ent);
+      MAP_DEL_CURRENT(src_address);
     }
   } STRMAP_FOREACH_END;
 }
@@ -1370,7 +1503,7 @@ addressmap_register_virtual_address(int type, char *new_address)
   log_info(LD_APP, "Registering map from %s to %s", *addrp, new_address);
   if (vent_needs_to_be_added)
     strmap_set(virtaddress_reversemap, new_address, vent);
-  addressmap_register(*addrp, new_address, 2, ADDRMAPSRC_CONTROLLER);
+  addressmap_register(*addrp, new_address, 2, ADDRMAPSRC_AUTOMAP);
 
 #if 0
   {
@@ -1475,7 +1608,7 @@ addressmap_get_mappings(smartlist_t *sl, time_t min_expires,
 static int
 consider_plaintext_ports(edge_connection_t *conn, uint16_t port)
 {
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   int reject = smartlist_string_num_isin(options->RejectPlaintextPorts, port);
 
   if (smartlist_string_num_isin(options->WarnPlaintextPorts, port)) {
@@ -1512,7 +1645,7 @@ connection_ap_rewrite_and_attach_if_allowed(edge_connection_t *conn,
                                             origin_circuit_t *circ,
                                             crypt_path_t *cpath)
 {
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
 
   if (options->LeaveStreamsUnattached) {
     conn->_base.state = AP_CONN_STATE_CONTROLLER_WAIT;
@@ -1543,7 +1676,7 @@ connection_ap_handshake_rewrite_and_attach(edge_connection_t *conn,
 {
   socks_request_t *socks = conn->socks_request;
   hostname_type_t addresstype;
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   struct in_addr addr_tmp;
   /* We set this to true if this is an address we should automatically
    * remap to a local address in VirtualAddrNetwork */
@@ -1560,6 +1693,9 @@ connection_ap_handshake_rewrite_and_attach(edge_connection_t *conn,
   log_debug(LD_APP,"Client asked for %s:%d",
             safe_str_client(socks->address),
             socks->port);
+
+  if (! conn->original_dest_address)
+    conn->original_dest_address = tor_strdup(conn->socks_request->address);
 
   if (socks->command == SOCKS_COMMAND_RESOLVE &&
       !tor_inet_aton(socks->address, &addr_tmp) &&
@@ -1785,7 +1921,7 @@ connection_ap_handshake_rewrite_and_attach(edge_connection_t *conn,
         if (r) {
           log_info(LD_APP,
                    "Redirecting address %s to exit at enclave router %s",
-                   safe_str_client(socks->address), node_get_nickname(r));
+                   safe_str_client(socks->address), node_describe(r));
           /* use the hex digest, not nickname, in case there are two
              routers with this nickname */
           conn->chosen_exit_name =
@@ -2034,7 +2170,8 @@ connection_ap_handshake_process_socks(edge_connection_t *conn)
 {
   socks_request_t *socks;
   int sockshere;
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
+  int had_reply = 0;
 
   tor_assert(conn);
   tor_assert(conn->_base.type == CONN_TYPE_AP);
@@ -2052,22 +2189,19 @@ connection_ap_handshake_process_socks(edge_connection_t *conn)
     sockshere = fetch_from_buf_socks(conn->_base.inbuf, socks,
                                      options->TestSocks, options->SafeSocks);
   };
+
+  if (socks->replylen) {
+    had_reply = 1;
+    connection_write_to_buf((const char*)socks->reply, socks->replylen,
+                            TO_CONN(conn));
+    socks->replylen = 0;
+  }
+
   if (sockshere == 0) {
-    if (socks->replylen) {
-      connection_write_to_buf(socks->reply, socks->replylen, TO_CONN(conn));
-      /* zero it out so we can do another round of negotiation */
-      socks->replylen = 0;
-    } else {
-      log_debug(LD_APP,"socks handshake not all here yet.");
-    }
+    log_debug(LD_APP,"socks handshake not all here yet.");
     return 0;
   } else if (sockshere == -1) {
-    if (socks->replylen) { /* we should send reply back */
-      log_debug(LD_APP,"reply is already set for us. Using it.");
-      connection_ap_handshake_socks_reply(conn, socks->reply, socks->replylen,
-                                          END_STREAM_REASON_SOCKSPROTOCOL);
-
-    } else {
+    if (!had_reply) {
       log_warn(LD_APP,"Fetching socks handshake failed. Closing.");
       connection_ap_handshake_socks_reply(conn, NULL, 0,
                                           END_STREAM_REASON_SOCKSPROTOCOL);
@@ -2226,6 +2360,22 @@ get_unique_stream_id_by_circ(origin_circuit_t *circ)
   return test_stream_id;
 }
 
+/** Return true iff <b>conn</b> is linked to a circuit and configured to use
+ * an exit that supports optimistic data. */
+static int
+connection_ap_supports_optimistic_data(const edge_connection_t *conn)
+{
+  tor_assert(conn->_base.type == CONN_TYPE_AP);
+  /* We can only send optimistic data if we're connected to an open
+     general circuit. */
+  if (conn->on_circuit == NULL ||
+      conn->on_circuit->state != CIRCUIT_STATE_OPEN ||
+      conn->on_circuit->purpose != CIRCUIT_PURPOSE_C_GENERAL)
+    return 0;
+
+  return conn->may_use_optimistic_data;
+}
+
 /** Write a relay begin cell, using destaddr and destport from ap_conn's
  * socks_request field, and send it down circ.
  *
@@ -2287,6 +2437,21 @@ connection_ap_handshake_send_begin(edge_connection_t *ap_conn)
   log_info(LD_APP,"Address/port sent, ap socket %d, n_circ_id %d",
            ap_conn->_base.s, circ->_base.n_circ_id);
   control_event_stream_status(ap_conn, STREAM_EVENT_SENT_CONNECT, 0);
+
+  /* If there's queued-up data, send it now */
+  if ((connection_get_inbuf_len(TO_CONN(ap_conn)) ||
+       ap_conn->sending_optimistic_data) &&
+      connection_ap_supports_optimistic_data(ap_conn)) {
+    log_info(LD_APP, "Sending up to %ld + %ld bytes of queued-up data",
+             (long)connection_get_inbuf_len(TO_CONN(ap_conn)),
+             ap_conn->sending_optimistic_data ?
+                 (long)generic_buffer_len(ap_conn->sending_optimistic_data) :
+                 0);
+    if (connection_edge_package_raw_inbuf(ap_conn, 1, NULL) < 0) {
+      connection_mark_for_close(TO_CONN(ap_conn));
+    }
+  }
+
   return 0;
 }
 
@@ -2386,7 +2551,9 @@ connection_ap_handshake_send_resolve(edge_connection_t *ap_conn)
 edge_connection_t *
 connection_ap_make_link(connection_t *partner,
                         char *address, uint16_t port,
-                        const char *digest, int use_begindir, int want_onehop)
+                        const char *digest,
+                        int session_group, int isolation_flags,
+                        int use_begindir, int want_onehop)
 {
   edge_connection_t *conn;
 
@@ -2415,6 +2582,12 @@ connection_ap_make_link(connection_t *partner,
     base16_encode(conn->chosen_exit_name+1,HEX_DIGEST_LEN+1,
                   digest, DIGEST_LEN);
   }
+
+  /* Populate isolation fields. */
+  conn->socks_request->listener_type = CONN_TYPE_DIR_LISTENER;
+  conn->original_dest_address = tor_strdup(address);
+  conn->session_group = session_group;
+  conn->isolation_flags = isolation_flags;
 
   conn->_base.address = tor_strdup("(Tor_internal)");
   tor_addr_make_unspec(&conn->_base.addr);
@@ -2575,7 +2748,8 @@ connection_ap_handshake_socks_resolved(edge_connection_t *conn,
   }
   connection_ap_handshake_socks_reply(conn, buf, replylen,
           (answer_type == RESOLVED_TYPE_IPV4 ||
-           answer_type == RESOLVED_TYPE_IPV6) ?
+           answer_type == RESOLVED_TYPE_IPV6 ||
+           answer_type == RESOLVED_TYPE_HOSTNAME) ?
                                       0 : END_STREAM_REASON_RESOLVEFAILED);
 }
 
@@ -2658,7 +2832,7 @@ connection_exit_begin_conn(cell_t *cell, circuit_t *circ)
   char *address=NULL;
   uint16_t port;
   or_circuit_t *or_circ = NULL;
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
 
   assert_circuit_ok(circ);
   if (!CIRCUIT_IS_ORIGIN(circ))
@@ -3057,9 +3231,9 @@ connection_edge_is_rendezvous_stream(edge_connection_t *conn)
  * resolved.)
  */
 int
-connection_ap_can_use_exit(edge_connection_t *conn, const node_t *exit)
+connection_ap_can_use_exit(const edge_connection_t *conn, const node_t *exit)
 {
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
 
   tor_assert(conn);
   tor_assert(conn->_base.type == CONN_TYPE_AP);
@@ -3072,7 +3246,7 @@ connection_ap_can_use_exit(edge_connection_t *conn, const node_t *exit)
   if (conn->chosen_exit_name) {
     const node_t *chosen_exit =
       node_get_by_nickname(conn->chosen_exit_name, 1);
-    if (!chosen_exit || memcmp(chosen_exit->identity,
+    if (!chosen_exit || tor_memneq(chosen_exit->identity,
                                exit->identity, DIGEST_LEN)) {
       /* doesn't match */
 //      log_debug(LD_APP,"Requested node '%s', considering node '%s'. No.",
@@ -3084,11 +3258,13 @@ connection_ap_can_use_exit(edge_connection_t *conn, const node_t *exit)
   if (conn->socks_request->command == SOCKS_COMMAND_CONNECT &&
       !conn->use_begindir) {
     struct in_addr in;
-    uint32_t addr = 0;
+    tor_addr_t addr, *addrp = NULL;
     addr_policy_result_t r;
-    if (tor_inet_aton(conn->socks_request->address, &in))
-      addr = ntohl(in.s_addr);
-    r = compare_addr_to_node_policy(addr, conn->socks_request->port, exit);
+    if (tor_inet_aton(conn->socks_request->address, &in)) {
+      tor_addr_from_in(&addr, &in);
+      addrp = &addr;
+    }
+    r = compare_tor_addr_to_node_policy(addrp, conn->socks_request->port,exit);
     if (r == ADDR_POLICY_REJECTED)
       return 0; /* We know the address, and the exit policy rejects it. */
     if (r == ADDR_POLICY_PROBABLY_REJECTED && !conn->chosen_exit_name)
@@ -3100,8 +3276,7 @@ connection_ap_can_use_exit(edge_connection_t *conn, const node_t *exit)
     if (!conn->chosen_exit_name && node_exit_policy_rejects_all(exit))
       return 0;
   }
-  if (options->_ExcludeExitNodesUnion &&
-      routerset_contains_node(options->_ExcludeExitNodesUnion, exit)) {
+  if (routerset_contains_node(options->_ExcludeExitNodesUnion, exit)) {
     /* Not a suitable exit. Refuse it. */
     return 0;
   }
@@ -3154,5 +3329,207 @@ parse_extended_hostname(char *address, int allowdotexit)
     /* otherwise, return to previous state and return 0 */
     *s = '.';
     return BAD_HOSTNAME;
+}
+
+/** Return true iff the (possibly NULL) <b>alen</b>-byte chunk of memory at
+ * <b>a</b> is equal to the (possibly NULL) <b>blen</b>-byte chunk of memory
+ * at <b>b</b>. */
+static int
+memeq_opt(const char *a, size_t alen, const char *b, size_t blen)
+{
+  if (a == NULL) {
+    return (b == NULL);
+  } else if (b == NULL) {
+    return 0;
+  } else if (alen != blen) {
+    return 0;
+  } else {
+    return tor_memeq(a, b, alen);
+  }
+}
+
+/**
+ * Return true iff none of the isolation flags and fields in <b>conn</b>
+ * should prevent it from being attached to <b>circ</b>.
+ */
+int
+connection_edge_compatible_with_circuit(const edge_connection_t *conn,
+                                        const origin_circuit_t *circ)
+{
+  const uint8_t iso = conn->isolation_flags;
+  const socks_request_t *sr = conn->socks_request;
+
+  /* If circ has never been used for an isolated connection, we can
+   * totally use it for this one. */
+  if (!circ->isolation_values_set)
+    return 1;
+
+  /* If circ has been used for connections having more than one value
+   * for some field f, it will have the corresponding bit set in
+   * isolation_flags_mixed.  If isolation_flags_mixed has any bits
+   * in common with iso, then conn must be isolated from at least
+   * one stream that has been attached to circ. */
+  if ((iso & circ->isolation_flags_mixed) != 0) {
+    /* For at least one field where conn is isolated, the circuit
+     * already has mixed streams. */
+    return 0;
+  }
+
+  if (! conn->original_dest_address) {
+    log_warn(LD_BUG, "Reached connection_edge_compatible_with_circuit without "
+             "having set conn->original_dest_address");
+    ((edge_connection_t*)conn)->original_dest_address =
+      tor_strdup(conn->socks_request->address);
+  }
+
+  if ((iso & ISO_STREAM) &&
+      (circ->associated_isolated_stream_global_id !=
+       TO_CONN(conn)->global_identifier))
+    return 0;
+
+  if ((iso & ISO_DESTPORT) && conn->socks_request->port != circ->dest_port)
+    return 0;
+  if ((iso & ISO_DESTADDR) &&
+      strcasecmp(conn->original_dest_address, circ->dest_address))
+    return 0;
+  if ((iso & ISO_SOCKSAUTH) &&
+      (! memeq_opt(sr->username, sr->usernamelen,
+                   circ->socks_username, circ->socks_username_len) ||
+       ! memeq_opt(sr->password, sr->passwordlen,
+                   circ->socks_password, circ->socks_password_len)))
+    return 0;
+  if ((iso & ISO_CLIENTPROTO) &&
+      (conn->socks_request->listener_type != circ->client_proto_type ||
+       conn->socks_request->socks_version != circ->client_proto_socksver))
+    return 0;
+  if ((iso & ISO_CLIENTADDR) &&
+      !tor_addr_eq(&TO_CONN(conn)->addr, &circ->client_addr))
+    return 0;
+  if ((iso & ISO_SESSIONGRP) && conn->session_group != circ->session_group)
+    return 0;
+  if ((iso & ISO_NYM_EPOCH) && conn->nym_epoch != circ->nym_epoch)
+    return 0;
+
+  return 1;
+}
+
+/**
+ * If <b>dry_run</b> is false, update <b>circ</b>'s isolation flags and fields
+ * to reflect having had <b>conn</b> attached to it, and return 0.  Otherwise,
+ * if <b>dry_run</b> is true, then make no changes to <b>circ</b>, and return
+ * a bitfield of isolation flags that we would have to set in
+ * isolation_flags_mixed to add <b>conn</b> to <b>circ</b>, or -1 if
+ * <b>circ</b> has had no streams attached to it.
+ */
+int
+connection_edge_update_circuit_isolation(const edge_connection_t *conn,
+                                         origin_circuit_t *circ,
+                                         int dry_run)
+{
+  const socks_request_t *sr = conn->socks_request;
+  if (! conn->original_dest_address) {
+    log_warn(LD_BUG, "Reached connection_update_circuit_isolation without "
+             "having set conn->original_dest_address");
+    ((edge_connection_t*)conn)->original_dest_address =
+      tor_strdup(conn->socks_request->address);
+  }
+
+  if (!circ->isolation_values_set) {
+    if (dry_run)
+      return -1;
+    circ->associated_isolated_stream_global_id =
+      TO_CONN(conn)->global_identifier;
+    circ->dest_port = conn->socks_request->port;
+    circ->dest_address = tor_strdup(conn->original_dest_address);
+    circ->client_proto_type = conn->socks_request->listener_type;
+    circ->client_proto_socksver = conn->socks_request->socks_version;
+    tor_addr_copy(&circ->client_addr, &TO_CONN(conn)->addr);
+    circ->session_group = conn->session_group;
+    circ->nym_epoch = conn->nym_epoch;
+    circ->socks_username = sr->username ?
+      tor_memdup(sr->username, sr->usernamelen) : NULL;
+    circ->socks_password = sr->password ?
+      tor_memdup(sr->password, sr->passwordlen) : NULL;
+    circ->socks_username_len = sr->usernamelen;
+    circ->socks_password_len = sr->passwordlen;
+
+    circ->isolation_values_set = 1;
+    return 0;
+  } else {
+    uint8_t mixed = 0;
+    if (conn->socks_request->port != circ->dest_port)
+      mixed |= ISO_DESTPORT;
+    if (strcasecmp(conn->original_dest_address, circ->dest_address))
+      mixed |= ISO_DESTADDR;
+    if (!memeq_opt(sr->username, sr->usernamelen,
+                   circ->socks_username, circ->socks_username_len) ||
+        !memeq_opt(sr->password, sr->passwordlen,
+                   circ->socks_password, circ->socks_password_len))
+      mixed |= ISO_SOCKSAUTH;
+    if ((conn->socks_request->listener_type != circ->client_proto_type ||
+         conn->socks_request->socks_version != circ->client_proto_socksver))
+      mixed |= ISO_CLIENTPROTO;
+    if (!tor_addr_eq(&TO_CONN(conn)->addr, &circ->client_addr))
+      mixed |= ISO_CLIENTADDR;
+    if (conn->session_group != circ->session_group)
+      mixed |= ISO_SESSIONGRP;
+    if (conn->nym_epoch != circ->nym_epoch)
+      mixed |= ISO_NYM_EPOCH;
+
+    if (dry_run)
+      return mixed;
+
+    if ((mixed & conn->isolation_flags) != 0) {
+      log_warn(LD_BUG, "Updating a circuit with seemingly incompatible "
+               "isolation flags.");
+    }
+    circ->isolation_flags_mixed |= mixed;
+    return 0;
+  }
+}
+
+/**
+ * Clear the isolation settings on <b>circ</b>.
+ *
+ * This only works on an open circuit that has never had a stream attached to
+ * it, and whose isolation settings are hypothetical.  (We set hypothetical
+ * isolation settings on circuits as we're launching them, so that we
+ * know whether they can handle more streams or whether we need to launch
+ * even more circuits.  Once the circuit is open, if it turns out that
+ * we no longer have any streams to attach to it, we clear the isolation flags
+ * and data so that other streams can have a chance.)
+ */
+void
+circuit_clear_isolation(origin_circuit_t *circ)
+{
+  if (circ->isolation_any_streams_attached) {
+    log_warn(LD_BUG, "Tried to clear the isolation status of a dirty circuit");
+    return;
+  }
+  if (TO_CIRCUIT(circ)->state != CIRCUIT_STATE_OPEN) {
+    log_warn(LD_BUG, "Tried to clear the isolation status of a non-open "
+             "circuit");
+    return;
+  }
+
+  circ->isolation_values_set = 0;
+  circ->isolation_flags_mixed = 0;
+  circ->associated_isolated_stream_global_id = 0;
+  circ->client_proto_type = 0;
+  circ->client_proto_socksver = 0;
+  circ->dest_port = 0;
+  tor_addr_make_unspec(&circ->client_addr);
+  tor_free(circ->dest_address);
+  circ->session_group = -1;
+  circ->nym_epoch = 0;
+  if (circ->socks_username) {
+    memset(circ->socks_username, 0x11, circ->socks_username_len);
+    tor_free(circ->socks_username);
+  }
+  if (circ->socks_password) {
+    memset(circ->socks_password, 0x05, circ->socks_password_len);
+    tor_free(circ->socks_password);
+  }
+  circ->socks_username_len = circ->socks_password_len = 0;
 }
 

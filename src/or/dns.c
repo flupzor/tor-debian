@@ -276,7 +276,7 @@ dns_init(void)
 int
 dns_reset(void)
 {
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   if (! server_mode(options)) {
 
     if (!the_evdns_base) {
@@ -1026,7 +1026,7 @@ add_answer_to_cache(const char *address, uint8_t is_reverse, uint32_t addr,
 static INLINE int
 is_test_address(const char *address)
 {
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   return options->ServerDNSTestAddresses &&
     smartlist_string_isin_case(options->ServerDNSTestAddresses, address);
 }
@@ -1177,7 +1177,7 @@ evdns_err_is_transient(int err)
 static int
 configure_nameservers(int force)
 {
-  or_options_t *options;
+  const or_options_t *options;
   const char *conf_fname;
   struct stat st;
   int r;
@@ -1295,14 +1295,17 @@ configure_nameservers(int force)
   nameservers_configured = 1;
   if (nameserver_config_failed) {
     nameserver_config_failed = 0;
-    mark_my_descriptor_dirty();
+    /* XXX the three calls to republish the descriptor might be producing
+     * descriptors that are only cosmetically different, especially on
+     * non-exit relays! -RD */
+    mark_my_descriptor_dirty("dns resolvers back");
   }
   return 0;
  err:
   nameservers_configured = 0;
   if (! nameserver_config_failed) {
     nameserver_config_failed = 1;
-    mark_my_descriptor_dirty();
+    mark_my_descriptor_dirty("dns resolvers failed");
   }
   return -1;
 }
@@ -1522,7 +1525,7 @@ add_wildcarded_test_address(const char *address)
         "broken.", address, n);
     if (!dns_is_completely_invalid) {
       dns_is_completely_invalid = 1;
-      mark_my_descriptor_dirty();
+      mark_my_descriptor_dirty("dns hijacking confirmed");
     }
     if (!dns_wildcarded_test_address_notice_given)
       control_event_server_status(LOG_WARN, "DNS_USELESS");
@@ -1592,7 +1595,7 @@ launch_wildcard_check(int min_len, int max_len, const char *suffix)
 static void
 launch_test_addresses(int fd, short event, void *args)
 {
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   struct evdns_request *req;
   (void)fd;
   (void)event;

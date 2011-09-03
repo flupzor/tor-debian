@@ -276,8 +276,8 @@ command_process_create_cell(cell_t *cell, or_connection_t *conn)
     if (node) {
       char *p = esc_for_log(node_get_platform(node));
       log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
-             "Details: nickname \"%s\", platform %s.",
-             node_get_nickname(node), p);
+             "Details: router %s, platform %s.",
+             node_describe(node), p);
       tor_free(p);
     }
     return;
@@ -649,6 +649,7 @@ command_process_netinfo_cell(cell_t *cell, or_connection_t *conn)
 
   /* XXX maybe act on my_apparent_addr, if the source is sufficiently
    * trustworthy. */
+  (void)my_apparent_addr;
 
   if (connection_or_set_state_open(conn)<0)
     connection_mark_for_close(TO_CONN(conn));

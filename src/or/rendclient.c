@@ -21,11 +21,22 @@
 #include "rendclient.h"
 #include "rendcommon.h"
 #include "rephist.h"
+#include "router.h"
 #include "routerlist.h"
 
 static extend_info_t *rend_client_get_random_intro_impl(
                           const rend_cache_entry_t *rend_query,
                           const int strict, const int warnings);
+
+/** Purge all potentially remotely-detectable state held in the hidden
+ * service client code.  Called on SIGNAL NEWNYM. */
+void
+rend_client_purge_state(void)
+{
+  rend_cache_purge();
+  rend_client_cancel_descriptor_fetches();
+  rend_client_purge_last_hid_serv_requests();
+}
 
 /** Called when we've established a circuit to an introduction point:
  * send the introduction request. */
@@ -91,12 +102,13 @@ rend_client_reextend_intro_circuit(origin_circuit_t *circ)
   if (circ->remaining_relay_early_cells) {
     log_info(LD_REND,
              "Re-extending circ %d, this time to %s.",
-             circ->_base.n_circ_id, extend_info->nickname);
+             circ->_base.n_circ_id,
+             safe_str_client(extend_info_describe(extend_info)));
     result = circuit_extend_to_new_exit(circ, extend_info);
   } else {
     log_info(LD_REND,
              "Building a new introduction circuit, this time to %s.",
-             extend_info->nickname);
+             safe_str_client(extend_info_describe(extend_info)));
     circuit_mark_for_close(TO_CIRCUIT(circ), END_CIRC_REASON_FINISHED);
     if (!circuit_launch_by_extend_info(CIRCUIT_PURPOSE_C_INTRODUCING,
                                        extend_info,
@@ -133,6 +145,8 @@ rend_client_send_introduction(origin_circuit_t *introcirc,
   tor_assert(rendcirc->rend_data);
   tor_assert(!rend_cmp_service_ids(introcirc->rend_data->onion_address,
                                    rendcirc->rend_data->onion_address));
+  tor_assert(!(introcirc->build_state->onehop_tunnel));
+  tor_assert(!(rendcirc->build_state->onehop_tunnel));
 
   if (rend_cache_lookup_entry(introcirc->rend_data->onion_address, -1,
                               &entry) < 1) {
@@ -158,7 +172,7 @@ rend_client_send_introduction(origin_circuit_t *introcirc,
   intro_key = NULL;
   SMARTLIST_FOREACH(entry->parsed->intro_nodes, rend_intro_point_t *,
                     intro, {
-    if (!memcmp(introcirc->build_state->chosen_exit->identity_digest,
+    if (tor_memeq(introcirc->build_state->chosen_exit->identity_digest,
                 intro->extend_info->identity_digest, DIGEST_LEN)) {
       intro_key = intro->intro_key;
       break;
@@ -169,7 +183,8 @@ rend_client_send_introduction(origin_circuit_t *introcirc,
              "have a v2 rend desc with %d intro points. "
              "Trying a different intro point...",
              safe_str_client(introcirc->rend_data->onion_address),
-             introcirc->build_state->chosen_exit->nickname,
+             safe_str_client(extend_info_describe(
+                                   introcirc->build_state->chosen_exit)),
              smartlist_len(entry->parsed->intro_nodes));
 
     if (rend_client_reextend_intro_circuit(introcirc)) {
@@ -276,9 +291,13 @@ rend_client_send_introduction(origin_circuit_t *introcirc,
 
   /* Now, we wait for an ACK or NAK on this circuit. */
   introcirc->_base.purpose = CIRCUIT_PURPOSE_C_INTRODUCE_ACK_WAIT;
+  /* Set timestamp_dirty, because circuit_expire_building expects it
+   * to specify when a circuit entered the _C_INTRODUCE_ACK_WAIT
+   * state. */
+  introcirc->_base.timestamp_dirty = time(NULL);
 
   return 0;
-perm_err:
+ perm_err:
   if (!introcirc->_base.marked_for_close)
     circuit_mark_for_close(TO_CIRCUIT(introcirc), END_CIRC_REASON_INTERNAL);
   circuit_mark_for_close(TO_CIRCUIT(rendcirc), END_CIRC_REASON_INTERNAL);
@@ -318,6 +337,7 @@ rend_client_introduction_acked(origin_circuit_t *circ,
   }
 
   tor_assert(circ->build_state->chosen_exit);
+  tor_assert(!(circ->build_state->onehop_tunnel));
   tor_assert(circ->rend_data);
 
   if (request_len == 0) {
@@ -329,7 +349,12 @@ rend_client_introduction_acked(origin_circuit_t *circ,
     rendcirc = circuit_get_by_rend_query_and_purpose(
                circ->rend_data->onion_address, CIRCUIT_PURPOSE_C_REND_READY);
     if (rendcirc) { /* remember the ack */
+      tor_assert(!(rendcirc->build_state->onehop_tunnel));
       rendcirc->_base.purpose = CIRCUIT_PURPOSE_C_REND_READY_INTRO_ACKED;
+      /* Set timestamp_dirty, because circuit_expire_building expects
+       * it to specify when a circuit entered the
+       * _C_REND_READY_INTRO_ACKED state. */
+      rendcirc->_base.timestamp_dirty = time(NULL);
     } else {
       log_info(LD_REND,"...Found no rend circ. Dropping on the floor.");
     }
@@ -344,8 +369,8 @@ rend_client_introduction_acked(origin_circuit_t *circ,
      * If none remain, refetch the service descriptor.
      */
     log_info(LD_REND, "Got nack for %s from %s...",
-             safe_str_client(circ->rend_data->onion_address),
-             circ->build_state->chosen_exit->nickname);
+        safe_str_client(circ->rend_data->onion_address),
+        safe_str_client(extend_info_describe(circ->build_state->chosen_exit)));
     if (rend_client_remove_intro_point(circ->build_state->chosen_exit,
                                        circ->rend_data) > 0) {
       /* There are introduction points left. Re-extend the circuit to
@@ -367,7 +392,17 @@ rend_client_introduction_acked(origin_circuit_t *circ,
  * certain queries; keys are strings consisting of base32-encoded
  * hidden service directory identities and base32-encoded descriptor IDs;
  * values are pointers to timestamps of the last requests. */
-static strmap_t *last_hid_serv_requests = NULL;
+static strmap_t *last_hid_serv_requests_ = NULL;
+
+/** Returns last_hid_serv_requests_, initializing it to a new strmap if
+ * necessary. */
+static strmap_t *
+get_last_hid_serv_requests(void)
+{
+  if (!last_hid_serv_requests_)
+    last_hid_serv_requests_ = strmap_new();
+  return last_hid_serv_requests_;
+}
 
 /** Look up the last request time to hidden service directory <b>hs_dir</b>
  * for descriptor ID <b>desc_id_base32</b>. If <b>set</b> is non-zero,
@@ -381,6 +416,7 @@ lookup_last_hid_serv_request(routerstatus_t *hs_dir,
   char hsdir_id_base32[REND_DESC_ID_V2_LEN_BASE32 + 1];
   char hsdir_desc_comb_id[2 * REND_DESC_ID_V2_LEN_BASE32 + 1];
   time_t *last_request_ptr;
+  strmap_t *last_hid_serv_requests = get_last_hid_serv_requests();
   base32_encode(hsdir_id_base32, sizeof(hsdir_id_base32),
                 hs_dir->identity_digest, DIGEST_LEN);
   tor_snprintf(hsdir_desc_comb_id, sizeof(hsdir_desc_comb_id), "%s%s",
@@ -406,8 +442,7 @@ directory_clean_last_hid_serv_requests(time_t now)
 {
   strmap_iter_t *iter;
   time_t cutoff = now - REND_HID_SERV_DIR_REQUERY_PERIOD;
-  if (!last_hid_serv_requests)
-    last_hid_serv_requests = strmap_new();
+  strmap_t *last_hid_serv_requests = get_last_hid_serv_requests();
   for (iter = strmap_iter_init(last_hid_serv_requests);
        !strmap_iter_done(iter); ) {
     const char *key;
@@ -421,6 +456,26 @@ directory_clean_last_hid_serv_requests(time_t now)
     } else {
       iter = strmap_iter_next(last_hid_serv_requests, iter);
     }
+  }
+}
+
+/** Purge the history of request times to hidden service directories,
+ * so that future lookups of an HS descriptor will not fail because we
+ * accessed all of the HSDir relays responsible for the descriptor
+ * recently. */
+void
+rend_client_purge_last_hid_serv_requests(void)
+{
+  /* Don't create the table if it doesn't exist yet (and it may very
+   * well not exist if the user hasn't accessed any HSes)... */
+  strmap_t *old_last_hid_serv_requests = last_hid_serv_requests_;
+  /* ... and let get_last_hid_serv_requests re-create it for us if
+   * necessary. */
+  last_hid_serv_requests_ = NULL;
+
+  if (old_last_hid_serv_requests != NULL) {
+    log_info(LD_REND, "Purging client last-HS-desc-request-time table");
+    strmap_free(old_last_hid_serv_requests, _tor_free);
   }
 }
 
@@ -455,10 +510,11 @@ directory_get_from_hs_dir(const char *desc_id, const rend_data_t *rend_query)
   directory_clean_last_hid_serv_requests(now);
 
   SMARTLIST_FOREACH(responsible_dirs, routerstatus_t *, dir, {
-    if (lookup_last_hid_serv_request(dir, desc_id_base32, 0, 0) +
-            REND_HID_SERV_DIR_REQUERY_PERIOD >= now ||
-        !router_get_by_id_digest(dir->identity_digest))
-      SMARTLIST_DEL_CURRENT(responsible_dirs, dir);
+      time_t last = lookup_last_hid_serv_request(dir, desc_id_base32, 0, 0);
+      const node_t *node = node_get_by_id(dir->identity_digest);
+      if (last + REND_HID_SERV_DIR_REQUERY_PERIOD >= now ||
+          !node || !node_has_descriptor(node))
+        SMARTLIST_DEL_CURRENT(responsible_dirs, dir);
   });
 
   hs_dir = smartlist_choose(responsible_dirs);
@@ -500,12 +556,12 @@ directory_get_from_hs_dir(const char *desc_id, const rend_data_t *rend_query)
   log_info(LD_REND, "Sending fetch request for v2 descriptor for "
                     "service '%s' with descriptor ID '%s', auth type %d, "
                     "and descriptor cookie '%s' to hidden service "
-                    "directory '%s' on port %d.",
+                    "directory %s",
            rend_query->onion_address, desc_id_base32,
            rend_query->auth_type,
            (rend_query->auth_type == REND_NO_AUTH ? "[none]" :
-           escaped_safe_str_client(descriptor_cookie_base64)),
-           hs_dir->nickname, hs_dir->dir_port);
+            escaped_safe_str_client(descriptor_cookie_base64)),
+           routerstatus_describe(hs_dir));
   return 1;
 }
 
@@ -629,7 +685,7 @@ rend_client_remove_intro_point(extend_info_t *failed_intro,
 
   for (i = 0; i < smartlist_len(ent->parsed->intro_nodes); i++) {
     rend_intro_point_t *intro = smartlist_get(ent->parsed->intro_nodes, i);
-    if (!memcmp(failed_intro->identity_digest,
+    if (tor_memeq(failed_intro->identity_digest,
                 intro->extend_info->identity_digest, DIGEST_LEN)) {
       rend_intro_point_free(intro);
       smartlist_del(ent->parsed->intro_nodes, i);
@@ -677,6 +733,9 @@ rend_client_rendezvous_acked(origin_circuit_t *circ, const uint8_t *request,
   log_info(LD_REND,"Got rendezvous ack. This circuit is now ready for "
            "rendezvous.");
   circ->_base.purpose = CIRCUIT_PURPOSE_C_REND_READY;
+  /* Set timestamp_dirty, because circuit_expire_building expects it
+   * to specify when a circuit entered the _C_REND_READY state. */
+  circ->_base.timestamp_dirty = time(NULL);
   /* XXXX023 This is a pretty brute-force approach. It'd be better to
    * attach only the connections that are waiting on this circuit, rather
    * than trying to attach them all. See comments bug 743. */
@@ -728,7 +787,7 @@ rend_client_receive_rendezvous(origin_circuit_t *circ, const uint8_t *request,
     goto err;
 
   /* Check whether the digest is right... */
-  if (memcmp(keys, request+DH_KEY_LEN, DIGEST_LEN)) {
+  if (tor_memneq(keys, request+DH_KEY_LEN, DIGEST_LEN)) {
     log_warn(LD_PROTOCOL, "Incorrect digest of key material.");
     goto err;
   }
@@ -849,7 +908,7 @@ rend_client_get_random_intro_impl(const rend_cache_entry_t *entry,
   int i;
 
   rend_intro_point_t *intro;
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   smartlist_t *usable_nodes;
   int n_excluded = 0;
 
@@ -890,7 +949,7 @@ rend_client_get_random_intro_impl(const rend_cache_entry_t *entry,
     intro->extend_info = extend_info_from_node(node);
   }
   /* Check if we should refuse to talk to this router. */
-  if (options->ExcludeNodes && strict &&
+  if (strict &&
       routerset_contains_extendinfo(options->ExcludeNodes,
                                     intro->extend_info)) {
     n_excluded++;
@@ -956,7 +1015,8 @@ rend_service_authorization_free_all(void)
  * service and add it to the local map of hidden service authorizations.
  * Return 0 for success and -1 for failure. */
 int
-rend_parse_service_authorization(or_options_t *options, int validate_only)
+rend_parse_service_authorization(const or_options_t *options,
+                                 int validate_only)
 {
   config_line_t *line;
   int res = -1;

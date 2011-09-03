@@ -8,7 +8,7 @@ AM_CPPFLAGS = -DSHARE_DATADIR="\"$(datadir)\"" \
 	-I"$(top_srcdir)/src/or"
 
 # -L flags need to go in LDFLAGS. -l flags need to go in LDADD.
-# This seems to matter nowhere but on windows, but I assure you that it
+# This seems to matter nowhere but on Windows, but I assure you that it
 # matters a lot there, and is quite hard to debug if you forget to do it.
 
 test_SOURCES = \
@@ -22,18 +22,12 @@ test_SOURCES = \
 	test_util.c \
 	tinytest.c
 
-if USE_BUFFEREVENTS
-levent_openssl_lib = -levent_openssl
-else
-levent_openssl_lib =
-endif
-
 test_LDFLAGS = @TOR_LDFLAGS_zlib@ @TOR_LDFLAGS_openssl@ \
         @TOR_LDFLAGS_libevent@
 test_LDADD = ../or/libtor.a ../common/libor.a ../common/libor-crypto.a \
 	../common/libor-event.a \
 	@TOR_ZLIB_LIBS@ -lm @TOR_LIBEVENT_LIBS@ @TOR_OPENSSL_LIBS@ \
-	@TOR_LIB_WS32@ @TOR_LIB_GDI@ $(levent_openssl_lib)
+	@TOR_LIB_WS32@ @TOR_LIB_GDI@
 
 noinst_HEADERS = \
 	tinytest.h \

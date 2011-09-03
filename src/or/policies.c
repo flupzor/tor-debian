@@ -46,7 +46,7 @@ typedef struct policy_summary_item_t {
     uint16_t prt_max; /**< Highest port number to accept/reject. */
     uint64_t reject_count; /**< Number of IP-Addresses that are rejected to
                                 this port range. */
-    int accepted:1; /** Has this port already been accepted */
+    unsigned int accepted:1; /** Has this port already been accepted */
 } policy_summary_item_t;
 
 /** Private networks.  This list is used in two places, once to expand the
@@ -83,15 +83,15 @@ policy_expand_private(smartlist_t **policy)
        continue;
      }
      for (i = 0; private_nets[i]; ++i) {
-       addr_policy_t policy;
-       memcpy(&policy, p, sizeof(addr_policy_t));
-       policy.is_private = 0;
-       policy.is_canonical = 0;
-       if (tor_addr_parse_mask_ports(private_nets[i], &policy.addr,
-                                  &policy.maskbits, &port_min, &port_max)<0) {
+       addr_policy_t newpolicy;
+       memcpy(&newpolicy, p, sizeof(addr_policy_t));
+       newpolicy.is_private = 0;
+       newpolicy.is_canonical = 0;
+       if (tor_addr_parse_mask_ports(private_nets[i], &newpolicy.addr,
+                               &newpolicy.maskbits, &port_min, &port_max)<0) {
          tor_assert(0);
        }
-       smartlist_add(tmp, addr_policy_get_canonical_entry(&policy));
+       smartlist_add(tmp, addr_policy_get_canonical_entry(&newpolicy));
      }
      addr_policy_free(p);
   });
@@ -164,7 +164,7 @@ parse_addr_policy(config_line_t *cfg, smartlist_t **dest,
 static int
 parse_reachable_addresses(void)
 {
-  or_options_t *options = get_options();
+  const or_options_t *options = get_options();
   int ret = 0;
 
   if (options->ReachableDirAddresses &&
@@ -356,7 +356,7 @@ authdir_policy_badexit_address(uint32_t addr, uint16_t port)
  * options in <b>options</b>, return -1 and set <b>msg</b> to a newly
  * allocated description of the error. Else return 0. */
 int
-validate_addr_policies(or_options_t *options, char **msg)
+validate_addr_policies(const or_options_t *options, char **msg)
 {
   /* XXXX Maybe merge this into parse_policies_from_options, to make sure
    * that the two can't go out of sync. */
@@ -440,7 +440,7 @@ load_policy_from_option(config_line_t *config, smartlist_t **policy,
 /** Set all policies based on <b>options</b>, which should have been validated
  * first by validate_addr_policies. */
 int
-policies_parse_from_options(or_options_t *options)
+policies_parse_from_options(const or_options_t *options)
 {
   int ret = 0;
   if (load_policy_from_option(options->SocksPolicy, &socks_policy, -1) < 0)
@@ -570,18 +570,6 @@ addr_policy_get_canonical_entry(addr_policy_t *e)
   return found->policy;
 }
 
-/** As compare_tor_addr_to_addr_policy, but instead of a tor_addr_t, takes
- * in host order. */
-addr_policy_result_t
-compare_addr_to_addr_policy(uint32_t addr, uint16_t port,
-                            const smartlist_t *policy)
-{
-  /*XXXX deprecate this function when possible. */
-  tor_addr_t a;
-  tor_addr_from_ipv4h(&a, addr);
-  return compare_tor_addr_to_addr_policy(&a, port, policy);
-}
-
 /** Helper for compare_tor_addr_to_addr_policy.  Implements the case where
  * addr and port are both known. */
 static addr_policy_result_t
@@ -701,7 +689,7 @@ compare_tor_addr_to_addr_policy(const tor_addr_t *addr, uint16_t port,
   if (!policy) {
     /* no policy? accept all. */
     return ADDR_POLICY_ACCEPTED;
-  } else if (tor_addr_is_null(addr)) {
+  } else if (addr == NULL || tor_addr_is_null(addr)) {
     tor_assert(port != 0);
     return compare_unknown_tor_addr_to_addr_policy(port, policy);
   } else if (port == 0) {
@@ -1427,8 +1415,10 @@ compare_tor_addr_to_short_policy(const tor_addr_t *addr, uint16_t port,
 
   tor_assert(port != 0);
 
+  if (addr && tor_addr_is_null(addr))
+    addr = NULL; /* Unspec means 'no address at all,' in this context. */
+
   if (addr && (tor_addr_is_internal(addr, 0) ||
-               tor_addr_is_null(addr) ||
                tor_addr_is_loopback(addr)))
     return ADDR_POLICY_REJECTED;
 
@@ -1471,17 +1461,6 @@ short_policy_is_reject_star(const short_policy_t *policy)
  * <b>node</b>.  See compare_tor_addr_to_addr_policy for details on addr/port
  * interpretation. */
 addr_policy_result_t
-compare_addr_to_node_policy(uint32_t addr, uint16_t port, const node_t *node)
-{
-  tor_addr_t a;
-  tor_addr_from_ipv4h(&a, addr);
-  return compare_tor_addr_to_node_policy(&a, port, node);
-}
-
-/** Decides whether addr:port is probably or definitely accepted or rejcted by
- * <b>node</b>.  See compare_tor_addr_to_addr_policy for details on addr/port
- * interpretation. */
-addr_policy_result_t
 compare_tor_addr_to_node_policy(const tor_addr_t *addr, uint16_t port,
                                 const node_t *node)
 {
@@ -1490,7 +1469,7 @@ compare_tor_addr_to_node_policy(const tor_addr_t *addr, uint16_t port,
 
   if (node->ri)
     return compare_tor_addr_to_addr_policy(addr, port, node->ri->exit_policy);
-  else if (node->md && node->md) {
+  else if (node->md) {
     if (node->md->exit_policy == NULL)
       return ADDR_POLICY_REJECTED;
     else
