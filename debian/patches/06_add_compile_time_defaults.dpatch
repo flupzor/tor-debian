@@ -24,8 +24,8 @@ exit 0
 
 @DPATCH@
 diff -urNad '--exclude=CVS' '--exclude=.svn' '--exclude=.git' '--exclude=.arch' '--exclude=.hg' '--exclude=_darcs' '--exclude=.bzr' tor~/src/or/config.c tor/src/or/config.c
---- tor~/src/or/config.c	2011-06-17 22:11:35.000000000 +0200
-+++ tor/src/or/config.c	2011-06-17 22:31:19.510811846 +0200
+--- tor~/src/or/config.c	2011-09-03 13:21:30.307505355 +0200
++++ tor/src/or/config.c	2011-09-03 13:26:46.424232590 +0200
 @@ -12,6 +12,7 @@
  #define CONFIG_PRIVATE
  
@@ -34,8 +34,8 @@ diff -urNad '--exclude=CVS' '--exclude=.svn' '--exclude=.git' '--exclude=.arch' 
  #include "circuitbuild.h"
  #include "circuitlist.h"
  #include "config.h"
-@@ -577,6 +578,9 @@
- static void init_libevent(void);
+@@ -606,6 +607,9 @@
+ static void init_libevent(const or_options_t *options);
  static int opt_streq(const char *s1, const char *s2);
  
 +static int debian_running_as_debiantor();
@@ -44,7 +44,7 @@ diff -urNad '--exclude=CVS' '--exclude=.svn' '--exclude=.git' '--exclude=.arch' 
  /** Magic value for or_options_t. */
  #define OR_OPTIONS_MAGIC 9090909
  
-@@ -4086,6 +4090,9 @@
+@@ -4233,6 +4237,9 @@
    char *command_arg = NULL;
    char *errmsg=NULL;
  
@@ -54,7 +54,7 @@ diff -urNad '--exclude=CVS' '--exclude=.svn' '--exclude=.git' '--exclude=.arch' 
    if (argv) { /* first time we're called. save command line args */
      backup_argv = argv;
      backup_argc = argc;
-@@ -5332,3 +5339,83 @@
+@@ -6024,3 +6031,83 @@
    return 0;
  }
  
