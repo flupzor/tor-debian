@@ -1,3 +1,13 @@
+tor (0.2.3.3-alpha-XX) experimental; urgency=low
+
+  * Make patches/06_add_compile_time_defaults build without compiler warnings:
+    - use config_find_option_mutable() instead of config_find_option()
+      if we're going to mess with the return value,
+    - Correctly declare functions as having no arguments instead of not
+      telling the compiler which arguments it'll have.
+
+ -- Peter Palfrader <weasel@debian.org>  Sun, 04 Sep 2011 16:16:46 +0200
+
 tor (0.2.3.3-alpha-1) experimental; urgency=low
 
   * New upstream version.
