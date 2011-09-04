@@ -24,8 +24,8 @@ exit 0
 
 @DPATCH@
 diff -urNad '--exclude=CVS' '--exclude=.svn' '--exclude=.git' '--exclude=.arch' '--exclude=.hg' '--exclude=_darcs' '--exclude=.bzr' tor~/src/or/config.c tor/src/or/config.c
---- tor~/src/or/config.c	2011-09-03 13:21:30.307505355 +0200
-+++ tor/src/or/config.c	2011-09-03 13:26:46.424232590 +0200
+--- tor~/src/or/config.c	2011-09-04 16:06:47.543463182 +0200
++++ tor/src/or/config.c	2011-09-04 16:06:36.931575357 +0200
 @@ -12,6 +12,7 @@
  #define CONFIG_PRIVATE
  
@@ -38,8 +38,8 @@ diff -urNad '--exclude=CVS' '--exclude=.svn' '--exclude=.git' '--exclude=.arch' 
  static void init_libevent(const or_options_t *options);
  static int opt_streq(const char *s1, const char *s2);
  
-+static int debian_running_as_debiantor();
-+static int debian_config_fix_defaults();
++static int debian_running_as_debiantor(void);
++static int debian_config_fix_defaults(void);
 +
  /** Magic value for or_options_t. */
  #define OR_OPTIONS_MAGIC 9090909
@@ -61,7 +61,7 @@ diff -urNad '--exclude=CVS' '--exclude=.svn' '--exclude=.git' '--exclude=.arch' 
 +/* Checks whether we are running as the debian-tor user.
 + *   Returns -1 on error, 2 if we are root, 1 if we are debian-tor, 0 if we are any normal user */
 +static int
-+debian_running_as_debiantor()
++debian_running_as_debiantor(void)
 +{
 +  struct passwd *pw = NULL;
 +  int uid;
@@ -84,7 +84,7 @@ diff -urNad '--exclude=CVS' '--exclude=.svn' '--exclude=.git' '--exclude=.arch' 
 +}
 +
 +static int
-+debian_config_fix_defaults()
++debian_config_fix_defaults(void)
 +{
 +  config_var_t *var;
 +  static int fixed = 0;
@@ -97,42 +97,42 @@ diff -urNad '--exclude=CVS' '--exclude=.svn' '--exclude=.git' '--exclude=.arch' 
 +  if (running_as_debian < 0) return -1;
 +  if (!running_as_debian) return 0;
 +
-+  var = config_find_option(&options_format, "DataDirectory");
++  var = config_find_option_mutable(&options_format, "DataDirectory");
 +  tor_assert(var);
 +  var->initvalue = tor_strdup("/var/lib/tor");
 +
-+  var = config_find_option(&options_format, "PidFile");
++  var = config_find_option_mutable(&options_format, "PidFile");
 +  tor_assert(var);
 +  var->initvalue = tor_strdup("/var/run/tor/tor.pid");
 +
-+  var = config_find_option(&options_format, "RunAsDaemon");
++  var = config_find_option_mutable(&options_format, "RunAsDaemon");
 +  tor_assert(var);
 +  var->initvalue = tor_strdup("1");
 +
 +  if (running_as_debian == 2) {
-+    var = config_find_option(&options_format, "User");
++    var = config_find_option_mutable(&options_format, "User");
 +    tor_assert(var);
 +    var->initvalue = tor_strdup("debian-tor");
 +  };
 +
 +  /* set up the control socket stuff */
-+  var = config_find_option(&options_format, "ControlSocket");
++  var = config_find_option_mutable(&options_format, "ControlSocket");
 +  tor_assert(var);
 +  var->initvalue = tor_strdup("/var/run/tor/control");
 +
-+  var = config_find_option(&options_format, "ControlSocketsGroupWritable");
++  var = config_find_option_mutable(&options_format, "ControlSocketsGroupWritable");
 +  tor_assert(var);
 +  var->initvalue = tor_strdup("1");
 +
-+  var = config_find_option(&options_format, "CookieAuthentication");
++  var = config_find_option_mutable(&options_format, "CookieAuthentication");
 +  tor_assert(var);
 +  var->initvalue = tor_strdup("1");
 +
-+  var = config_find_option(&options_format, "CookieAuthFileGroupReadable");
++  var = config_find_option_mutable(&options_format, "CookieAuthFileGroupReadable");
 +  tor_assert(var);
 +  var->initvalue = tor_strdup("1");
 +
-+  var = config_find_option(&options_format, "CookieAuthFile");
++  var = config_find_option_mutable(&options_format, "CookieAuthFile");
 +  tor_assert(var);
 +  var->initvalue = tor_strdup("/var/run/tor/control.authcookie");
 +
