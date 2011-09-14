@@ -410,7 +410,7 @@ rend_config_services(const or_options_t *options, int validate_only)
         if (strspn(client_name, REND_LEGAL_CLIENTNAME_CHARACTERS) != len) {
           log_warn(LD_CONFIG, "HiddenServiceAuthorizeClient contains an "
                               "illegal client name: '%s'. Valid "
-                              "characters are [A-Za-z0-9+-_].",
+                              "characters are [A-Za-z0-9+_-].",
                    client_name);
           SMARTLIST_FOREACH(clients, char *, cp, tor_free(cp));
           smartlist_free(clients);
@@ -958,6 +958,29 @@ rend_service_introduce(origin_circuit_t *circuit, const uint8_t *request,
              "PK-encrypted portion of INTRODUCE2 cell was truncated.");
     return -1;
   }
+
+  if (!service->accepted_intros)
+    service->accepted_intros = digestmap_new();
+
+  {
+    char pkpart_digest[DIGEST_LEN];
+    /* Check for replay of PK-encrypted portion.  It is slightly naughty to
+       use the same digestmap to check for this and for g^x replays, but
+       collisions are tremendously unlikely.
+    */
+    crypto_digest(pkpart_digest, (char*)request+DIGEST_LEN, keylen);
+    access_time = digestmap_get(service->accepted_intros, pkpart_digest);
+    if (access_time != NULL) {
+      log_warn(LD_REND, "Possible replay detected! We received an "
+               "INTRODUCE2 cell with same PK-encrypted part %d seconds ago. "
+               "Dropping cell.", (int)(now-*access_time));
+      return -1;
+    }
+    access_time = tor_malloc(sizeof(time_t));
+    *access_time = now;
+    digestmap_set(service->accepted_intros, pkpart_digest, access_time);
+  }
+
   /* Next N bytes is encrypted with service key */
   note_crypto_pk_op(REND_SERVER);
   r = crypto_pk_private_hybrid_decrypt(
@@ -998,7 +1021,9 @@ rend_service_introduce(origin_circuit_t *circuit, const uint8_t *request,
     v3_shift += 4;
     if ((now - ts) < -1 * REND_REPLAY_TIME_INTERVAL / 2 ||
         (now - ts) > REND_REPLAY_TIME_INTERVAL / 2) {
-      log_warn(LD_REND, "INTRODUCE2 cell is too %s. Discarding.",
+      /* This is far more likely to mean that a client's clock is
+       * skewed than that a replay attack is in progress. */
+      log_info(LD_REND, "INTRODUCE2 cell is too %s. Discarding.",
                (now - ts) < 0 ? "old" : "new");
       return -1;
     }
@@ -1100,12 +1125,16 @@ rend_service_introduce(origin_circuit_t *circuit, const uint8_t *request,
 
   /* Check whether there is a past request with the same Diffie-Hellman,
    * part 1. */
-  if (!service->accepted_intros)
-    service->accepted_intros = digestmap_new();
-
   access_time = digestmap_get(service->accepted_intros, diffie_hellman_hash);
   if (access_time != NULL) {
-    log_warn(LD_REND, "Possible replay detected! We received an "
+    /* A Tor client will send a new INTRODUCE1 cell with the same rend
+     * cookie and DH public key as its previous one if its intro circ
+     * times out while in state CIRCUIT_PURPOSE_C_INTRODUCE_ACK_WAIT .
+     * If we received the first INTRODUCE1 cell (the intro-point relay
+     * converts it into an INTRODUCE2 cell), we are already trying to
+     * connect to that rend point (and may have already succeeded);
+     * drop this cell. */
+    log_info(LD_REND, "We received an "
              "INTRODUCE2 cell with same first part of "
              "Diffie-Hellman handshake %d seconds ago. Dropping "
              "cell.",

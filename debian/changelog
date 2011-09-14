@@ -1,5 +1,6 @@
-tor (0.2.3.3-alpha-XX) experimental; urgency=low
+tor (0.2.3.4-alpha-1) experimental; urgency=low
 
+  * New upstream version.
   * Make patches/06_add_compile_time_defaults build without compiler warnings:
     - use config_find_option_mutable() instead of config_find_option()
       if we're going to mess with the return value,
@@ -8,7 +9,7 @@ tor (0.2.3.3-alpha-XX) experimental; urgency=low
   * Suggest tor-arm (closes: #640265).
   * Downgrade socat and polipo|privoxy to Suggests (closes: #640264).
 
- -- Peter Palfrader <weasel@debian.org>  Wed, 14 Sep 2011 08:53:40 +0200
+ -- Peter Palfrader <weasel@debian.org>  Wed, 14 Sep 2011 09:00:30 +0200
 
 tor (0.2.3.3-alpha-1) experimental; urgency=low
 

@@ -972,7 +972,7 @@ directory_initiate_command_rend(const char *address, const tor_addr_t *_addr,
            error indicates broken link in windowsland. */
     }
   } else { /* we want to connect via a tor connection */
-    edge_connection_t *linked_conn;
+    entry_connection_t *linked_conn;
     /* Anonymized tunneled connections can never share a circuit.
      * One-hop directory connections can share circuits with each other
      * but nothing else. */
@@ -1014,10 +1014,11 @@ directory_initiate_command_rend(const char *address, const tor_addr_t *_addr,
                            if_modified_since);
 
     connection_watch_events(TO_CONN(conn), READ_EVENT|WRITE_EVENT);
-    IF_HAS_BUFFEREVENT(TO_CONN(linked_conn), {
-      connection_watch_events(TO_CONN(linked_conn), READ_EVENT|WRITE_EVENT);
+    IF_HAS_BUFFEREVENT(ENTRY_TO_CONN(linked_conn), {
+      connection_watch_events(ENTRY_TO_CONN(linked_conn),
+                              READ_EVENT|WRITE_EVENT);
     }) ELSE_IF_NO_BUFFEREVENT
-      connection_start_reading(TO_CONN(linked_conn));
+      connection_start_reading(ENTRY_TO_CONN(linked_conn));
   }
 }
 
@@ -1116,11 +1117,11 @@ directory_send_command(dir_connection_t *conn,
                        time_t if_modified_since)
 {
   char proxystring[256];
-  char proxyauthstring[256];
   char hoststring[128];
-  char imsstring[RFC1123_TIME_LEN+32];
+  smartlist_t *headers = smartlist_create();
   char *url;
   char request[8192];
+  char *header;
   const char *httpcommand = NULL;
   size_t len;
 
@@ -1140,12 +1141,11 @@ directory_send_command(dir_connection_t *conn,
   }
 
   /* Format if-modified-since */
-  if (!if_modified_since) {
-    imsstring[0] = '\0';
-  } else {
+  if (if_modified_since) {
     char b[RFC1123_TIME_LEN+1];
     format_rfc1123_time(b, if_modified_since);
-    tor_snprintf(imsstring, sizeof(imsstring), "\r\nIf-Modified-Since: %s", b);
+    tor_asprintf(&header, "If-Modified-Since: %s\r\n", b);
+    smartlist_add(headers, header);
   }
 
   /* come up with some proxy lines, if we're using one. */
@@ -1160,16 +1160,14 @@ directory_send_command(dir_connection_t *conn,
         log_warn(LD_BUG, "Encoding http authenticator failed");
     }
     if (base64_authenticator) {
-      tor_snprintf(proxyauthstring, sizeof(proxyauthstring),
-                   "\r\nProxy-Authorization: Basic %s",
+      tor_asprintf(&header,
+                   "Proxy-Authorization: Basic %s\r\n",
                    base64_authenticator);
       tor_free(base64_authenticator);
-    } else {
-      proxyauthstring[0] = 0;
+      smartlist_add(headers, header);
     }
   } else {
     proxystring[0] = 0;
-    proxyauthstring[0] = 0;
   }
 
   switch (purpose) {
@@ -1230,12 +1228,18 @@ directory_send_command(dir_connection_t *conn,
       httpcommand = "GET";
       tor_asprintf(&url, "/tor/micro/%s", resource);
       break;
-    case DIR_PURPOSE_UPLOAD_DIR:
+    case DIR_PURPOSE_UPLOAD_DIR: {
+      const char *why = router_get_descriptor_gen_reason();
       tor_assert(!resource);
       tor_assert(payload);
       httpcommand = "POST";
       url = tor_strdup("/tor/");
+      if (why) {
+        tor_asprintf(&header, "X-Desc-Gen-Reason: %s\r\n", why);
+        smartlist_add(headers, header);
+      }
       break;
+    }
     case DIR_PURPOSE_UPLOAD_VOTE:
       tor_assert(!resource);
       tor_assert(payload);
@@ -1286,26 +1290,26 @@ directory_send_command(dir_connection_t *conn,
   connection_write_to_buf(url, strlen(url), TO_CONN(conn));
   tor_free(url);
 
-  if (!strcmp(httpcommand, "GET") && !payload) {
-    tor_snprintf(request, sizeof(request),
-                 " HTTP/1.0\r\nHost: %s%s%s\r\n\r\n",
-                 hoststring,
-                 imsstring,
-                 proxyauthstring);
-  } else {
-    tor_snprintf(request, sizeof(request),
-                 " HTTP/1.0\r\nContent-Length: %lu\r\nHost: %s%s%s\r\n\r\n",
-                 payload ? (unsigned long)payload_len : 0,
-                 hoststring,
-                 imsstring,
-                 proxyauthstring);
+  if (!strcmp(httpcommand, "POST") || payload) {
+    tor_asprintf(&header, "Content-Length: %lu\r\n",
+                 payload ? (unsigned long)payload_len : 0);
+    smartlist_add(headers, header);
   }
+
+  header = smartlist_join_strings(headers, "", 0, NULL);
+  tor_snprintf(request, sizeof(request), " HTTP/1.0\r\nHost: %s\r\n%s\r\n",
+               hoststring, header);
+  tor_free(header);
+
   connection_write_to_buf(request, strlen(request), TO_CONN(conn));
 
   if (payload) {
     /* then send the payload afterwards too */
     connection_write_to_buf(payload, payload_len, TO_CONN(conn));
   }
+
+  SMARTLIST_FOREACH(headers, char *, h, tor_free(h));
+  smartlist_free(headers);
 }
 
 /** Parse an HTTP request string <b>headers</b> of the form
