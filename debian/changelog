@@ -6,8 +6,9 @@ tor (0.2.3.3-alpha-XX) experimental; urgency=low
     - Correctly declare functions as having no arguments instead of not
       telling the compiler which arguments it'll have.
   * Suggest tor-arm (closes: #640265).
+  * Downgrade socat and polipo|privoxy to Suggests (closes: #640264).
 
- -- Peter Palfrader <weasel@debian.org>  Sun, 04 Sep 2011 16:28:04 +0200
+ -- Peter Palfrader <weasel@debian.org>  Wed, 14 Sep 2011 08:53:40 +0200
 
 tor (0.2.3.3-alpha-1) experimental; urgency=low
 
