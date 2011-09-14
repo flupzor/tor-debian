@@ -1264,7 +1264,7 @@ circuit_build_times_network_check_changed(circuit_build_times_t *cbt)
   if (cbt->timeout_ms >= circuit_build_times_get_initial_timeout()) {
     if (cbt->timeout_ms > INT32_MAX/2 || cbt->close_ms > INT32_MAX/2) {
       log_warn(LD_CIRC, "Insanely large circuit build timeout value. "
-              "(timeout = %lfmsec, close = %lfmsec)",
+              "(timeout = %fmsec, close = %fmsec)",
                cbt->timeout_ms, cbt->close_ms);
     } else {
       cbt->timeout_ms *= 2;
@@ -1441,7 +1441,7 @@ circuit_build_times_set_timeout(circuit_build_times_t *cbt)
     return;
 
   if (cbt->timeout_ms < circuit_build_times_min_timeout()) {
-    log_warn(LD_CIRC, "Set buildtimeout to low value %lfms. Setting to %dms",
+    log_warn(LD_CIRC, "Set buildtimeout to low value %fms. Setting to %dms",
              cbt->timeout_ms, circuit_build_times_min_timeout());
     cbt->timeout_ms = circuit_build_times_min_timeout();
     if (cbt->close_ms < cbt->timeout_ms) {
@@ -1463,7 +1463,7 @@ circuit_build_times_set_timeout(circuit_build_times_t *cbt)
                cbt->total_build_times,
                tor_lround(cbt->timeout_ms/1000));
     log_info(LD_CIRC,
-             "Circuit timeout data: %lfms, %lfms, Xm: %d, a: %lf, r: %lf",
+             "Circuit timeout data: %fms, %fms, Xm: %d, a: %f, r: %f",
              cbt->timeout_ms, cbt->close_ms, cbt->Xm, cbt->alpha,
              timeout_rate);
   } else if (prev_timeout < tor_lround(cbt->timeout_ms/1000)) {
@@ -1474,13 +1474,13 @@ circuit_build_times_set_timeout(circuit_build_times_t *cbt)
                cbt->total_build_times,
                tor_lround(cbt->timeout_ms/1000));
     log_info(LD_CIRC,
-             "Circuit timeout data: %lfms, %lfms, Xm: %d, a: %lf, r: %lf",
+             "Circuit timeout data: %fms, %fms, Xm: %d, a: %f, r: %f",
              cbt->timeout_ms, cbt->close_ms, cbt->Xm, cbt->alpha,
              timeout_rate);
   } else {
     log_info(LD_CIRC,
-             "Set circuit build timeout to %lds (%lfms, %lfms, Xm: %d, a: %lf,"
-             " r: %lf) based on %d circuit times",
+             "Set circuit build timeout to %lds (%fms, %fms, Xm: %d, a: %f,"
+             " r: %f) based on %d circuit times",
              tor_lround(cbt->timeout_ms/1000),
              cbt->timeout_ms, cbt->close_ms, cbt->Xm, cbt->alpha, timeout_rate,
              cbt->total_build_times);
@@ -2648,14 +2648,18 @@ node_handles_some_port(const node_t *node, smartlist_t *needed_ports)
 static int
 ap_stream_wants_exit_attention(connection_t *conn)
 {
-  if (conn->type == CONN_TYPE_AP &&
-      conn->state == AP_CONN_STATE_CIRCUIT_WAIT &&
+  entry_connection_t *entry;
+  if (conn->type != CONN_TYPE_AP)
+    return 0;
+  entry = TO_ENTRY_CONN(conn);
+
+  if (conn->state == AP_CONN_STATE_CIRCUIT_WAIT &&
       !conn->marked_for_close &&
-      !(TO_EDGE_CONN(conn)->want_onehop) && /* ignore one-hop streams */
-      !(TO_EDGE_CONN(conn)->use_begindir) && /* ignore targeted dir fetches */
-      !(TO_EDGE_CONN(conn)->chosen_exit_name) && /* ignore defined streams */
+      !(entry->want_onehop) && /* ignore one-hop streams */
+      !(entry->use_begindir) && /* ignore targeted dir fetches */
+      !(entry->chosen_exit_name) && /* ignore defined streams */
       !connection_edge_is_rendezvous_stream(TO_EDGE_CONN(conn)) &&
-      !circuit_stream_is_being_handled(TO_EDGE_CONN(conn), 0,
+      !circuit_stream_is_being_handled(TO_ENTRY_CONN(conn), 0,
                                        MIN_CIRCUITS_HANDLING_STREAM))
     return 1;
   return 0;
@@ -2760,7 +2764,7 @@ choose_good_exit_server_general(int need_uptime, int need_capacity)
     SMARTLIST_FOREACH_BEGIN(connections, connection_t *, conn) {
       if (!ap_stream_wants_exit_attention(conn))
         continue; /* Skip everything but APs in CIRCUIT_WAIT */
-      if (connection_ap_can_use_exit(TO_EDGE_CONN(conn), node)) {
+      if (connection_ap_can_use_exit(TO_ENTRY_CONN(conn), node)) {
         ++n_supported[i];
 //        log_fn(LOG_DEBUG,"%s is supported. n_supported[%d] now %d.",
 //               router->nickname, i, n_supported[i]);

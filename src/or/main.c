@@ -865,13 +865,13 @@ directory_all_unreachable(time_t now)
 
   while ((conn = connection_get_by_type_state(CONN_TYPE_AP,
                                               AP_CONN_STATE_CIRCUIT_WAIT))) {
-    edge_connection_t *edge_conn = TO_EDGE_CONN(conn);
+    entry_connection_t *entry_conn = TO_ENTRY_CONN(conn);
     log_notice(LD_NET,
                "Is your network connection down? "
                "Failing connection to '%s:%d'.",
-               safe_str_client(edge_conn->socks_request->address),
-               edge_conn->socks_request->port);
-    connection_mark_unattached_ap(edge_conn,
+               safe_str_client(entry_conn->socks_request->address),
+               entry_conn->socks_request->port);
+    connection_mark_unattached_ap(entry_conn,
                                   END_STREAM_REASON_NET_UNREACHABLE);
   }
   control_event_general_status(LOG_ERR, "DIR_ALL_UNREACHABLE");
@@ -1152,15 +1152,16 @@ run_scheduled_events(time_t now)
   if (options->UseBridges)
     fetch_bridge_descriptors(options, now);
 
-  /** 1b. Every MAX_SSL_KEY_LIFETIME seconds, we change our TLS context. */
+  /** 1b. Every MAX_SSL_KEY_LIFETIME_INTERNAL seconds, we change our
+   * TLS context. */
   if (!last_rotated_x509_certificate)
     last_rotated_x509_certificate = now;
-  if (last_rotated_x509_certificate+MAX_SSL_KEY_LIFETIME < now) {
+  if (last_rotated_x509_certificate+MAX_SSL_KEY_LIFETIME_INTERNAL < now) {
     log_info(LD_GENERAL,"Rotating tls context.");
     if (tor_tls_context_init(public_server_mode(options),
                              get_tlsclient_identity_key(),
                              is_server ? get_server_identity_key() : NULL,
-                             MAX_SSL_KEY_LIFETIME) < 0) {
+                             MAX_SSL_KEY_LIFETIME_ADVERTISED) < 0) {
       log_warn(LD_BUG, "Error reinitializing TLS context");
       /* XXX is it a bug here, that we just keep going? -RD */
     }
@@ -1326,11 +1327,7 @@ run_scheduled_events(time_t now)
       time_to_check_ipaddress = now + CHECK_IPADDRESS_INTERVAL;
       check_descriptor_ipaddress_changed(now);
     }
-/** If our router descriptor ever goes this long without being regenerated
- * because something changed, we force an immediate regenerate-and-upload. */
-#define FORCE_REGENERATE_DESCRIPTOR_INTERVAL (18*60*60)
-    mark_my_descriptor_dirty_if_older_than(
-                                  now - FORCE_REGENERATE_DESCRIPTOR_INTERVAL);
+    mark_my_descriptor_dirty_if_too_old(now);
     consider_publishable_server(0);
     /* also, check religiously for reachability, if it's within the first
      * 20 minutes of our uptime. */

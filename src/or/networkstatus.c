@@ -1187,6 +1187,10 @@ we_want_to_fetch_flavor(const or_options_t *options, int flavor)
      * it ourselves. */
     return 1;
   }
+  if (options->FetchUselessDescriptors) {
+    /* In order to get all descriptors, we need to fetch all consensuses. */
+    return 1;
+  }
   /* Otherwise, we want the flavor only if we want to use it to build
    * circuits. */
   return flavor == usable_consensus_flavor();
@@ -2129,7 +2133,7 @@ networkstatus_getinfo_by_purpose(const char *purpose_string, time_t now)
     if (bridge_auth && ri->purpose == ROUTER_PURPOSE_BRIDGE)
       dirserv_set_router_is_running(ri, now);
     /* then generate and write out status lines for each of them */
-    set_routerstatus_from_routerinfo(&rs, node, ri, now, 0, 0, 0);
+    set_routerstatus_from_routerinfo(&rs, node, ri, now, 0, 0, 0, 0);
     smartlist_add(statuses, networkstatus_getinfo_helper_single(&rs));
   });
 
