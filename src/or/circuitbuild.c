@@ -1408,7 +1408,7 @@ circuit_build_times_set_timeout_worker(circuit_build_times_t *cbt)
   cbt->close_ms = MAX(cbt->close_ms, circuit_build_times_initial_timeout());
 
   if (cbt->timeout_ms > max_time) {
-    log_notice(LD_CIRC,
+    log_info(LD_CIRC,
                "Circuit build timeout of %dms is beyond the maximum build "
                "time we have ever observed. Capping it to %dms.",
                (int)cbt->timeout_ms, max_time);
@@ -1456,7 +1456,7 @@ circuit_build_times_set_timeout(circuit_build_times_t *cbt)
   timeout_rate = circuit_build_times_timeout_rate(cbt);
 
   if (prev_timeout > tor_lround(cbt->timeout_ms/1000)) {
-    log_notice(LD_CIRC,
+    log_info(LD_CIRC,
                "Based on %d circuit times, it looks like we don't need to "
                "wait so long for circuits to finish. We will now assume a "
                "circuit is too slow to use after waiting %ld seconds.",
@@ -1467,7 +1467,7 @@ circuit_build_times_set_timeout(circuit_build_times_t *cbt)
              cbt->timeout_ms, cbt->close_ms, cbt->Xm, cbt->alpha,
              timeout_rate);
   } else if (prev_timeout < tor_lround(cbt->timeout_ms/1000)) {
-    log_notice(LD_CIRC,
+    log_info(LD_CIRC,
                "Based on %d circuit times, it looks like we need to wait "
                "longer for circuits to finish. We will now assume a "
                "circuit is too slow to use after waiting %ld seconds.",
@@ -1982,9 +1982,10 @@ should_use_create_fast_for_circuit(origin_circuit_t *circ)
     return 1; /* our hand is forced: only a create_fast will work. */
   if (!options->FastFirstHopPK)
     return 0; /* we prefer to avoid create_fast */
-  if (server_mode(options)) {
+  if (public_server_mode(options)) {
     /* We're a server, and we know an onion key. We can choose.
-     * Prefer to blend in. */
+     * Prefer to blend our circuit into the other circuits we are
+     * creating on behalf of others. */
     return 0;
   }
 
@@ -4186,7 +4187,7 @@ choose_random_entry(cpath_build_state_t *state)
         goto choose_and_finish;
       }
       if (smartlist_len(live_entry_guards) >= options->NumEntryGuards)
-        break; /* we have enough */
+        goto choose_and_finish; /* we have enough */
   } SMARTLIST_FOREACH_END(entry);
 
   if (entry_list_is_constrained(options)) {

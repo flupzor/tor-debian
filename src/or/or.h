@@ -1830,10 +1830,10 @@ typedef struct microdesc_t {
   saved_location_t saved_location : 3;
   /** If true, do not attempt to cache this microdescriptor on disk. */
   unsigned int no_save : 1;
-  /** If true, this microdesc is attached to a node_t. */
-  unsigned int held_by_node : 1;
   /** If true, this microdesc has an entry in the microdesc_map */
   unsigned int held_in_map : 1;
+  /** Reference count: how many node_ts have a reference to this microdesc? */
+  unsigned int held_by_nodes;
 
   /** If saved_location == SAVED_IN_CACHE, this field holds the offset of the
    * microdescriptor in the cache. */
@@ -3107,6 +3107,8 @@ typedef struct {
                   * log whether it was DNS-leaking or not? */
   int HardwareAccel; /**< Boolean: Should we enable OpenSSL hardware
                       * acceleration where available? */
+  /** Token Bucket Refill resolution in milliseconds. */
+  int TokenBucketRefillInterval;
   char *AccelName; /**< Optional hardware acceleration engine name. */
   char *AccelDir; /**< Optional hardware acceleration engine search dir. */
   int UseEntryGuards; /**< Boolean: Do we try to enter from a smallish number
