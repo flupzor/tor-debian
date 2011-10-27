@@ -68,8 +68,22 @@ _connection_mark_unattached_ap(entry_connection_t *conn, int endreason,
                                int line, const char *file)
 {
   connection_t *base_conn = ENTRY_TO_CONN(conn);
+  edge_connection_t *edge_conn = ENTRY_TO_EDGE_CONN(conn);
   tor_assert(base_conn->type == CONN_TYPE_AP);
   ENTRY_TO_EDGE_CONN(conn)->edge_has_sent_end = 1; /* no circ yet */
+
+  /* If this is a rendezvous stream and it is failing without ever
+   * being attached to a circuit, assume that an attempt to connect to
+   * the destination hidden service has just ended.
+   *
+   * XXX023 This condition doesn't limit to only streams failing
+   * without ever being attached.  That sloppiness should be harmless,
+   * but we should fix it someday anyway. */
+  if ((edge_conn->on_circuit != NULL || edge_conn->edge_has_sent_end) &&
+      connection_edge_is_rendezvous_stream(edge_conn)) {
+    rend_client_note_connection_attempt_ended(
+                                    edge_conn->rend_data->onion_address);
+  }
 
   if (base_conn->marked_for_close) {
     /* This call will warn as appropriate. */
@@ -677,7 +691,7 @@ connection_ap_fail_onehop(const char *failed_digest,
       if (!build_state || !build_state->chosen_exit ||
           !entry_conn->socks_request || !entry_conn->socks_request->address)
         continue;
-      if (tor_addr_from_str(&addr, entry_conn->socks_request->address)<0 ||
+      if (tor_addr_parse(&addr, entry_conn->socks_request->address)<0 ||
           !tor_addr_eq(&build_state->chosen_exit->addr, &addr) ||
           build_state->chosen_exit->port != entry_conn->socks_request->port)
         continue;
@@ -930,7 +944,10 @@ addressmap_clear_excluded_trackexithosts(const or_options_t *options)
     char *nodename;
     const node_t *node;
 
-    if (strcmpend(target, ".exit")) {
+    if (!target) {
+      /* DNS resolving in progress */
+      continue;
+    } else if (strcmpend(target, ".exit")) {
       /* Not a .exit mapping */
       continue;
     } else if (ent->source != ADDRMAPSRC_TRACKEXIT) {
@@ -1752,7 +1769,7 @@ connection_ap_handshake_rewrite_and_attach(entry_connection_t *conn,
       /* Don't let people try to do a reverse lookup on 10.0.0.1. */
       tor_addr_t addr;
       int ok;
-      ok = tor_addr_parse_reverse_lookup_name(
+      ok = tor_addr_parse_PTR_name(
                                &addr, socks->address, AF_UNSPEC, 1);
       if (ok == 1 && tor_addr_is_internal(&addr, 0)) {
         connection_ap_handshake_socks_resolved(conn, RESOLVED_TYPE_ERROR,
@@ -1904,7 +1921,7 @@ connection_ap_handshake_rewrite_and_attach(entry_connection_t *conn,
       if (options->ClientRejectInternalAddresses &&
           !conn->use_begindir && !conn->chosen_exit_name && !circ) {
         tor_addr_t addr;
-        if (tor_addr_from_str(&addr, socks->address) >= 0 &&
+        if (tor_addr_parse(&addr, socks->address) >= 0 &&
             tor_addr_is_internal(&addr, 0)) {
           /* If this is an explicit private address with no chosen exit node,
            * then we really don't want to try to connect to it.  That's
@@ -2516,7 +2533,7 @@ connection_ap_handshake_send_resolve(entry_connection_t *ap_conn)
 
     /* We're doing a reverse lookup.  The input could be an IP address, or
      * could be an .in-addr.arpa or .ip6.arpa address */
-    r = tor_addr_parse_reverse_lookup_name(&addr, a, AF_INET, 1);
+    r = tor_addr_parse_PTR_name(&addr, a, AF_INET, 1);
     if (r <= 0) {
       log_warn(LD_APP, "Rejecting ill-formed reverse lookup of %s",
                safe_str_client(a));
@@ -2524,7 +2541,7 @@ connection_ap_handshake_send_resolve(entry_connection_t *ap_conn)
       return -1;
     }
 
-    r = tor_addr_to_reverse_lookup_name(inaddr_buf, sizeof(inaddr_buf), &addr);
+    r = tor_addr_to_PTR_name(inaddr_buf, sizeof(inaddr_buf), &addr);
     if (r < 0) {
       log_warn(LD_BUG, "Couldn't generate reverse lookup hostname of %s",
                safe_str_client(a));
@@ -2880,9 +2897,9 @@ connection_exit_begin_conn(cell_t *cell, circuit_t *circ)
                                     END_STREAM_REASON_TORPROTOCOL, NULL);
       return 0;
     }
-    if (parse_addr_port(LOG_PROTOCOL_WARN,
-                        (char*)(cell->payload+RELAY_HEADER_SIZE),
-                        &address,NULL,&port)<0) {
+    if (tor_addr_port_split(LOG_PROTOCOL_WARN,
+                            (char*)(cell->payload+RELAY_HEADER_SIZE),
+                            &address,&port)<0) {
       log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
              "Unable to parse addr:port in relay begin cell. Closing.");
       relay_send_end_cell_from_edge(rh.stream_id, circ,

@@ -2288,6 +2288,74 @@ get_possible_sybil_list(const smartlist_t *routers)
   return omit_as_sybil;
 }
 
+/** Return non-zero iff a relay running the Tor version specified in
+ * <b>platform</b> is suitable for use as a potential entry guard. */
+static int
+is_router_version_good_for_possible_guard(const char *platform)
+{
+  static int parsed_versions_initialized = 0;
+  static tor_version_t first_good_0_2_1_guard_version;
+  static tor_version_t first_good_0_2_2_guard_version;
+  static tor_version_t first_good_later_guard_version;
+
+  tor_version_t router_version;
+
+  /* XXX023 This block should be extracted into its own function. */
+  /* XXXX Begin code copied from tor_version_as_new_as (in routerparse.c) */
+  {
+    char *s, *s2, *start;
+    char tmp[128];
+
+    tor_assert(platform);
+
+    if (strcmpstart(platform,"Tor ")) /* nonstandard Tor; be safe and say yes */
+      return 1;
+
+    start = (char *)eat_whitespace(platform+3);
+    if (!*start) return 0;
+    s = (char *)find_whitespace(start); /* also finds '\0', which is fine */
+    s2 = (char*)eat_whitespace(s);
+    if (!strcmpstart(s2, "(r") || !strcmpstart(s2, "(git-"))
+      s = (char*)find_whitespace(s2);
+
+    if ((size_t)(s-start+1) >= sizeof(tmp)) /* too big, no */
+      return 0;
+    strlcpy(tmp, start, s-start+1);
+
+    if (tor_version_parse(tmp, &router_version)<0) {
+      log_info(LD_DIR,"Router version '%s' unparseable.",tmp);
+      return 1; /* be safe and say yes */
+    }
+  }
+  /* XXXX End code copied from tor_version_as_new_as (in routerparse.c) */
+
+  if (!parsed_versions_initialized) {
+    /* CVE-2011-2769 was fixed on the relay side in Tor versions
+     * 0.2.1.31, 0.2.2.34, and 0.2.3.6-alpha. */
+    tor_assert(tor_version_parse("0.2.1.31",
+                                 &first_good_0_2_1_guard_version)>=0);
+    tor_assert(tor_version_parse("0.2.2.34",
+                                 &first_good_0_2_2_guard_version)>=0);
+    tor_assert(tor_version_parse("0.2.3.6-alpha",
+                                 &first_good_later_guard_version)>=0);
+
+    /* Don't parse these constant version strings once for every relay
+     * for every vote. */
+    parsed_versions_initialized = 1;
+  }
+
+  return ((tor_version_same_series(&first_good_0_2_1_guard_version,
+                                   &router_version) &&
+           tor_version_compare(&first_good_0_2_1_guard_version,
+                               &router_version) <= 0) ||
+          (tor_version_same_series(&first_good_0_2_2_guard_version,
+                                   &router_version) &&
+           tor_version_compare(&first_good_0_2_2_guard_version,
+                               &router_version) <= 0) ||
+          (tor_version_compare(&first_good_later_guard_version,
+                               &router_version) <= 0));
+}
+
 /** Extract status information from <b>ri</b> and from other authority
  * functions and store it in <b>rs</b>>.  If <b>naming</b>, consider setting
  * the named flag in <b>rs</b>.
@@ -2303,6 +2371,7 @@ set_routerstatus_from_routerinfo(routerstatus_t *rs,
                                  int naming, int listbadexits,
                                  int listbaddirs, int vote_on_hsdirs)
 {
+  const or_options_t *options = get_options();
   int unstable_version =
     !tor_version_as_new_as(ri->platform,"0.1.1.16-rc-cvs");
   memset(rs, 0, sizeof(routerstatus_t));
@@ -2333,9 +2402,13 @@ set_routerstatus_from_routerinfo(routerstatus_t *rs,
       (router_get_advertised_bandwidth(ri) >= BANDWIDTH_TO_GUARANTEE_GUARD ||
        router_get_advertised_bandwidth(ri) >=
                               MIN(guard_bandwidth_including_exits,
-                                  guard_bandwidth_excluding_exits))) {
-    long tk = rep_hist_get_weighted_time_known(node->identity, now);
-    double wfu = rep_hist_get_weighted_fractional_uptime(node->identity, now);
+                                  guard_bandwidth_excluding_exits)) &&
+      (options->GiveGuardFlagTo_CVE_2011_2768_VulnerableRelays ||
+       is_router_version_good_for_possible_guard(ri->platform))) {
+    long tk = rep_hist_get_weighted_time_known(
+                                      node->identity, now);
+    double wfu = rep_hist_get_weighted_fractional_uptime(
+                                      node->identity, now);
     rs->is_possible_guard = (wfu >= guard_wfu && tk >= guard_tk) ? 1 : 0;
   } else {
     rs->is_possible_guard = 0;
@@ -3207,7 +3280,7 @@ dirserv_orconn_tls_done(const char *address,
         log_info(LD_DIRSERV, "Found router %s to be reachable at %s:%d. Yay.",
                  router_describe(ri),
                  address, ri->or_port);
-        if (tor_addr_from_str(&addr, ri->address) != -1)
+        if (tor_addr_parse(&addr, ri->address) != -1)
           addrp = &addr;
         else
           log_warn(LD_BUG, "Couldn't parse IP address \"%s\"", ri->address);
@@ -3482,14 +3555,13 @@ connection_dirserv_finish_spooling(dir_connection_t *conn)
 static int
 connection_dirserv_add_servers_to_outbuf(dir_connection_t *conn)
 {
-#ifdef TRACK_SERVED_TIME
-  time_t now = time(NULL);
-#endif
   int by_fp = (conn->dir_spool_src == DIR_SPOOL_SERVER_BY_FP ||
                conn->dir_spool_src == DIR_SPOOL_EXTRA_BY_FP);
   int extra = (conn->dir_spool_src == DIR_SPOOL_EXTRA_BY_FP ||
                conn->dir_spool_src == DIR_SPOOL_EXTRA_BY_DIGEST);
   time_t publish_cutoff = time(NULL)-ROUTER_MAX_AGE_TO_PUBLISH;
+
+  const or_options_t *options = get_options();
 
   while (smartlist_len(conn->fingerprint_stack) &&
          connection_get_outbuf_len(TO_CONN(conn)) < DIRSERV_BUFFER_MIN) {
@@ -3512,9 +3584,16 @@ connection_dirserv_add_servers_to_outbuf(dir_connection_t *conn)
        * unknown bridge descriptor has shown up between then and now. */
       continue;
     }
-#ifdef TRACK_SERVED_TIME
-    sd->last_served_at = now;
-#endif
+
+    /** If we are the bridge authority and the descriptor is a bridge
+     * descriptor, remember that we served this descriptor for desc stats. */
+    if (options->BridgeAuthoritativeDir && by_fp) {
+      const routerinfo_t *router =
+          router_get_by_id_digest(sd->identity_digest);
+      tor_assert(router);
+      if (router->purpose == ROUTER_PURPOSE_BRIDGE)
+        rep_hist_note_desc_served(sd->identity_digest);
+    }
     body = signed_descriptor_get_body(sd);
     if (conn->zlib_state) {
       /* XXXX022 This 'last' business should actually happen on the last

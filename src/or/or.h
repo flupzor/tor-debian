@@ -283,22 +283,27 @@ typedef enum {
 #define OR_CONN_STATE_CONNECTING 1
 /** State for a connection to an OR: waiting for proxy handshake to complete */
 #define OR_CONN_STATE_PROXY_HANDSHAKING 2
-/** State for a connection to an OR or client: SSL is handshaking, not done
+/** State for an OR connection client: SSL is handshaking, not done
  * yet. */
 #define OR_CONN_STATE_TLS_HANDSHAKING 3
 /** State for a connection to an OR: We're doing a second SSL handshake for
- * renegotiation purposes. */
+ * renegotiation purposes. (V2 handshake only.) */
 #define OR_CONN_STATE_TLS_CLIENT_RENEGOTIATING 4
 /** State for a connection at an OR: We're waiting for the client to
- * renegotiate. */
+ * renegotiate (to indicate a v2 handshake) or send a versions cell (to
+ * indicate a v3 handshake) */
 #define OR_CONN_STATE_TLS_SERVER_RENEGOTIATING 5
-/** State for a connection to an OR: We're done with our SSL handshake, but we
- * haven't yet negotiated link protocol versions and sent a netinfo cell.
- */
-#define OR_CONN_STATE_OR_HANDSHAKING 6
-/** State for a connection to an OR: Ready to send/receive cells. */
-#define OR_CONN_STATE_OPEN 7
-#define _OR_CONN_STATE_MAX 7
+/** State for an OR connection: We're done with our SSL handshake, we've done
+ * renegotiation, but we haven't yet negotiated link protocol versions and
+ * sent a netinfo cell. */
+#define OR_CONN_STATE_OR_HANDSHAKING_V2 6
+/** State for an OR connection: We're done with our SSL handshake, but we
+ * haven't yet negotiated link protocol versions, done a V3 handshake, and
+ * sent a netinfo cell. */
+#define OR_CONN_STATE_OR_HANDSHAKING_V3 7
+/** State for an OR connection: Ready to send/receive cells. */
+#define OR_CONN_STATE_OPEN 8
+#define _OR_CONN_STATE_MAX 8
 
 #define _EXIT_CONN_STATE_MIN 1
 /** State for an exit connection: waiting for response from DNS farm. */
@@ -820,9 +825,10 @@ typedef enum {
 #define CELL_NETINFO 8
 #define CELL_RELAY_EARLY 9
 
-/** True iff the cell command <b>x</b> is one that implies a variable-length
- * cell. */
-#define CELL_COMMAND_IS_VAR_LENGTH(x) ((x) == CELL_VERSIONS)
+#define CELL_VPADDING 128
+#define CELL_CERT 129
+#define CELL_AUTH_CHALLENGE 130
+#define CELL_AUTHENTICATE 131
 
 /** How long to test reachability before complaining to the user. */
 #define TIMEOUT_UNTIL_UNREACHABILITY_COMPLAINT (20*60)
@@ -1078,7 +1084,47 @@ typedef struct listener_connection_t {
 
 } listener_connection_t;
 
-/** Stores flags and information related to the portion of a v2 Tor OR
+/** Minimum length of the random part of an AUTH_CHALLENGE cell. */
+#define OR_AUTH_CHALLENGE_LEN 32
+
+/**
+ * @name Certificate types for CERT cells.
+ *
+ * These values are defined by the protocol, and affect how an X509
+ * certificate in a CERT cell is interpreted and used.
+ *
+ * @{ */
+/** A certificate that authenticates a TLS link key.  The subject key
+ * must match the key used in the TLS handshake; it must be signed by
+ * the identity key. */
+#define OR_CERT_TYPE_TLS_LINK 1
+/** A self-signed identity certificate. The subject key must be a
+ * 1024-bit RSA key. */
+#define OR_CERT_TYPE_ID_1024 2
+/** A certificate that authenticates a key used in an AUTHENTICATE cell
+ * in the v3 handshake.  The subject key must be a 1024-bit RSA key; it
+ * must be signed by the identity key */
+#define OR_CERT_TYPE_AUTH_1024 3
+/**@}*/
+
+/** The one currently supported type of AUTHENTICATE cell.  It contains
+ * a bunch of structures signed with an RSA1024 key.  The signed
+ * structures include a HMAC using negotiated TLS secrets, and a digest
+ * of all cells sent or received before the AUTHENTICATE cell (including
+ * the random server-generated AUTH_CHALLENGE cell).
+ */
+#define AUTHTYPE_RSA_SHA256_TLSSECRET 1
+
+/** The length of the part of the AUTHENTICATE cell body that the client and
+ * server can generate independently (when using RSA_SHA256_TLSSECRET). It
+ * contains everything except the client's timestamp, the client's randomly
+ * generated nonce, and the signature. */
+#define V3_AUTH_FIXED_PART_LEN (8+(32*6))
+/** The length of the part of the AUTHENTICATE cell body that the client
+ * signs. */
+#define V3_AUTH_BODY_LEN (V3_AUTH_FIXED_PART_LEN + 8 + 16)
+
+/** Stores flags and information related to the portion of a v2/v3 Tor OR
  * connection handshake that happens after the TLS handshake is finished.
  */
 typedef struct or_handshake_state_t {
@@ -1089,6 +1135,52 @@ typedef struct or_handshake_state_t {
   unsigned int started_here : 1;
   /** True iff we have received and processed a VERSIONS cell. */
   unsigned int received_versions : 1;
+  /** True iff we have received and processed an AUTH_CHALLENGE cell */
+  unsigned int received_auth_challenge : 1;
+  /** True iff we have received and processed a CERT cell. */
+  unsigned int received_cert_cell : 1;
+  /** True iff we have received and processed an AUTHENTICATE cell */
+  unsigned int received_authenticate : 1;
+
+  /* True iff we've received valid authentication to some identity. */
+  unsigned int authenticated : 1;
+
+  /** True iff we should feed outgoing cells into digest_sent and
+   * digest_received respectively.
+   *
+   * From the server's side of the v3 handshake, we want to capture everything
+   * from the VERSIONS cell through and including the AUTH_CHALLENGE cell.
+   * From the client's, we want to capture everything from the VERSIONS cell
+   * through but *not* including the AUTHENTICATE cell.
+   *
+   * @{ */
+  unsigned int digest_sent_data : 1;
+  unsigned int digest_received_data : 1;
+  /**@}*/
+
+  /** Identity digest that we have received and authenticated for our peer
+   * on this connection. */
+  uint8_t authenticated_peer_id[DIGEST_LEN];
+
+  /** Digests of the cells that we have sent or received as part of a V3
+   * handshake.  Used for making and checking AUTHENTICATE cells.
+   *
+   * @{
+   */
+  crypto_digest_env_t *digest_sent;
+  crypto_digest_env_t *digest_received;
+  /** @} */
+
+  /** Certificates that a connection initiator sent us in a CERT cell; we're
+   * holding on to them until we get an AUTHENTICATE cell.
+   *
+   * @{
+   */
+  /** The cert for the key that's supposed to sign the AUTHENTICATE cell */
+  tor_cert_t *auth_cert;
+  /** A self-signed identity certificate */
+  tor_cert_t *id_cert;
+  /**@}*/
 } or_handshake_state_t;
 
 /** Subtype of connection_t for an "OR connection" -- that is, one that speaks
@@ -1128,6 +1220,12 @@ typedef struct or_connection_t {
    * router itself has a problem.
    */
   unsigned int is_bad_for_new_circs:1;
+  /** True iff we have decided that the other end of this connection
+   * is a client.  Connections with this flag set should never be used
+   * to satisfy an EXTEND request.  */
+  unsigned int is_connection_with_client:1;
+  /** True iff this is an outgoing connection. */
+  unsigned int is_outgoing:1;
   unsigned int proxy_type:2; /**< One of PROXY_NONE...PROXY_SOCKS5 */
   uint8_t link_proto; /**< What protocol version are we using? 0 for
                        * "none negotiated yet." */
@@ -1598,11 +1696,6 @@ typedef struct signed_descriptor_t {
    * networkstatus that listed it.  0 for "never listed in a consensus or
    * status, so far as we know." */
   time_t last_listed_as_valid_until;
-#ifdef TRACK_SERVED_TIME
-  /** The last time we served anybody this descriptor.  Used for internal
-   * testing to see whether we're holding on to descriptors too long. */
-  time_t last_served_at; /*XXXX remove if not useful. */
-#endif
   /* If true, we do not ever try to save this object in the cache. */
   unsigned int do_not_cache : 1;
   /* If true, this item is meant to represent an extrainfo. */
@@ -2879,6 +2972,9 @@ typedef struct {
   config_line_t *ClientTransportPlugin; /**< List of client
                                            transport plugins. */
 
+  config_line_t *ServerTransportPlugin; /**< List of client
+                                           transport plugins. */
+
   int BridgeRelay; /**< Boolean: are we acting as a bridge relay? We make
                     * this explicit so we can change how we behave in the
                     * future. */
@@ -3061,6 +3157,10 @@ typedef struct {
   int AuthDirMaxServersPerAuthAddr; /**< Do not permit more than this
                                      * number of servers per IP address shared
                                      * with an authority. */
+
+  /** Should we assign the Guard flag to relays which would allow
+   * exploitation of CVE-2011-2768 against their clients? */
+  int GiveGuardFlagTo_CVE_2011_2768_VulnerableRelays;
 
   char *AccountingStart; /**< How long is the accounting interval, and when
                           * does it start? */
@@ -3349,6 +3449,8 @@ typedef struct {
 
   /** A list of Entry Guard-related configuration lines. */
   config_line_t *EntryGuards;
+
+  config_line_t *TransportProxies;
 
   /** These fields hold information on the history of bandwidth usage for
    * servers.  The "Ends" fields hold the time when we last updated the
@@ -3902,6 +4004,11 @@ typedef struct rend_encoded_v2_service_descriptor_t {
   char *desc_str; /**< Descriptor string. */
 } rend_encoded_v2_service_descriptor_t;
 
+/** The maximum number of non-circuit-build-timeout failures a hidden
+ * service client will tolerate while trying to build a circuit to an
+ * introduction point.  See also rend_intro_point_t.unreachable_count. */
+#define MAX_INTRO_POINT_REACHABILITY_FAILURES 5
+
 /** Introduction point information.  Used both in rend_service_t (on
  * the service side) and in rend_service_descriptor_t (on both the
  * client and service side). */
@@ -3909,6 +4016,18 @@ typedef struct rend_intro_point_t {
   extend_info_t *extend_info; /**< Extend info of this introduction point. */
   crypto_pk_env_t *intro_key; /**< Introduction key that replaces the service
                                * key, if this descriptor is V2. */
+
+  /** (Client side only) Flag indicating that a timeout has occurred
+   * after sending an INTRODUCE cell to this intro point.  After a
+   * timeout, an intro point should not be tried again during the same
+   * hidden service connection attempt, but it may be tried again
+   * during a future connection attempt. */
+  unsigned int timed_out : 1;
+
+  /** (Client side only) The number of times we have failed to build a
+   * circuit to this intro point for some reason other than our
+   * circuit-build timeout.  See also MAX_INTRO_POINT_REACHABILITY_FAILURES. */
+  unsigned int unreachable_count : 3;
 } rend_intro_point_t;
 
 /** Information used to connect to a hidden service.  Used on both the

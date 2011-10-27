@@ -140,10 +140,13 @@ conn_state_to_string(int type, int state)
         case OR_CONN_STATE_PROXY_HANDSHAKING: return "handshaking (proxy)";
         case OR_CONN_STATE_TLS_HANDSHAKING: return "handshaking (TLS)";
         case OR_CONN_STATE_TLS_CLIENT_RENEGOTIATING:
-          return "renegotiating (TLS)";
+          return "renegotiating (TLS, v2 handshake)";
         case OR_CONN_STATE_TLS_SERVER_RENEGOTIATING:
-          return "waiting for renegotiation (TLS)";
-        case OR_CONN_STATE_OR_HANDSHAKING: return "handshaking (Tor)";
+          return "waiting for renegotiation or V3 handshake";
+        case OR_CONN_STATE_OR_HANDSHAKING_V2:
+          return "handshaking (Tor, v2 handshake)";
+        case OR_CONN_STATE_OR_HANDSHAKING_V3:
+          return "handshaking (Tor, v3 handshake)";
         case OR_CONN_STATE_OPEN: return "open";
       }
       break;
@@ -1890,7 +1893,7 @@ retry_listeners(smartlist_t *old_conns,
   int retval = 0;
 
   if (default_addr) {
-    tor_addr_from_str(&dflt_addr, default_addr);
+    tor_addr_parse(&dflt_addr, default_addr);
   } else {
     tor_addr_make_unspec(&dflt_addr);
   }
@@ -1914,7 +1917,7 @@ retry_listeners(smartlist_t *old_conns,
           port->is_unix_addr = 1;
           memcpy(port->unix_addr, c->value, len+1);
         } else {
-          if (tor_addr_port_parse(c->value, &addr, &portval) < 0) {
+          if (tor_addr_port_lookup(c->value, &addr, &portval) < 0) {
             log_warn(LD_CONFIG, "Can't parse/resolve %s %s",
                      c->key, c->value);
             retval = -1;
@@ -1985,13 +1988,13 @@ retry_all_listeners(smartlist_t *replaced_conns,
                       options->ControlListenAddress,
                       options->ControlPort, "127.0.0.1",
                       new_conns, 0) < 0)
-    return -1;
+    retval = -1;
   if (retry_listeners(listeners,
                       CONN_TYPE_CONTROL_LISTENER,
                       options->ControlSocket,
                       options->ControlSocket ? 1 : 0, NULL,
                       new_conns, 1) < 0)
-    return -1;
+    retval = -1;
 
   /* Any members that were still in 'listeners' don't correspond to
    * any configured port.  Kill 'em. */
@@ -2020,9 +2023,12 @@ retry_all_listeners(smartlist_t *replaced_conns,
   return retval;
 }
 
-/** Return 1 if we should apply rate limiting to <b>conn</b>,
- * and 0 otherwise. Right now this just checks if it's an internal
- * IP address or an internal connection. */
+/** Return 1 if we should apply rate limiting to <b>conn</b>, and 0
+ * otherwise.
+ * Right now this just checks if it's an internal IP address or an
+ * internal connection. We also check if the connection uses pluggable
+ * transports, since we should then limit it even if it comes from an
+ * internal IP address. */
 static int
 connection_is_rate_limited(connection_t *conn)
 {
