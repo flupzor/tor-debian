@@ -258,7 +258,7 @@ parse_port_config(const char *string)
   } else {
     addrport = smartlist_get(sl,1);
     if (strchr(addrport, ':') || strchr(addrport, '.')) {
-      if (tor_addr_port_parse(addrport, &addr, &p)<0) {
+      if (tor_addr_port_lookup(addrport, &addr, &p)<0) {
         log_warn(LD_CONFIG,"Unparseable address in hidden service port "
                  "configuration.");
         goto err;
@@ -1424,7 +1424,20 @@ rend_service_intro_has_opened(origin_circuit_t *circuit)
       log_info(LD_CIRC|LD_REND, "We have just finished an introduction "
                "circuit, but we already have enough. Redefining purpose to "
                "general; leaving as internal.");
+
       TO_CIRCUIT(circuit)->purpose = CIRCUIT_PURPOSE_C_GENERAL;
+
+      {
+        rend_data_t *rend_data = circuit->rend_data;
+        circuit->rend_data = NULL;
+        rend_data_free(rend_data);
+      }
+      {
+        crypto_pk_env_t *intro_key = circuit->intro_key;
+        circuit->intro_key = NULL;
+        crypto_free_pk_env(intro_key);
+      }
+
       circuit_has_opened(circuit);
       return;
     }

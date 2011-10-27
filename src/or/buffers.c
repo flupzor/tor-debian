@@ -1005,6 +1005,33 @@ fetch_from_buf(char *string, size_t string_len, buf_t *buf)
   return (int)buf->datalen;
 }
 
+/** True iff the cell command <b>command</b> is one that implies a
+ * variable-length cell in Tor link protocol <b>linkproto</b>. */
+static inline int
+cell_command_is_var_length(uint8_t command, int linkproto)
+{
+  /* If linkproto is v2 (2), CELL_VERSIONS is the only variable-length cells
+   * work as implemented here. If it's 1, there are no variable-length cells.
+   * Tor does not support other versions right now, and so can't negotiate
+   * them.
+   */
+  switch (linkproto) {
+  case 1:
+    /* Link protocol version 1 has no variable-length cells. */
+    return 0;
+  case 2:
+    /* In link protocol version 2, VERSIONS is the only variable-length cell */
+    return command == CELL_VERSIONS;
+  case 0:
+  case 3:
+  default:
+    /* In link protocol version 3 and later, and in version "unknown",
+     * commands 128 and higher indicate variable-length. VERSIONS is
+     * grandfathered in. */
+    return command == CELL_VERSIONS || command >= 128;
+  }
+}
+
 /** Check <b>buf</b> for a variable-length cell according to the rules of link
  * protocol version <b>linkproto</b>.  If one is found, pull it off the buffer
  * and assign a newly allocated var_cell_t to *<b>out</b>, and return 1.
@@ -1019,12 +1046,6 @@ fetch_var_cell_from_buf(buf_t *buf, var_cell_t **out, int linkproto)
   var_cell_t *result;
   uint8_t command;
   uint16_t length;
-  /* If linkproto is unknown (0) or v2 (2), variable-length cells work as
-   * implemented here. If it's 1, there are no variable-length cells.  Tor
-   * does not support other versions right now, and so can't negotiate them.
-   */
-  if (linkproto == 1)
-    return 0;
   check();
   *out = NULL;
   if (buf->datalen < VAR_CELL_HEADER_SIZE)
@@ -1032,7 +1053,7 @@ fetch_var_cell_from_buf(buf_t *buf, var_cell_t **out, int linkproto)
   peek_from_buf(hdr, sizeof(hdr), buf);
 
   command = get_uint8(hdr+2);
-  if (!(CELL_COMMAND_IS_VAR_LENGTH(command)))
+  if (!(cell_command_is_var_length(command, linkproto)))
     return 0;
 
   length = ntohs(get_uint16(hdr+3));
@@ -1101,8 +1122,6 @@ fetch_var_cell_from_evbuffer(struct evbuffer *buf, var_cell_t **out,
   uint16_t cell_length;
   var_cell_t *cell;
   int result = 0;
-  if (linkproto == 1)
-    return 0;
 
   *out = NULL;
   buf_len = evbuffer_get_length(buf);
@@ -1113,7 +1132,7 @@ fetch_var_cell_from_evbuffer(struct evbuffer *buf, var_cell_t **out,
   tor_assert(n >= VAR_CELL_HEADER_SIZE);
 
   command = get_uint8(hdr+2);
-  if (!(CELL_COMMAND_IS_VAR_LENGTH(command))) {
+  if (!(cell_command_is_var_length(command, linkproto))) {
     goto done;
   }
 
@@ -1873,9 +1892,9 @@ parse_socks(const char *data, size_t datalen, socks_request_t *req,
           }
           if (log_sockstype)
             log_notice(LD_APP,
-                  "Your application (using socks5 to port %d) gave "
-                  "Tor a hostname, which means Tor will do the DNS resolve "
-                  "for you. This is good.", req->port);
+                  "Your application (using socks5 to port %d) instructed "
+                  "Tor to take care of the DNS resolution itself if "
+                  "necessary. This is good.", req->port);
           return 1;
         default: /* unsupported */
           log_warn(LD_APP,"socks5: unsupported address type %d. Rejecting.",
@@ -1974,9 +1993,9 @@ parse_socks(const char *data, size_t datalen, socks_request_t *req,
 
         if (log_sockstype)
           log_notice(LD_APP,
-                     "Your application (using socks4a to port %d) gave "
-                     "Tor a hostname, which means Tor will do the DNS resolve "
-                     "for you. This is good.", req->port);
+                     "Your application (using socks4a to port %d) instructed "
+                     "Tor to take care of the DNS resolution itself if "
+                     "necessary. This is good.", req->port);
       }
       log_debug(LD_APP,"socks4: Everything is here. Success.");
       strlcpy(req->address, startaddr ? startaddr : tmpbuf,

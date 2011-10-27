@@ -37,6 +37,7 @@
 #include "ntmain.h"
 #include "onion.h"
 #include "policies.h"
+#include "transports.h"
 #include "relay.h"
 #include "rendclient.h"
 #include "rendcommon.h"
@@ -1086,7 +1087,9 @@ run_scheduled_events(time_t now)
   static int should_init_bridge_stats = 1;
   static time_t time_to_retry_dns_init = 0;
   static time_t time_to_next_heartbeat = 0;
+  static int has_validated_pt = 0;
   const or_options_t *options = get_options();
+
   int is_server = server_mode(options);
   int i;
   int have_dir_info;
@@ -1262,6 +1265,11 @@ run_scheduled_events(time_t now)
     }
     if (options->ConnDirectionStatistics) {
       time_t next_write = rep_hist_conn_stats_write(time_to_write_stats_files);
+      if (next_write && next_write < next_time_to_write_stats_files)
+        next_time_to_write_stats_files = next_write;
+    }
+    if (options->BridgeAuthoritativeDir) {
+      time_t next_write = rep_hist_desc_stats_write(time_to_write_stats_files);
       if (next_write && next_write < next_time_to_write_stats_files)
         next_time_to_write_stats_files = next_write;
     }
@@ -1453,7 +1461,7 @@ run_scheduled_events(time_t now)
 
   /** 9. and if we're a server, check whether our DNS is telling stories to
    * us. */
-  if (is_server && time_to_check_for_correct_dns < now) {
+  if (public_server_mode(options) && time_to_check_for_correct_dns < now) {
     if (!time_to_check_for_correct_dns) {
       time_to_check_for_correct_dns = now + 60 + crypto_rand_int(120);
     } else {
@@ -1463,7 +1471,7 @@ run_scheduled_events(time_t now)
     }
   }
 
-  /** 10b. write bridge networkstatus file to disk */
+  /** 10. write bridge networkstatus file to disk */
   if (options->BridgeAuthoritativeDir &&
       time_to_write_bridge_status_file < now) {
     networkstatus_dump_bridge_status_to_file(now);
@@ -1471,6 +1479,7 @@ run_scheduled_events(time_t now)
     time_to_write_bridge_status_file = now+BRIDGE_STATUSFILE_INTERVAL;
   }
 
+  /** 11. check the port forwarding app */
   if (time_to_check_port_forwarding < now &&
       options->PortForwarding &&
       is_server) {
@@ -1482,7 +1491,19 @@ run_scheduled_events(time_t now)
     time_to_check_port_forwarding = now+PORT_FORWARDING_CHECK_INTERVAL;
   }
 
-  /** 11. write the heartbeat message */
+  /** 11b. check pending unconfigured managed proxies */
+  if (pt_proxies_configuration_pending())
+    pt_configure_remaining_proxies();
+
+  /** 11c. validate pluggable transports configuration if we need to */
+  if (!has_validated_pt &&
+      (options->Bridges || options->ClientTransportPlugin)) {
+    if (validate_pluggable_transports_config() == 0) {
+      has_validated_pt = 1;
+    }
+  }
+
+  /** 12. write the heartbeat message */
   if (options->HeartbeatPeriod &&
       time_to_next_heartbeat < now) {
     log_heartbeat(now);
@@ -1668,7 +1689,8 @@ ip_address_changed(int at_interface)
   if (at_interface) {
     if (! server) {
       /* Okay, change our keys. */
-      init_keys();
+      if (init_keys()<0)
+        log_warn(LD_GENERAL, "Unable to rotate keys after IP change!");
     }
   } else {
     if (server) {
@@ -2341,6 +2363,7 @@ tor_free_all(int postfork)
   clear_pending_onions();
   circuit_free_all();
   entry_guards_free_all();
+  pt_free_all();
   connection_free_all();
   buf_shrink_freelists(1);
   memarea_clear_freelist();
