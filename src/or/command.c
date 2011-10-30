@@ -148,6 +148,9 @@ command_process_cell(cell_t *cell, or_connection_t *conn)
 #define PROCESS_CELL(tp, cl, cn) command_process_ ## tp ## _cell(cl, cn)
 #endif
 
+  if (conn->_base.marked_for_close)
+    return;
+
   /* Reject all but VERSIONS and NETINFO when handshaking. */
   /* (VERSIONS should actually be impossible; it's variable-length.) */
   if (handshaking && cell->command != CELL_VERSIONS &&
@@ -229,6 +232,9 @@ command_process_var_cell(var_cell_t *cell, or_connection_t *conn)
     current_second = now;
   }
 #endif
+
+  if (conn->_base.marked_for_close)
+    return;
 
   switch (conn->_base.state)
   {
@@ -1020,8 +1026,6 @@ command_process_cert_cell(var_cell_t *cell, or_connection_t *conn)
       ERR("The certs we wanted were missing");
 
     /* Remember these certificates so we can check an AUTHENTICATE cell */
-    conn->handshake_state->id_cert = id_cert;
-    conn->handshake_state->auth_cert = auth_cert;
     if (! tor_tls_cert_is_valid(auth_cert, id_cert, 1))
       ERR("The authentication certificate was not valid");
     if (! tor_tls_cert_is_valid(id_cert, id_cert, 1))
@@ -1032,6 +1036,8 @@ command_process_cert_cell(var_cell_t *cell, or_connection_t *conn)
              safe_str(conn->_base.address), conn->_base.port);
     /* XXXX check more stuff? */
 
+    conn->handshake_state->id_cert = id_cert;
+    conn->handshake_state->auth_cert = auth_cert;
     id_cert = auth_cert = NULL;
   }
 
@@ -1135,7 +1141,7 @@ command_process_authenticate_cell(var_cell_t *cell, or_connection_t *conn)
 #define ERR(s)                                                  \
   do {                                                          \
     log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,                      \
-           "Received a bad AUTHETNICATE cell from %s:%d: %s",   \
+           "Received a bad AUTHENTICATE cell from %s:%d: %s",   \
            safe_str(conn->_base.address), conn->_base.port, (s));       \
     connection_mark_for_close(TO_CONN(conn));                   \
     return;                                                     \
