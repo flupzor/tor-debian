@@ -52,6 +52,13 @@
 #include <string.h>
 #include <assert.h>
 
+/* tor_addr_is_null() and maybe other functions rely on AF_UNSPEC being 0 to
+ * work correctly. Bail out here if we've found a platform where AF_UNSPEC
+ * isn't 0. */
+#if AF_UNSPEC != 0
+#error We rely on AF_UNSPEC being 0. Let us know about your platform, please!
+#endif
+
 /** Convert the tor_addr_t in <b>a</b>, with port in <b>port</b>, into a
  * sockaddr object in *<b>sa_out</b> of object size <b>len</b>.  If not enough
  * room is available in sa_out, or on error, return 0.  On success, return
@@ -350,15 +357,21 @@ tor_addr_to_str(char *dest, const tor_addr_t *addr, size_t len, int decorate)
 
   switch (tor_addr_family(addr)) {
     case AF_INET:
-      if (len<3)
+      /* Shortest addr x.x.x.x + \0 */
+      if (len < 8)
         return NULL;
-        ptr = tor_inet_ntop(AF_INET, &addr->addr.in_addr, dest, len);
+      ptr = tor_inet_ntop(AF_INET, &addr->addr.in_addr, dest, len);
       break;
     case AF_INET6:
+      /* Shortest addr [ :: ] + \0 */
+      if (len < (3 + (decorate ? 2 : 0)))
+        return NULL;
+
       if (decorate)
         ptr = tor_inet_ntop(AF_INET6, &addr->addr.in6_addr, dest+1, len-2);
       else
         ptr = tor_inet_ntop(AF_INET6, &addr->addr.in6_addr, dest, len);
+
       if (ptr && decorate) {
         *dest = '[';
         memcpy(dest+strlen(dest), "]", 2);
@@ -470,13 +483,17 @@ tor_addr_parse_PTR_name(tor_addr_t *result, const char *address,
   return 0;
 }
 
-/** Convert <b>addr</b> to an in-addr.arpa name or a .ip6.arpa name, and store
- * the result in the <b>outlen</b>-byte buffer at <b>out</b>.  Return 0 on
- * success, -1 on failure. */
+/** Convert <b>addr</b> to an in-addr.arpa name or a .ip6.arpa name,
+ * and store the result in the <b>outlen</b>-byte buffer at
+ * <b>out</b>.  Return the number of chars written to <b>out</b>, not
+ * including the trailing \0, on success. Returns -1 on failure. */
 int
 tor_addr_to_PTR_name(char *out, size_t outlen,
-                                const tor_addr_t *addr)
+                     const tor_addr_t *addr)
 {
+  tor_assert(out);
+  tor_assert(addr);
+
   if (addr->family == AF_INET) {
     uint32_t a = tor_addr_to_ipv4h(addr);
 
@@ -499,7 +516,7 @@ tor_addr_to_PTR_name(char *out, size_t outlen,
       *cp++ = '.';
     }
     memcpy(cp, "ip6.arpa", 9); /* 8 characters plus NUL */
-    return 0;
+    return 32 * 2 + 8;
   }
   return -1;
 }

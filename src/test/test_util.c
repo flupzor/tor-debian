@@ -363,16 +363,6 @@ test_util_strmisc(void)
   test_assert(!tor_strisprint(cp));
   tor_free(cp);
 
-  /* Test eat_whitespace. */
-  {
-    const char *s = "  \n a";
-    test_eq_ptr(eat_whitespace(s), s+4);
-    s = "abcd";
-    test_eq_ptr(eat_whitespace(s), s);
-    s = "#xyz\nab";
-    test_eq_ptr(eat_whitespace(s), s+5);
-  }
-
   /* Test memmem and memstr */
   {
     const char *haystack = "abcde";
@@ -408,6 +398,20 @@ test_util_strmisc(void)
     tor_free(cp);
     SMARTLIST_FOREACH(sl, char *, cp, tor_free(cp));
     smartlist_free(sl);
+  }
+
+  /* Test hex_str */
+  {
+    char binary_data[64];
+    size_t i;
+    for (i = 0; i < sizeof(binary_data); ++i)
+      binary_data[i] = i;
+    test_streq(hex_str(binary_data, 0), "");
+    test_streq(hex_str(binary_data, 1), "00");
+    test_streq(hex_str(binary_data, 17), "000102030405060708090A0B0C0D0E0F10");
+    test_streq(hex_str(binary_data, 32),
+               "000102030405060708090A0B0C0D0E0F"
+               "101112131415161718191A1B1C1D1E1F");
   }
  done:
   ;
@@ -1593,7 +1597,7 @@ test_util_join_win_cmdline(void *ptr)
     {"a\\\\\\b", "de fg", "H", NULL}, // Backslashes
     {"a\\\"b", "\\c", "D\\", NULL}, // Backslashes before quote
     {"a\\\\b c", "d", "E", NULL}, // Backslashes not before quote
-    {} // Terminator
+    { NULL } // Terminator
   };
 
   const char *cmdlines[] = {
@@ -1645,7 +1649,7 @@ test_util_split_lines(void *ptr)
     {"\n\rfoo\n\rbar\r\n", 12, {"foo", "bar", NULL}},
     {"fo o\r\nb\tar", 10, {"fo o", "b.ar", NULL}},
     {"\x0f""f\0o\0\n\x01""b\0r\0\r", 12, {".f.o.", ".b.r.", NULL}},
-    {NULL, 0, {}}
+    {NULL, 0, { NULL }}
   };
 
   int i, j;
@@ -1738,6 +1742,92 @@ test_util_di_ops(void)
   ;
 }
 
+/**
+ * Test counting high bits
+ */
+static void
+test_util_n_bits_set(void *ptr)
+{
+  (void)ptr;
+  test_eq(n_bits_set_u8(0), 0);
+  test_eq(n_bits_set_u8(1), 1);
+  test_eq(n_bits_set_u8(129), 2);
+  test_eq(n_bits_set_u8(255), 8);
+ done:
+  ;
+}
+
+/**
+ * Test LHS whitespace (and comment) eater
+ */
+static void
+test_util_eat_whitespace(void *ptr)
+{
+  const char ws[] = { ' ', '\t', '\r' }; /* Except NL */
+  char str[80];
+  size_t i;
+
+  (void)ptr;
+
+  /* Try one leading ws */
+  strcpy(str, "fuubaar");
+  for (i = 0; i < sizeof(ws); ++i) {
+    str[0] = ws[i];
+    test_streq(eat_whitespace(str), str + 1);
+    test_streq(eat_whitespace_eos(str, str + strlen(str)), str + 1);
+    test_streq(eat_whitespace_eos_no_nl(str, str + strlen(str)), str + 1);
+    test_streq(eat_whitespace_no_nl(str), str + 1);
+  }
+  str[0] = '\n';
+  test_streq(eat_whitespace(str), str + 1);
+  test_streq(eat_whitespace_eos(str, str + strlen(str)), str + 1);
+
+  /* Empty string */
+  strcpy(str, "");
+  test_eq_ptr(eat_whitespace(str), str);
+  test_eq_ptr(eat_whitespace_eos(str, str), str);
+  test_eq_ptr(eat_whitespace_eos_no_nl(str, str), str);
+  test_eq_ptr(eat_whitespace_no_nl(str), str);
+
+  /* Only ws */
+  strcpy(str, " \t\r\n");
+  test_eq_ptr(eat_whitespace(str), str + strlen(str));
+  test_eq_ptr(eat_whitespace_eos(str, str + strlen(str)), str + strlen(str));
+
+  strcpy(str, " \t\r ");
+  test_eq_ptr(eat_whitespace_no_nl(str), str + strlen(str));
+  test_eq_ptr(eat_whitespace_eos_no_nl(str, str + strlen(str)),
+              str + strlen(str));
+
+  /* Multiple ws */
+  strcpy(str, "fuubaar");
+  for (i = 0; i < sizeof(ws); ++i)
+    str[i] = ws[i];
+  test_streq(eat_whitespace(str), str + sizeof(ws));
+  test_streq(eat_whitespace_eos(str, str + strlen(str)), str + sizeof(ws));
+  test_streq(eat_whitespace_no_nl(str), str + sizeof(ws));
+  test_streq(eat_whitespace_eos_no_nl(str, str + strlen(str)),
+             str + sizeof(ws));
+
+  /* Eat comment */
+  strcpy(str, "# Comment \n No Comment");
+  test_streq(eat_whitespace(str), "No Comment");
+  test_streq(eat_whitespace_eos(str, str + strlen(str)), "No Comment");
+
+  /* Eat comment & ws mix */
+  strcpy(str, " # \t Comment \n\t\nNo Comment");
+  test_streq(eat_whitespace(str), "No Comment");
+  test_streq(eat_whitespace_eos(str, str + strlen(str)), "No Comment");
+
+  /* Eat entire comment */
+  strcpy(str, "#Comment");
+  test_eq_ptr(eat_whitespace(str), str + strlen(str));
+  test_eq_ptr(eat_whitespace_eos(str, str + strlen(str)), str + strlen(str));
+
+ done:
+  ;
+}
+
 #define UTIL_LEGACY(name)                                               \
   { #name, legacy_test_helper, 0, &legacy_setup, test_util_ ## name }
 
@@ -1775,6 +1865,8 @@ struct testcase_t util_tests[] = {
   UTIL_TEST(spawn_background_partial_read, 0),
   UTIL_TEST(join_win_cmdline, 0),
   UTIL_TEST(split_lines, 0),
+  UTIL_TEST(n_bits_set, 0),
+  UTIL_TEST(eat_whitespace, 0),
   END_OF_TESTCASES
 };
 

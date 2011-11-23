@@ -45,9 +45,6 @@
 #ifdef HAVE_SYS_SOCKET_H
 #include <sys/socket.h>
 #endif
-#ifdef HAVE_SYS_TYPES_H
-#include <sys/types.h>
-#endif
 #ifdef HAVE_NETINET_IN_H
 #include <netinet/in.h>
 #endif
@@ -182,6 +179,10 @@ extern INLINE double U64_TO_DBL(uint64_t x) {
 
 /** Expands to a syntactically valid empty statement.  */
 #define STMT_NIL (void)0
+
+/** Expands to a syntactically valid empty statement, explicitly (void)ing its
+ * argument. */
+#define STMT_VOID(a) while (0) { (void)(a); }
 
 #ifdef __GNUC__
 /** STMT_BEGIN and STMT_END are used to wrap blocks inside macros so that
@@ -621,7 +622,7 @@ void tor_threads_init(void);
 #else
 #define tor_mutex_new() ((tor_mutex_t*)tor_malloc(sizeof(int)))
 #define tor_mutex_init(m) STMT_NIL
-#define tor_mutex_acquire(m) STMT_NIL
+#define tor_mutex_acquire(m) STMT_VOID(m)
 #define tor_mutex_release(m) STMT_NIL
 #define tor_mutex_free(m) STMT_BEGIN tor_free(m); STMT_END
 #define tor_mutex_uninit(m) STMT_NIL
