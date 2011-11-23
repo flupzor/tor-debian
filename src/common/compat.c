@@ -1632,7 +1632,7 @@ tor_inet_ntop(int af, const void *src, char *dst, size_t len)
                      addr->s6_addr[12], addr->s6_addr[13],
                      addr->s6_addr[14], addr->s6_addr[15]);
       }
-      if (strlen(buf) > len)
+      if ((strlen(buf) + 1) > len) /* +1 for \0 */
         return NULL;
       strlcpy(dst, buf, len);
       return dst;
@@ -1673,7 +1673,7 @@ tor_inet_ntop(int af, const void *src, char *dst, size_t len)
       }
     }
     *cp = '\0';
-    if (strlen(buf) > len)
+    if ((strlen(buf) + 1) > len) /* +1 for \0 */
       return NULL;
     strlcpy(dst, buf, len);
     return dst;
@@ -1733,24 +1733,30 @@ tor_inet_pton(int af, const char *src, void *dst)
         return 0;
       if (TOR_ISXDIGIT(*src)) {
         char *next;
+        int len;
         long r = strtol(src, &next, 16);
-        if (next > 4+src)
-          return 0;
-        if (next == src)
-          return 0;
-        if (r<0 || r>65536)
-          return 0;
+        tor_assert(next != NULL);
+        tor_assert(next != src);
 
+        len = *next == '\0' ? eow - src : next - src;
+        if (len > 4)
+          return 0;
+        if (len > 1 && !TOR_ISXDIGIT(src[1]))
+          return 0; /* 0x is not valid */
+
+        tor_assert(r >= 0);
+        tor_assert(r < 65536);
         words[i++] = (uint16_t)r;
         setWords++;
         src = next;
         if (*src != ':' && src != eow)
           return 0;
         ++src;
-      } else if (*src == ':' && i > 0 && gapPos==-1) {
+      } else if (*src == ':' && i > 0 && gapPos == -1) {
         gapPos = i;
         ++src;
-      } else if (*src == ':' && i == 0 && src[1] == ':' && gapPos==-1) {
+      } else if (*src == ':' && i == 0 && src+1 < eow && src[1] == ':' &&
+                 gapPos == -1) {
         gapPos = i;
         src += 2;
       } else {

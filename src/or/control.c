@@ -1055,7 +1055,10 @@ handle_control_authenticate(control_connection_t *conn, uint32_t len,
   int bad_cookie=0, bad_password=0;
   smartlist_t *sl = NULL;
 
-  if (TOR_ISXDIGIT(body[0])) {
+  if (!len) {
+    password = tor_strdup("");
+    password_len = 0;
+  } else if (TOR_ISXDIGIT(body[0])) {
     cp = body;
     while (TOR_ISXDIGIT(*cp))
       ++cp;
@@ -1072,9 +1075,6 @@ handle_control_authenticate(control_connection_t *conn, uint32_t len,
       tor_free(password);
       return 0;
     }
-  } else if (TOR_ISSPACE(body[0])) {
-    password = tor_strdup("");
-    password_len = 0;
   } else {
     if (!decode_escaped_string(body, len, &password, &password_len)) {
       connection_write_str_to_buf("551 Invalid quoted string.  You need "
@@ -1597,6 +1597,8 @@ getinfo_helper_dir(control_connection_t *control_conn,
         *answer = tor_strndup(body, ri->cache_info.signed_descriptor_len);
     }
   } else if (!strcmpstart(question, "desc/name/")) {
+    /* XXX023 Setting 'warn_if_unnamed' here is a bit silly -- the
+     * warning goes to the user, not to the controller. */
     ri = router_get_by_nickname(question+strlen("desc/name/"),1);
     if (ri) {
       const char *body = signed_descriptor_get_body(&ri->cache_info);
@@ -1640,6 +1642,25 @@ getinfo_helper_dir(control_connection_t *control_conn,
     *answer = smartlist_join_strings(sl, "", 0, NULL);
     SMARTLIST_FOREACH(sl, char *, c, tor_free(c));
     smartlist_free(sl);
+  } else if (!strcmpstart(question, "md/id/")) {
+    const node_t *node = node_get_by_hex_id(question+strlen("md/id/"));
+    const microdesc_t *md = NULL;
+    if (node) md = node->md;
+    if (md) {
+      tor_assert(md->body);
+      *answer = tor_strndup(md->body, md->bodylen);
+    }
+  } else if (!strcmpstart(question, "md/name/")) {
+    /* XXX023 Setting 'warn_if_unnamed' here is a bit silly -- the
+     * warning goes to the user, not to the controller. */
+    const node_t *node = node_get_by_nickname(question+strlen("md/name/"), 1);
+    /* XXXX duplicated code */
+    const microdesc_t *md = NULL;
+    if (node) md = node->md;
+    if (md) {
+      tor_assert(md->body);
+      *answer = tor_strndup(md->body, md->bodylen);
+    }
   } else if (!strcmpstart(question, "desc-annotations/id/")) {
     ri = router_get_by_hexdigest(question+
                                  strlen("desc-annotations/id/"));
@@ -2034,6 +2055,8 @@ static const getinfo_item_t getinfo_items[] = {
   ITEM("desc/all-recent", dir,
        "All non-expired, non-superseded router descriptors."),
   ITEM("desc/all-recent-extrainfo-hack", dir, NULL), /* Hack. */
+  PREFIX("md/id/", dir, "Microdescriptors by ID"),
+  PREFIX("md/name/", dir, "Microdescriptors by name"),
   PREFIX("extra-info/digest/", dir, "Extra-info documents by digest."),
   PREFIX("net/listeners/", listeners, "Bound addresses by type"),
   ITEM("ns/all", networkstatus,
@@ -3095,7 +3118,7 @@ connection_control_process_inbuf(control_connection_t *conn)
   args = conn->incoming_cmd+cmd_len+1;
   tor_assert(data_len>(size_t)cmd_len);
   data_len -= (cmd_len+1); /* skip the command and NUL we added after it */
-  while (*args == ' ' || *args == '\t') {
+  while (TOR_ISSPACE(*args)) {
     ++args;
     --data_len;
   }
