@@ -1,3 +1,13 @@
+tor (0.2.3.8-alpha-X) XXperimental; urgency=low
+
+  * There no longer is a document called INSTALL to copy to
+    usr/share/docs/tor, so get rid of the lintian override.  Since that was
+    the only one in the tor package get rid of installing overrides for the
+    tor package entirely - there's still one override in tor-geoipdb
+    (closes Tor #4576).
+
+ -- Peter Palfrader <weasel@debian.org>  Fri, 25 Nov 2011 19:18:19 +0100
+
 tor (0.2.3.8-alpha-1) experimental; urgency=low
 
   * New upstream version.
