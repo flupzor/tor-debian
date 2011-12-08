@@ -125,6 +125,12 @@ Other options can be specified either on the command-line (--option
     You probably don't need to adjust this. It has no effect on Windows
     since that platform lacks getrlimit(). (Default: 1000)
 
+**DisableNetwork** **0**|**1**::
+    When this option is set, we don't listen for or accept any connections
+    other than controller connections, and we don't make any outbound
+    connections.  Controllers sometimes use this option to avoid using
+    the network until Tor is fully configured. (Default: 0)
+
 **ConstrainedSockets** **0**|**1**::
     If set, Tor will tell the kernel to attempt to shrink the buffers for all
     sockets to the size specified in **ConstrainedSockSize**. This is useful for
@@ -239,6 +245,12 @@ Other options can be specified either on the command-line (--option
     distinguishable from other users, because you won't believe the same
     authorities they do.
 
+**DynamicDHGroups** **0**|**1**::
+    If this option is set to 1, when running as a server, generate our
+    own Diffie-Hellman group instead of using the one from Apache's mod_ssl.
+    This option may help circumvent censorship based on static
+    Diffie-Hellman parameters. (Default: 1).
+
 **AlternateDirAuthority** [__nickname__] [**flags**] __address__:__port__ __fingerprint__ +
 
 **AlternateHSAuthority** [__nickname__] [**flags**] __address__:__port__ __fingerprint__ +
@@ -258,6 +270,20 @@ Other options can be specified either on the command-line (--option
     option requires that you start your Tor as root, and you should use the
     **User** option to properly reduce Tor's privileges. (Default: 0)
 
+**DisableDebuggerAttachment** **0**|**1**::
+   If set to 1, Tor will attempt to prevent basic debugging attachment attempts
+   by other processes. It has no impact for users who wish to attach if they
+   have CAP_SYS_PTRACE or if they are root.  We believe that this feature
+   works on modern Gnu/Linux distributions, and that it may also work on *BSD
+   systems (untested).  Some modern Gnu/Linux systems such as Ubuntu have the
+   kernel.yama.ptrace_scope sysctl and by default enable it as an attempt to
+   limit the PTRACE scope for all user processes by default. This feature will
+   attempt to limit the PTRACE scope for Tor specifically - it will not attempt
+   to alter the system wide ptrace scope as it may not even exist. If you wish
+   to attach to Tor with a debugger such as gdb or strace you will want to set
+   this to 0 for the duration of your debugging. Normal users should leave it
+   on. (Default: 1)
+ 
 **FetchDirInfoEarly** **0**|**1**::
     If set to 1, Tor will always fetch directory information like other
     directory caches, even if you don't meet the normal criteria for fetching
@@ -665,11 +691,44 @@ The following options are useful only for clients (that is, if
     5050, 5190, 5222, 5223, 6523, 6667, 6697, 8300)
 
 **MapAddress** __address__ __newaddress__::
-    When a request for address arrives to Tor, it will rewrite it to newaddress
+    When a request for address arrives to Tor, it will transform to newaddress
     before processing it. For example, if you always want connections to
-    www.indymedia.org to exit via __torserver__ (where __torserver__ is the
-    nickname of the server), use "MapAddress www.indymedia.org
-    www.indymedia.org.torserver.exit".
+    www.example.com to exit via __torserver__ (where __torserver__ is the
+    nickname of the server), use "MapAddress www.example.com
+    www.example.com.torserver.exit". If the value is prefixed with a
+    "\*.", matches an entire domain. For example, if you
+    always want connections to example.com and any if its subdomains
+    to exit via
+    __torserver__ (where __torserver__ is the nickname of the server), use
+    "MapAddress \*.example.com \*.example.com.torserver.exit". (Note the
+    leading "*." in each part of the directive.) You can also redirect all
+    subdomains of a domain to a single address. For example, "MapAddress
+    *.example.com www.example.com". +
+ +
+    NOTES:
+
+    1. When evaluating MapAddress expressions Tor stops when it hits the most
+    recently added expression that matches the requested address. So if you
+    have the following in your torrc, www.torproject.org will map to 1.1.1.1:
+
+     MapAddress www.torproject.org 2.2.2.2
+     MapAddress www.torproject.org 1.1.1.1
+
+    2. Tor evaluates the MapAddress configuration until it finds no matches. So
+    if you have the following in your torrc, www.torproject.org will map to
+    2.2.2.2:
+
+      MapAddress 1.1.1.1 2.2.2.2
+      MapAddress www.torproject.org 1.1.1.1
+
+    3. The following MapAddress expression is invalid (and will be
+    ignored) because you cannot map from a specific address to a wildcard
+    address:
+
+      MapAddress www.torproject.org *.torproject.org.torserver.exit
+
+    4. Using a wildcard to match only part of a string (as in *ample.com) is
+    also invalid.
 
 **NewCircuitPeriod** __NUM__::
     Every NUM seconds consider whether to build a new circuit. (Default: 30
@@ -957,6 +1016,13 @@ The following options are useful only for clients (that is, if
     Tor will look at the UseOptimisticData parameter in the networkstatus.
     (Default: auto)
 
+**Tor2webMode** **0**|**1**::
+    When this option is set, Tor connects to hidden services
+    **non-anonymously**.  This option also disables client connections to
+    non-hidden-service hostnames through Tor. It **must only** be used when
+    running a tor2web Hidden Service web proxy.
+    To enable this option the compile time flag --enable-tor2webmode must be
+    specified. (Default: 0)
 
 SERVER OPTIONS
 --------------

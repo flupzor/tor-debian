@@ -96,6 +96,8 @@ test_dir_formats(void)
   r1->cache_info.published_on = 0;
   r1->or_port = 9000;
   r1->dir_port = 9003;
+  tor_addr_parse(&r1->ipv6_addr, "1:2:3:4::");
+  r1->ipv6_orport = 9999;
   r1->onion_pkey = crypto_pk_dup_key(pk1);
   r1->identity_pkey = crypto_pk_dup_key(pk2);
   r1->bandwidthrate = 1000;
@@ -141,6 +143,7 @@ test_dir_formats(void)
   test_assert(router_dump_router_to_string(buf, 2048, r1, pk2)>0);
 
   strlcpy(buf2, "router Magri 18.244.0.1 9000 0 9003\n"
+          "or-address [1:2:3:4::]:9999\n"
           "platform Tor "VERSION" on ", sizeof(buf2));
   strlcat(buf2, get_uname(), sizeof(buf2));
   strlcat(buf2, "\n"
@@ -620,13 +623,81 @@ test_dir_param_voting(void)
   test_eq(0, networkstatus_get_param(&vote4, "foobar", 0, -100, 8));
 
   smartlist_add(votes, &vote1);
+
+  /* Do the first tests without adding all the other votes, for
+   * networks without many dirauths. */
+
+  res = dirvote_compute_params(votes, 11, 6);
+  test_streq(res, "ab=90 abcd=20 cw=50 x-yz=-99");
+  tor_free(res);
+
+  res = dirvote_compute_params(votes, 12, 2);
+  test_streq(res, "");
+  tor_free(res);
+
+  res = dirvote_compute_params(votes, 12, 1);
+  test_streq(res, "ab=90 abcd=20 cw=50 x-yz=-99");
+  tor_free(res);
+
   smartlist_add(votes, &vote2);
+
+  res = dirvote_compute_params(votes, 11, 2);
+  test_streq(res, "ab=27 abcd=20 cw=5 x-yz=-99");
+  tor_free(res);
+
+  res = dirvote_compute_params(votes, 12, 2);
+  test_streq(res, "ab=27 cw=5 x-yz=-99");
+  tor_free(res);
+
+  res = dirvote_compute_params(votes, 12, 3);
+  test_streq(res, "ab=27 cw=5 x-yz=-99");
+  tor_free(res);
+
+  res = dirvote_compute_params(votes, 12, 6);
+  test_streq(res, "");
+  tor_free(res);
+
   smartlist_add(votes, &vote3);
+
+  res = dirvote_compute_params(votes, 11, 3);
+  test_streq(res, "ab=27 abcd=20 c=60 cw=50 x-yz=-9 zzzzz=101");
+  tor_free(res);
+
+  res = dirvote_compute_params(votes, 12, 3);
+  test_streq(res, "ab=27 abcd=20 cw=50 x-yz=-9");
+  tor_free(res);
+
+  res = dirvote_compute_params(votes, 12, 5);
+  test_streq(res, "cw=50 x-yz=-9");
+  tor_free(res);
+
+  res = dirvote_compute_params(votes, 12, 9);
+  test_streq(res, "cw=50 x-yz=-9");
+  tor_free(res);
+
   smartlist_add(votes, &vote4);
 
-  res = dirvote_compute_params(votes);
-  test_streq(res,
-             "ab=90 abcd=20 c=1 cw=50 x-yz=-9 zzzzz=101");
+  res = dirvote_compute_params(votes, 11, 4);
+  test_streq(res, "ab=90 abcd=20 c=1 cw=50 x-yz=-9 zzzzz=101");
+  tor_free(res);
+
+  res = dirvote_compute_params(votes, 12, 4);
+  test_streq(res, "ab=90 abcd=20 cw=50 x-yz=-9");
+  tor_free(res);
+
+  res = dirvote_compute_params(votes, 12, 5);
+  test_streq(res, "ab=90 abcd=20 cw=50 x-yz=-9");
+  tor_free(res);
+
+  /* Test that the special-cased "at least three dirauths voted for
+   * this param" logic works as expected. */
+  res = dirvote_compute_params(votes, 12, 6);
+  test_streq(res, "ab=90 abcd=20 cw=50 x-yz=-9");
+  tor_free(res);
+
+  res = dirvote_compute_params(votes, 12, 10);
+  test_streq(res, "ab=90 abcd=20 cw=50 x-yz=-9");
+  tor_free(res);
 
  done:
   tor_free(res);
@@ -1049,7 +1120,7 @@ test_dir_v3_networkstatus(void)
              "Running:Stable:V2Dir:Valid");
   tor_free(cp);
   cp = smartlist_join_strings(con->net_params, ":", 0, NULL);
-  test_streq(cp, "bar=2000000000:circuitwindow=80:foo=660");
+  test_streq(cp, "circuitwindow=80:foo=660");
   tor_free(cp);
 
   test_eq(4, smartlist_len(con->voters)); /*3 voters, 1 legacy key.*/

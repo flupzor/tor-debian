@@ -880,7 +880,8 @@ connection_create_listener(const struct sockaddr *listensockaddr,
     return NULL;
   }
 
-  if (listensockaddr->sa_family == AF_INET) {
+  if (listensockaddr->sa_family == AF_INET ||
+      listensockaddr->sa_family == AF_INET6) {
     int is_tcp = (type != CONN_TYPE_AP_DNS_LISTENER);
     if (is_tcp)
       start_reading = 1;
@@ -890,7 +891,7 @@ connection_create_listener(const struct sockaddr *listensockaddr,
     log_notice(LD_NET, "Opening %s on %s:%d",
                conn_type_to_string(type), fmt_addr(&addr), usePort);
 
-    s = tor_open_socket(PF_INET,
+    s = tor_open_socket(tor_addr_family(&addr),
                         is_tcp ? SOCK_STREAM : SOCK_DGRAM,
                         is_tcp ? IPPROTO_TCP: IPPROTO_UDP);
     if (!SOCKET_OK(s)) {
@@ -1317,6 +1318,24 @@ connection_connect(connection_t *conn, const char *address,
     protocol_family = PF_INET6;
   else
     protocol_family = PF_INET;
+
+  if (get_options()->DisableNetwork) {
+    /* We should never even try to connect anyplace if DisableNetwork is set.
+     * Warn if we do, and refuse to make the connection. */
+    static ratelim_t disablenet_violated = RATELIM_INIT(30*60);
+    char *m;
+#ifdef MS_WINDOWS
+    *socket_error = WSAENETUNREACH;
+#else
+    *socket_error = ENETUNREACH;
+#endif
+    if ((m = rate_limit_log(&disablenet_violated, approx_time()))) {
+      log_warn(LD_BUG, "Tried to open a socket with DisableNetwork set.%s", m);
+      tor_free(m);
+    }
+    tor_fragile_assert();
+    return -1;
+  }
 
   s = tor_open_socket(protocol_family,SOCK_STREAM,IPPROTO_TCP);
   if (s < 0) {
@@ -1796,6 +1815,9 @@ retry_listener_ports(smartlist_t *old_conns,
           (conn->socket_family == AF_UNIX && ! wanted->is_unix_addr))
         continue;
 
+      if (wanted->no_listen)
+        continue; /* We don't want to open a listener for this one */
+
       if (wanted->is_unix_addr) {
         if (conn->socket_family == AF_UNIX &&
             !strcmp(wanted->unix_addr, conn->address)) {
@@ -1834,6 +1856,8 @@ retry_listener_ports(smartlist_t *old_conns,
     connection_t *conn;
     int real_port = port->port == CFG_AUTO_PORT ? 0 : port->port;
     tor_assert(real_port <= UINT16_MAX);
+    if (port->no_listen)
+      continue;
 
     if (port->is_unix_addr) {
       listensockaddr = (struct sockaddr *)
@@ -1870,82 +1894,6 @@ retry_listener_ports(smartlist_t *old_conns,
   return r;
 }
 
-/**
- * Launch any configured listener connections of type <b>type</b>.  (A
- * listener is configured if <b>port_option</b> is non-zero.  If any
- * ListenAddress configuration options are given in <b>cfg</b>, create a
- * connection binding to each one.  Otherwise, create a single
- * connection binding to the address <b>default_addr</b>.)
- *
- * We assume that we're starting with a list of existing listener connection_t
- * pointers in <b>old_conns</b>: we do not launch listeners that are already
- * in that list.  Instead, we just remove them from the list.
- *
- * All new connections we launch are added to <b>new_conns</b>.
- */
-static int
-retry_listeners(smartlist_t *old_conns,
-                int type, const config_line_t *cfg,
-                int port_option, const char *default_addr,
-                smartlist_t *new_conns,
-                int is_sockaddr_un)
-{
-  smartlist_t *ports = smartlist_create();
-  tor_addr_t dflt_addr;
-  int retval = 0;
-
-  if (default_addr) {
-    tor_addr_parse(&dflt_addr, default_addr);
-  } else {
-    tor_addr_make_unspec(&dflt_addr);
-  }
-
-  if (port_option) {
-    if (!cfg) {
-      port_cfg_t *port = tor_malloc_zero(sizeof(port_cfg_t));
-      tor_addr_copy(&port->addr, &dflt_addr);
-      port->port = port_option;
-      port->type = type;
-      smartlist_add(ports, port);
-    } else {
-      const config_line_t *c;
-      for (c = cfg; c; c = c->next) {
-        port_cfg_t *port;
-        tor_addr_t addr;
-        uint16_t portval = 0;
-        if (is_sockaddr_un) {
-          size_t len = strlen(c->value);
-          port = tor_malloc_zero(sizeof(port_cfg_t) + len + 1);
-          port->is_unix_addr = 1;
-          memcpy(port->unix_addr, c->value, len+1);
-        } else {
-          if (tor_addr_port_lookup(c->value, &addr, &portval) < 0) {
-            log_warn(LD_CONFIG, "Can't parse/resolve %s %s",
-                     c->key, c->value);
-            retval = -1;
-            continue;
-          }
-          port = tor_malloc_zero(sizeof(port_cfg_t));
-          tor_addr_copy(&port->addr, &addr);
-        }
-        port->type = type;
-        port->port = portval ? portval : port_option;
-        smartlist_add(ports, port);
-      }
-    }
-  }
-
-  if (retval == -1)
-    goto cleanup;
-
-  retval = retry_listener_ports(old_conns, ports, new_conns);
-
- cleanup:
-  SMARTLIST_FOREACH(ports, port_cfg_t *, p, tor_free(p));
-  smartlist_free(ports);
-  return retval;
-}
-
 /** Launch listeners for each port you should have open.  Only launch
  * listeners who are not already open, and only close listeners we no longer
  * want.
@@ -1968,34 +1916,9 @@ retry_all_listeners(smartlist_t *replaced_conns,
       smartlist_add(listeners, conn);
   } SMARTLIST_FOREACH_END(conn);
 
-  if (! options->ClientOnly) {
-    if (retry_listeners(listeners,
-                        CONN_TYPE_OR_LISTENER, options->ORListenAddress,
-                        options->ORPort, "0.0.0.0",
-                        new_conns, 0) < 0)
-      retval = -1;
-    if (retry_listeners(listeners,
-                        CONN_TYPE_DIR_LISTENER, options->DirListenAddress,
-                        options->DirPort, "0.0.0.0",
-                        new_conns, 0) < 0)
-      retval = -1;
-  }
-
   if (retry_listener_ports(listeners,
-                           get_configured_client_ports(),
+                           get_configured_ports(),
                            new_conns) < 0)
-    retval = -1;
-  if (retry_listeners(listeners,
-                      CONN_TYPE_CONTROL_LISTENER,
-                      options->ControlListenAddress,
-                      options->ControlPort, "127.0.0.1",
-                      new_conns, 0) < 0)
-    retval = -1;
-  if (retry_listeners(listeners,
-                      CONN_TYPE_CONTROL_LISTENER,
-                      options->ControlSocket,
-                      options->ControlSocket ? 1 : 0, NULL,
-                      new_conns, 1) < 0)
     retval = -1;
 
   /* Any members that were still in 'listeners' don't correspond to
@@ -2013,6 +1936,7 @@ retry_all_listeners(smartlist_t *replaced_conns,
 
   smartlist_free(listeners);
 
+  /* XXXprop186 should take all advertised ports into account */
   if (old_or_port != router_get_advertised_or_port(options) ||
       old_dir_port != router_get_advertised_dir_port(options, 0)) {
     /* Our chosen ORPort or DirPort is not what it used to be: the
@@ -2023,6 +1947,43 @@ retry_all_listeners(smartlist_t *replaced_conns,
   }
 
   return retval;
+}
+
+/** Mark every listener of type other than CONTROL_LISTENER to be closed. */
+void
+connection_mark_all_noncontrol_listeners(void)
+{
+  SMARTLIST_FOREACH_BEGIN(get_connection_array(), connection_t *, conn) {
+    if (conn->marked_for_close)
+      continue;
+    if (conn->type == CONN_TYPE_CONTROL_LISTENER)
+      continue;
+    if (connection_is_listener(conn))
+      connection_mark_for_close(conn);
+  } SMARTLIST_FOREACH_END(conn);
+}
+
+/** Mark every external conection not used for controllers for close. */
+void
+connection_mark_all_noncontrol_connections(void)
+{
+  SMARTLIST_FOREACH_BEGIN(get_connection_array(), connection_t *, conn) {
+    if (conn->marked_for_close)
+      continue;
+    switch (conn->type) {
+      case CONN_TYPE_CPUWORKER:
+      case CONN_TYPE_CONTROL_LISTENER:
+      case CONN_TYPE_CONTROL:
+        break;
+      case CONN_TYPE_AP:
+        connection_mark_unattached_ap(TO_ENTRY_CONN(conn),
+                                      END_STREAM_REASON_HIBERNATING);
+        break;
+      default:
+        connection_mark_for_close(conn);
+        break;
+    }
+  } SMARTLIST_FOREACH_END(conn);
 }
 
 /** Return 1 if we should apply rate limiting to <b>conn</b>, and 0
@@ -3176,8 +3137,7 @@ connection_handle_write_impl(connection_t *conn, int force)
   /* Sometimes, "writable" means "connected". */
   if (connection_state_is_connecting(conn)) {
     if (getsockopt(conn->s, SOL_SOCKET, SO_ERROR, (void*)&e, &len) < 0) {
-      log_warn(LD_BUG,
-               "getsockopt() syscall failed?! Please report to tor-ops.");
+      log_warn(LD_BUG, "getsockopt() syscall failed");
       if (CONN_IS_EDGE(conn))
         connection_edge_end_errno(TO_EDGE_CONN(conn));
       connection_mark_for_close(conn);

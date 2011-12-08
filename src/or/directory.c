@@ -410,7 +410,7 @@ directory_get_from_dirserver(uint8_t dir_purpose, uint8_t router_purpose,
     } else {
       /* Otherwise it might be a consensus we don't parse, but which we
        * do cache.  Look at the cached copy, perhaps. */
-      cached_dir_t *cd = dirserv_get_consensus(resource ? resource : "ns");
+      cached_dir_t *cd = dirserv_get_consensus(resource);
       if (cd)
         if_modified_since = cd->published + 180;
     }
@@ -907,8 +907,12 @@ directory_initiate_command_rend(const char *address, const tor_addr_t *_addr,
 
   log_debug(LD_DIR, "Initiating %s", dir_conn_purpose_to_string(dir_purpose));
 
+#ifndef NON_ANONYMOUS_MODE_ENABLED
   tor_assert(!(is_sensitive_dir_purpose(dir_purpose) &&
                !anonymized_connection));
+#else
+  (void)is_sensitive_dir_purpose;
+#endif
 
   /* ensure that we don't make direct connections when a SOCKS server is
    * configured. */
@@ -919,7 +923,7 @@ directory_initiate_command_rend(const char *address, const tor_addr_t *_addr,
     return;
   }
 
-  conn = dir_connection_new(AF_INET);
+  conn = dir_connection_new(tor_addr_family(&addr));
 
   /* set up conn so it's got all the data we need to remember */
   tor_addr_copy(&conn->_base.addr, &addr);
@@ -1619,9 +1623,11 @@ connection_dir_client_reached_eof(dir_connection_t *conn)
   if (!reason) reason = tor_strdup("[no reason given]");
 
   log_debug(LD_DIR,
-            "Received response from directory server '%s:%d': %d %s",
+            "Received response from directory server '%s:%d': %d %s "
+            "(purpose: %d)",
             conn->_base.address, conn->_base.port, status_code,
-            escaped(reason));
+            escaped(reason),
+            conn->_base.purpose);
 
   /* now check if it's got any hints for us about our IP address. */
   if (conn->dirconn_direct) {
@@ -3729,7 +3735,7 @@ download_status_reset(download_status_t *dls)
   const int *schedule;
   size_t schedule_len;
 
-  find_dl_schedule_and_len(dls, get_options()->DirPort,
+  find_dl_schedule_and_len(dls, get_options()->DirPort != NULL,
                            &schedule, &schedule_len);
 
   dls->n_download_failures = 0;
