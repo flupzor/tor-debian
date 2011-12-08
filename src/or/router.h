@@ -30,6 +30,7 @@ crypto_pk_env_t *init_key_from_file(const char *fname, int generate,
                                     int severity);
 void v3_authority_check_key_expiry(void);
 
+int router_initialize_tls_context(void);
 int init_keys(void);
 
 int check_whether_orport_reachable(void);
@@ -38,6 +39,8 @@ void consider_testing_reachability(int test_or, int test_dir);
 void router_orport_found_reachable(void);
 void router_dirport_found_reachable(void);
 void router_perform_bandwidth_test(int num_circs, time_t now);
+
+int net_is_disabled(void);
 
 int authdir_mode(const or_options_t *options);
 int authdir_mode_v1(const or_options_t *options);
@@ -82,6 +85,13 @@ int router_pick_published_address(const or_options_t *options, uint32_t *addr);
 int router_rebuild_descriptor(int force);
 int router_dump_router_to_string(char *s, size_t maxlen, routerinfo_t *router,
                                  crypto_pk_env_t *ident_key);
+void router_get_prim_orport(const routerinfo_t *router,
+                            tor_addr_port_t *addr_port_out);
+void router_get_pref_orport(const routerinfo_t *router,
+                            tor_addr_port_t *addr_port_out);
+void router_get_pref_ipv6_orport(const routerinfo_t *router,
+                                 tor_addr_port_t *addr_port_out);
+int router_ipv6_preferred(const routerinfo_t *router);
 int extrainfo_dump_to_string(char **s, extrainfo_t *extrainfo,
                              crypto_pk_env_t *ident_key);
 int is_legal_nickname(const char *s);

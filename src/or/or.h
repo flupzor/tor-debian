@@ -130,6 +130,10 @@
 #define cell_t tor_cell_t
 #endif
 
+#ifdef ENABLE_TOR2WEB_MODE
+#define NON_ANONYMOUS_MODE_ENABLED 1
+#endif
+
 /** Length of longest allowable configured nickname. */
 #define MAX_NICKNAME_LEN 19
 /** Length of a router identity encoded as a hexadecimal digest, plus
@@ -789,10 +793,10 @@ typedef struct rend_data_t {
   char rend_cookie[REND_COOKIE_LEN];
 } rend_data_t;
 
-/** Time interval for tracking possible replays of INTRODUCE2 cells.
- * Incoming cells with timestamps half of this interval in the past or
- * future are dropped immediately. */
-#define REND_REPLAY_TIME_INTERVAL (60 * 60)
+/** Time interval for tracking replays of DH public keys received in
+ * INTRODUCE2 cells.  Used only to avoid launching multiple
+ * simultaneous attempts to connect to the same rendezvous point. */
+#define REND_REPLAY_TIME_INTERVAL (5 * 60)
 
 /** Used to indicate which way a cell is going on a circuit. */
 typedef enum {
@@ -1720,6 +1724,13 @@ typedef struct {
   uint16_t or_port; /**< Port for TLS connections. */
   uint16_t dir_port; /**< Port for HTTP directory connections. */
 
+  /* DOCDOC */
+  /* XXXXX187 Actually these should probably be part of a list of addresses,
+   * not just a special case.  Use abstractions to access these; don't do it
+   * directly. */
+  tor_addr_t ipv6_addr;
+  uint16_t ipv6_orport;
+
   crypto_pk_env_t *onion_pkey; /**< Public RSA key for onions. */
   crypto_pk_env_t *identity_pkey;  /**< Public RSA key for signing. */
 
@@ -1751,6 +1762,8 @@ typedef struct {
   /** True if, after we have added this router, we should re-launch
    * tests for it. */
   unsigned int needs_retest_if_added:1;
+  /** True if ipv6_addr:ipv6_orport is preferred.  */
+  unsigned int ipv6_preferred:1;
 
 /** Tor can use this router for general positions in circuits; we got it
  * from a directory server as usual, or we're an authority and a server
@@ -2831,16 +2844,37 @@ typedef struct port_cfg_t {
   int session_group; /**< A session group, or -1 if this port is not in a
                       * session group. */
 
+  /* Server port types (or, dir) only: */
+  unsigned int no_advertise : 1;
+  unsigned int no_listen : 1;
+  unsigned int all_addrs : 1;
+  unsigned int ipv4_only : 1;
+  unsigned int ipv6_only : 1;
+
   /* Unix sockets only: */
   /** Path for an AF_UNIX address */
   char unix_addr[FLEXIBLE_ARRAY_MEMBER];
 } port_cfg_t;
+
+/** Ordinary configuration line. */
+#define CONFIG_LINE_NORMAL 0
+/** Appends to previous configuration for the same option, even if we
+ * would ordinary replace it. */
+#define CONFIG_LINE_APPEND 1
+/* Removes all previous configuration for an option. */
+#define CONFIG_LINE_CLEAR 2
 
 /** A linked list of lines in a config file. */
 typedef struct config_line_t {
   char *key;
   char *value;
   struct config_line_t *next;
+  /** What special treatment (if any) does this line require? */
+  unsigned int command:2;
+  /** If true, subsequent assignments to this linelist should replace
+   * it, not extend it.  Set only on the first item in a linelist in an
+   * or_options_t. */
+  unsigned int fragile:1;
 } config_line_t;
 
 typedef struct routerset_t routerset_t;
@@ -2872,6 +2906,8 @@ typedef struct {
   char *Nickname; /**< OR only: nickname of this onion router. */
   char *Address; /**< OR only: configured address for this onion router. */
   char *PidFile; /**< Where to store PID of Tor process. */
+
+  int DynamicDHGroups; /**< Dynamic generation of prime moduli for use in DH.*/
 
   routerset_t *ExitNodes; /**< Structure containing nicknames, digests,
                            * country codes and IP address patterns of ORs to
@@ -2930,17 +2966,18 @@ typedef struct {
   int DirAllowPrivateAddresses;
   char *User; /**< Name of user to run Tor as. */
   char *Group; /**< Name of group to run Tor as. */
-  int ORPort; /**< Port to listen on for OR connections. */
+  config_line_t *ORPort; /**< Ports to listen on for OR connections. */
   config_line_t *SocksPort; /**< Ports to listen on for SOCKS connections. */
   /** Ports to listen on for transparent pf/netfilter connections. */
   config_line_t *TransPort;
   config_line_t *NATDPort; /**< Ports to listen on for transparent natd
                             * connections. */
-  int ControlPort; /**< Port to listen on for control connections. */
+  config_line_t *ControlPort; /**< Port to listen on for control
+                               * connections. */
   config_line_t *ControlSocket; /**< List of Unix Domain Sockets to listen on
                                  * for control connections. */
   int ControlSocketsGroupWritable; /**< Boolean: Are control sockets g+rw? */
-  int DirPort; /**< Port to listen on for directory connections. */
+  config_line_t *DirPort; /**< Port to listen on for directory connections. */
   config_line_t *DNSPort; /**< Port to listen on for DNS requests. */
   int AssumeReachable; /**< Whether to publish our descriptor regardless. */
   int AuthoritativeDir; /**< Boolean: is this an authoritative directory? */
@@ -3007,6 +3044,11 @@ typedef struct {
   int FetchUselessDescriptors; /**< Do we fetch non-running descriptors too? */
   int AllDirActionsPrivate; /**< Should every directory action be sent
                              * through a Tor circuit? */
+
+  /** Run in 'tor2web mode'? (I.e. only make client connections to hidden
+   * services, and use a single hop for all hidden-service-related
+   * circuits.) */
+  int Tor2webMode;
 
   int ConnLimit; /**< Demanded minimum number of simultaneous connections. */
   int _ConnLimit; /**< Maximum allowed number of simultaneous connections. */
@@ -3248,6 +3290,8 @@ typedef struct {
                     disclaimer. This allows a server administrator to show
                     that they're running Tor and anyone visiting their server
                     will know this without any specialized knowledge. */
+  int DisableDebuggerAttachment; /**< Currently Linux only specific attempt to
+                                      disable ptrace; needs BSD testing. */
   /** Boolean: if set, we start even if our resolv.conf file is missing
    * or broken. */
   int ServerDNSAllowBrokenConfig;
@@ -3431,6 +3475,15 @@ typedef struct {
   /** If 1, we always send optimistic data when it's supported.  If 0, we
    * never use it.  If -1, we do what the consensus says. */
   int OptimisticData;
+
+  /** If 1, and we are using IOCP, we set the kernel socket SNDBUF and RCVBUF
+   * to 0 to try to save kernel memory and avoid the dread "Out of buffers"
+   * issue. */
+  int UserspaceIOCPBuffers;
+
+  /** If 1, we accept and launch no external network connections, except on
+   * control ports. */
+  int DisableNetwork;
 
 } or_options_t;
 
@@ -4017,6 +4070,26 @@ typedef struct rend_encoded_v2_service_descriptor_t {
  * introduction point.  See also rend_intro_point_t.unreachable_count. */
 #define MAX_INTRO_POINT_REACHABILITY_FAILURES 5
 
+/** The maximum number of distinct INTRODUCE2 cells which a hidden
+ * service's introduction point will receive before it begins to
+ * expire.
+ *
+ * XXX023 Is this number at all sane? */
+#define INTRO_POINT_LIFETIME_INTRODUCTIONS 16384
+
+/** The minimum number of seconds that an introduction point will last
+ * before expiring due to old age.  (If it receives
+ * INTRO_POINT_LIFETIME_INTRODUCTIONS INTRODUCE2 cells, it may expire
+ * sooner.)
+ *
+ * XXX023 Should this be configurable? */
+#define INTRO_POINT_LIFETIME_MIN_SECONDS 18*60*60
+/** The maximum number of seconds that an introduction point will last
+ * before expiring due to old age.
+ *
+ * XXX023 Should this be configurable? */
+#define INTRO_POINT_LIFETIME_MAX_SECONDS 24*60*60
+
 /** Introduction point information.  Used both in rend_service_t (on
  * the service side) and in rend_service_descriptor_t (on both the
  * client and service side). */
@@ -4036,6 +4109,37 @@ typedef struct rend_intro_point_t {
    * circuit to this intro point for some reason other than our
    * circuit-build timeout.  See also MAX_INTRO_POINT_REACHABILITY_FAILURES. */
   unsigned int unreachable_count : 3;
+
+  /** (Service side only) Flag indicating that this intro point was
+   * included in the last HS descriptor we generated. */
+  unsigned int listed_in_last_desc : 1;
+
+  /** (Service side only) A digestmap recording the INTRODUCE2 cells
+   * this intro point's circuit has received.  Each key is the digest
+   * of the RSA-encrypted part of a received INTRODUCE2 cell; each
+   * value is a pointer to the time_t at which the cell was received.
+   * This digestmap is used to prevent replay attacks. */
+  digestmap_t *accepted_intro_rsa_parts;
+
+  /** (Service side only) The time at which this intro point was first
+   * published, or -1 if this intro point has not yet been
+   * published. */
+  time_t time_published;
+
+  /** (Service side only) The time at which this intro point should
+   * (start to) expire, or -1 if we haven't decided when this intro
+   * point should expire. */
+  time_t time_to_expire;
+
+  /** (Service side only) The time at which we decided that this intro
+   * point should start expiring, or -1 if this intro point is not yet
+   * expiring.
+   *
+   * This field also serves as a flag to indicate that we have decided
+   * to expire this intro point, in case intro_point_should_expire_now
+   * flaps (perhaps due to a clock jump; perhaps due to other
+   * weirdness, or even a (present or future) bug). */
+  time_t time_expiring;
 } rend_intro_point_t;
 
 /** Information used to connect to a hidden service.  Used on both the

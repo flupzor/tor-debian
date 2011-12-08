@@ -196,6 +196,26 @@ free_old_inbuf(connection_t *conn)
 }
 #endif
 
+#if defined(MS_WINDOWS) && defined(USE_BUFFEREVENTS)
+/** Remove the kernel-space send and receive buffers for <b>s</b>. For use
+ * with IOCP only. */
+static int
+set_buffer_lengths_to_zero(tor_socket_t s)
+{
+  int zero = 0;
+  int r = 0;
+  if (setsockopt(s, SOL_SOCKET, SO_SNDBUF, (void*)&zero, sizeof(zero))) {
+    log_warn(LD_NET, "Unable to clear SO_SNDBUF");
+    r = -1;
+  }
+  if (setsockopt(s, SOL_SOCKET, SO_RCVBUF, (void*)&zero, sizeof(zero))) {
+    log_warn(LD_NET, "Unable to clear SO_RCVBUF");
+    r = -1;
+  }
+  return r;
+}
+#endif
+
 /** Add <b>conn</b> to the array of connections that we can poll on.  The
  * connection's socket must be set; the connection starts out
  * non-reading and non-writing.
@@ -216,6 +236,14 @@ connection_add_impl(connection_t *conn, int is_connecting)
 #ifdef USE_BUFFEREVENTS
   if (connection_type_uses_bufferevent(conn)) {
     if (SOCKET_OK(conn->s) && !conn->linked) {
+
+#ifdef MS_WINDOWS
+      if (tor_libevent_using_iocp_bufferevents() &&
+          get_options()->UserspaceIOCPBuffers) {
+        set_buffer_lengths_to_zero(conn->s);
+      }
+#endif
+
       conn->bufev = bufferevent_socket_new(
                          tor_libevent_get_base(),
                          conn->s,
@@ -906,7 +934,7 @@ directory_info_has_arrived(time_t now, int from_cache)
       update_extrainfo_downloads(now);
   }
 
-  if (server_mode(options) && !we_are_hibernating() && !from_cache &&
+  if (server_mode(options) && !net_is_disabled() && !from_cache &&
       (can_complete_circuit || !any_predicted_circuits(now)))
     consider_testing_reachability(1, 1);
 }
@@ -1133,11 +1161,11 @@ run_scheduled_events(time_t now)
     if (router_rebuild_descriptor(1)<0) {
       log_info(LD_CONFIG, "Couldn't rebuild router descriptor");
     }
-    if (advertised_server_mode())
+    if (advertised_server_mode() & !options->DisableNetwork)
       router_upload_dir_desc_to_dirservers(0);
   }
 
-  if (time_to_try_getting_descriptors < now) {
+  if (!options->DisableNetwork && time_to_try_getting_descriptors < now) {
     update_all_descriptor_downloads(now);
     update_extrainfo_downloads(now);
     if (router_have_minimum_dir_info())
@@ -1161,10 +1189,7 @@ run_scheduled_events(time_t now)
     last_rotated_x509_certificate = now;
   if (last_rotated_x509_certificate+MAX_SSL_KEY_LIFETIME_INTERNAL < now) {
     log_info(LD_GENERAL,"Rotating tls context.");
-    if (tor_tls_context_init(public_server_mode(options),
-                             get_tlsclient_identity_key(),
-                             is_server ? get_server_identity_key() : NULL,
-                             MAX_SSL_KEY_LIFETIME_ADVERTISED) < 0) {
+    if (router_initialize_tls_context() < 0) {
       log_warn(LD_BUG, "Error reinitializing TLS context");
       /* XXX is it a bug here, that we just keep going? -RD */
     }
@@ -1191,7 +1216,7 @@ run_scheduled_events(time_t now)
 
   if (time_to_launch_reachability_tests < now &&
       (authdir_mode_tests_reachability(options)) &&
-       !we_are_hibernating()) {
+       !net_is_disabled()) {
     time_to_launch_reachability_tests = now + REACHABILITY_TEST_INTERVAL;
     /* try to determine reachability of the other Tor relays */
     dirserv_test_reachability(now);
@@ -1327,7 +1352,7 @@ run_scheduled_events(time_t now)
 
   /* 2b. Once per minute, regenerate and upload the descriptor if the old
    * one is inaccurate. */
-  if (time_to_check_descriptor < now) {
+  if (time_to_check_descriptor < now && !options->DisableNetwork) {
     static int dirport_reachability_count = 0;
     time_to_check_descriptor = now + CHECK_DESCRIPTOR_INTERVAL;
     check_descriptor_bandwidth_changed(now);
@@ -1402,7 +1427,7 @@ run_scheduled_events(time_t now)
   connection_expire_held_open();
 
   /** 3d. And every 60 seconds, we relaunch listeners if any died. */
-  if (!we_are_hibernating() && time_to_check_listeners < now) {
+  if (!net_is_disabled() && time_to_check_listeners < now) {
     retry_all_listeners(NULL, NULL);
     time_to_check_listeners = now+60;
   }
@@ -1413,7 +1438,7 @@ run_scheduled_events(time_t now)
    *    and we make a new circ if there are no clean circuits.
    */
   have_dir_info = router_have_minimum_dir_info();
-  if (have_dir_info && !we_are_hibernating())
+  if (have_dir_info && !net_is_disabled())
     circuit_build_needed_circs(now);
 
   /* every 10 seconds, but not at the same second as other such events */
@@ -1444,7 +1469,7 @@ run_scheduled_events(time_t now)
   circuit_close_all_marked();
 
   /** 7. And upload service descriptors if necessary. */
-  if (can_complete_circuit && !we_are_hibernating()) {
+  if (can_complete_circuit && !net_is_disabled()) {
     rend_consider_services_upload(now);
     rend_consider_descriptor_republication();
   }
@@ -1461,7 +1486,8 @@ run_scheduled_events(time_t now)
 
   /** 9. and if we're a server, check whether our DNS is telling stories to
    * us. */
-  if (public_server_mode(options) && time_to_check_for_correct_dns < now) {
+  if (!net_is_disabled() &&
+      public_server_mode(options) && time_to_check_for_correct_dns < now) {
     if (!time_to_check_for_correct_dns) {
       time_to_check_for_correct_dns = now + 60 + crypto_rand_int(120);
     } else {
@@ -1480,19 +1506,21 @@ run_scheduled_events(time_t now)
   }
 
   /** 11. check the port forwarding app */
-  if (time_to_check_port_forwarding < now &&
+  if (!net_is_disabled() &&
+      time_to_check_port_forwarding < now &&
       options->PortForwarding &&
       is_server) {
 #define PORT_FORWARDING_CHECK_INTERVAL 5
+    /* XXXXX this should take a list of ports, not just two! */
     tor_check_port_forwarding(options->PortForwardingHelper,
-                              options->DirPort,
-                              options->ORPort,
+                              get_primary_dir_port(),
+                              get_primary_or_port(),
                               now);
     time_to_check_port_forwarding = now+PORT_FORWARDING_CHECK_INTERVAL;
   }
 
   /** 11b. check pending unconfigured managed proxies */
-  if (pt_proxies_configuration_pending())
+  if (!net_is_disabled() && pt_proxies_configuration_pending())
     pt_configure_remaining_proxies();
 
   /** 11c. validate pluggable transports configuration if we need to */
@@ -1564,7 +1592,7 @@ second_elapsed_callback(periodic_timer_t *timer, void *arg)
   control_event_stream_bandwidth_used();
 
   if (server_mode(options) &&
-      !we_are_hibernating() &&
+      !net_is_disabled() &&
       seconds_elapsed > 0 &&
       can_complete_circuit &&
       stats_n_seconds_working / TIMEOUT_UNTIL_UNREACHABILITY_COMPLAINT !=
@@ -1765,7 +1793,8 @@ do_hup(void)
   /* retry appropriate downloads */
   router_reset_status_download_failures();
   router_reset_descriptor_download_failures();
-  update_networkstatus_downloads(time(NULL));
+  if (!options->DisableNetwork)
+    update_networkstatus_downloads(time(NULL));
 
   /* We'll retry routerstatus downloads in about 10 seconds; no need to
    * force a retry there. */
@@ -2237,14 +2266,29 @@ tor_init(int argc, char *argv[])
   }
   quiet_level = quiet;
 
-  log(LOG_NOTICE, LD_GENERAL, "Tor v%s%s. This is experimental software. "
-      "Do not rely on it for strong anonymity. (Running on %s)", get_version(),
+  {
+    const char *version = get_version();
+    log_notice(LD_GENERAL, "Tor v%s%s running on %s.", version,
 #ifdef USE_BUFFEREVENTS
-      " (with bufferevents)",
+               " (with bufferevents)",
 #else
-      "",
+               "",
 #endif
-      get_uname());
+               get_uname());
+
+    log_notice(LD_GENERAL, "Tor can't help you if you use it wrong! "
+               "Learn how to be safe at "
+               "https://www.torproject.org/download/download#warning");
+
+    if (strstr(version, "alpha") || strstr(version, "beta"))
+      log_notice(LD_GENERAL, "This version is not a stable Tor release. "
+                 "Expect more bugs than usual.");
+  }
+
+#ifdef NON_ANONYMOUS_MODE_ENABLED
+  log(LOG_WARN, LD_GENERAL, "This copy of Tor was compiled to run in a "
+      "non-anonymous mode. It will provide NO ANONYMITY.");
+#endif
 
   if (network_init()<0) {
     log_err(LD_BUG,"Error initializing network; exiting.");

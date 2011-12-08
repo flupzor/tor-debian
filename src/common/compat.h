@@ -135,7 +135,6 @@ extern INLINE double U64_TO_DBL(uint64_t x) {
 /* GCC has several useful attributes. */
 #if defined(__GNUC__) && __GNUC__ >= 3
 #define ATTR_NORETURN __attribute__((noreturn))
-#define ATTR_PURE __attribute__((pure))
 #define ATTR_CONST __attribute__((const))
 #define ATTR_MALLOC __attribute__((malloc))
 #define ATTR_NORETURN __attribute__((noreturn))
@@ -168,7 +167,6 @@ extern INLINE double U64_TO_DBL(uint64_t x) {
 #define PREDICT_UNLIKELY(exp) __builtin_expect(!!(exp), 0)
 #else
 #define ATTR_NORETURN
-#define ATTR_PURE
 #define ATTR_CONST
 #define ATTR_MALLOC
 #define ATTR_NORETURN
@@ -271,9 +269,9 @@ int tor_asprintf(char **strp, const char *fmt, ...)
 int tor_vasprintf(char **strp, const char *fmt, va_list args);
 
 const void *tor_memmem(const void *haystack, size_t hlen, const void *needle,
-                       size_t nlen)  ATTR_PURE ATTR_NONNULL((1,3));
+                       size_t nlen) ATTR_NONNULL((1,3));
 static const void *tor_memstr(const void *haystack, size_t hlen,
-                           const char *needle) ATTR_PURE ATTR_NONNULL((1,3));
+                           const char *needle) ATTR_NONNULL((1,3));
 static INLINE const void *
 tor_memstr(const void *haystack, size_t hlen, const char *needle)
 {
@@ -410,7 +408,7 @@ typedef int socklen_t;
 
 int tor_close_socket(tor_socket_t s);
 tor_socket_t tor_open_socket(int domain, int type, int protocol);
-tor_socket_t tor_accept_socket(int sockfd, struct sockaddr *addr,
+tor_socket_t tor_accept_socket(tor_socket_t sockfd, struct sockaddr *addr,
                                   socklen_t *len);
 int get_n_open_sockets(void);
 
@@ -546,9 +544,9 @@ long tor_weak_random(void);
 /* ===== OS compatibility */
 const char *get_uname(void);
 
-uint16_t get_uint16(const void *cp) ATTR_PURE ATTR_NONNULL((1));
-uint32_t get_uint32(const void *cp) ATTR_PURE ATTR_NONNULL((1));
-uint64_t get_uint64(const void *cp) ATTR_PURE ATTR_NONNULL((1));
+uint16_t get_uint16(const void *cp) ATTR_NONNULL((1));
+uint32_t get_uint32(const void *cp) ATTR_NONNULL((1));
+uint64_t get_uint64(const void *cp) ATTR_NONNULL((1));
 void set_uint16(void *cp, uint16_t v) ATTR_NONNULL((1));
 void set_uint32(void *cp, uint32_t v) ATTR_NONNULL((1));
 void set_uint64(void *cp, uint64_t v) ATTR_NONNULL((1));
@@ -566,6 +564,7 @@ set_uint8(void *cp, uint8_t v)
 typedef unsigned long rlim_t;
 #endif
 int set_max_file_descriptors(rlim_t limit, int *max);
+int tor_disable_debugger_attach(void);
 int switch_id(const char *user);
 #ifdef HAVE_PWD_H
 char *get_user_homedir(const char *username);

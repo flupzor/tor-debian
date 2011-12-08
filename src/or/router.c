@@ -484,6 +484,16 @@ v3_authority_check_key_expiry(void)
   last_warned = now;
 }
 
+int
+router_initialize_tls_context(void)
+{
+  return tor_tls_context_init(public_server_mode(get_options()),
+                              get_tlsclient_identity_key(),
+                              server_mode(get_options()) ?
+                              get_server_identity_key() : NULL,
+                              MAX_SSL_KEY_LIFETIME_ADVERTISED);
+}
+
 /** Initialize all OR private keys, and the TLS context, as necessary.
  * On OPs, this only initializes the tls context. Return 0 on success,
  * or -1 if Tor should die.
@@ -530,10 +540,7 @@ init_keys(void)
     }
     set_client_identity_key(prkey);
     /* Create a TLS context. */
-    if (tor_tls_context_init(0,
-                             get_tlsclient_identity_key(),
-                             NULL,
-                             MAX_SSL_KEY_LIFETIME_ADVERTISED) < 0) {
+    if (router_initialize_tls_context() < 0) {
       log_err(LD_GENERAL,"Error creating TLS context for Tor client.");
       return -1;
     }
@@ -626,13 +633,11 @@ init_keys(void)
   tor_free(keydir);
 
   /* 3. Initialize link key and TLS context. */
-  if (tor_tls_context_init(public_server_mode(options),
-                           get_tlsclient_identity_key(),
-                           get_server_identity_key(),
-                           MAX_SSL_KEY_LIFETIME_ADVERTISED) < 0) {
+  if (router_initialize_tls_context() < 0) {
     log_err(LD_GENERAL,"Error initializing TLS context");
     return -1;
   }
+
   /* 4. Build our router descriptor. */
   /* Must be called after keys are initialized. */
   mydesc = router_get_my_descriptor();
@@ -780,7 +785,7 @@ check_whether_dirport_reachable(void)
   const or_options_t *options = get_options();
   return !options->DirPort ||
          options->AssumeReachable ||
-         we_are_hibernating() ||
+         net_is_disabled() ||
          can_reach_dir_port;
 }
 
@@ -806,7 +811,7 @@ decide_to_advertise_dirport(const or_options_t *options, uint16_t dir_port)
     return 0;
   if (authdir_mode(options)) /* always publish */
     return dir_port;
-  if (we_are_hibernating())
+  if (net_is_disabled())
     return 0;
   if (!check_whether_dirport_reachable())
     return 0;
@@ -888,7 +893,8 @@ consider_testing_reachability(int test_or, int test_dir)
     log_info(LD_CIRC, "Testing %s of my ORPort: %s:%d.",
              !orport_reachable ? "reachability" : "bandwidth",
              me->address, me->or_port);
-    ei = extend_info_from_router(me);
+    /* XXX IPv6 self testing IPv6 orports will need pref_addr */
+    ei = extend_info_from_router(me, 0);
     circuit_launch_by_extend_info(CIRCUIT_PURPOSE_TESTING, ei,
                             CIRCLAUNCH_NEED_CAPACITY|CIRCLAUNCH_IS_INTERNAL);
     extend_info_free(ei);
@@ -972,6 +978,14 @@ router_perform_bandwidth_test(int num_circs, time_t now)
       }
     }
   }
+}
+
+/** Return true iff our network is in some sense disabled: either we're
+ * hibernating, entering hibernation, or */
+int
+net_is_disabled(void)
+{
+  return get_options()->DisableNetwork || we_are_hibernating();
 }
 
 /** Return true iff we believe ourselves to be an authoritative
@@ -1070,7 +1084,7 @@ int
 server_mode(const or_options_t *options)
 {
   if (options->ClientOnly) return 0;
-  return (options->ORPort != 0 || options->ORListenAddress);
+  return (options->ORPort || options->ORListenAddress);
 }
 
 /** Return true iff we are trying to be a non-bridge server.
@@ -1121,7 +1135,14 @@ int
 proxy_mode(const or_options_t *options)
 {
   (void)options;
-  return smartlist_len(get_configured_client_ports()) > 0;
+  SMARTLIST_FOREACH_BEGIN(get_configured_ports(), const port_cfg_t *, p) {
+    if (p->type == CONN_TYPE_AP_LISTENER ||
+        p->type == CONN_TYPE_AP_TRANS_LISTENER ||
+        p->type == CONN_TYPE_AP_DNS_LISTENER ||
+        p->type == CONN_TYPE_AP_NATD_LISTENER)
+      return 1;
+  } SMARTLIST_FOREACH_END(p);
+  return 0;
 }
 
 /** Decide if we're a publishable server. We are a publishable server if:
@@ -1180,17 +1201,21 @@ consider_publishable_server(int force)
 
 /** Return the port that we should advertise as our ORPort; this is either
  * the one configured in the ORPort option, or the one we actually bound to
- * if ORPort is "auto". */
+ * if ORPort is "auto".
+ */
 uint16_t
 router_get_advertised_or_port(const or_options_t *options)
 {
-  if (options->ORPort == CFG_AUTO_PORT) {
+  int port = get_primary_or_port();
+  (void)options;
+
+  if (port == CFG_AUTO_PORT) {
     connection_t *c = connection_get_by_type(CONN_TYPE_OR_LISTENER);
     if (c)
       return c->port;
     return 0;
   }
-  return options->ORPort;
+  return port;
 }
 
 /** Return the port that we should advertise as our DirPort;
@@ -1201,15 +1226,18 @@ router_get_advertised_or_port(const or_options_t *options)
 uint16_t
 router_get_advertised_dir_port(const or_options_t *options, uint16_t dirport)
 {
-  if (!options->DirPort)
+  int dirport_configured = get_primary_dir_port();
+  (void)options;
+
+  if (!dirport_configured)
     return dirport;
-  if (options->DirPort == CFG_AUTO_PORT) {
+  if (dirport_configured == CFG_AUTO_PORT) {
     connection_t *c = connection_get_by_type(CONN_TYPE_DIR_LISTENER);
     if (c)
       return c->port;
     return 0;
   }
-  return options->DirPort;
+  return dirport_configured;
 }
 
 /*
@@ -1466,6 +1494,24 @@ router_rebuild_descriptor(int force)
   ri->cache_info.published_on = time(NULL);
   ri->onion_pkey = crypto_pk_dup_key(get_onion_key()); /* must invoke from
                                                         * main thread */
+  if (options->BridgeRelay) {
+    /* For now, only bridges advertise an ipv6 or-address.  And only one. */
+    const port_cfg_t *ipv6_orport = NULL;
+    SMARTLIST_FOREACH_BEGIN(get_configured_ports(), const port_cfg_t *, p) {
+      if (p->type == CONN_TYPE_OR_LISTENER &&
+          ! p->no_advertise &&
+          ! p->ipv4_only &&
+          tor_addr_family(&p->addr) == AF_INET6 &&
+          ! tor_addr_is_internal(&p->addr, 1)) {
+        ipv6_orport = p;
+        break;
+      }
+    } SMARTLIST_FOREACH_END(p);
+    if (ipv6_orport) {
+      tor_addr_copy(&ri->ipv6_addr, &ipv6_orport->addr);
+      ri->ipv6_orport = ipv6_orport->port;
+    }
+  }
   ri->identity_pkey = crypto_pk_dup_key(get_server_identity_key());
   if (crypto_pk_get_digest(ri->identity_pkey,
                            ri->cache_info.identity_digest)<0) {
@@ -1875,6 +1921,7 @@ router_dump_router_to_string(char *s, size_t maxlen, routerinfo_t *router,
   int result=0;
   addr_policy_t *tmpe;
   char *family_line;
+  char *extra_or_address = NULL;
   const or_options_t *options = get_options();
 
   /* Make sure the identity key matches the one in the routerinfo. */
@@ -1927,9 +1974,22 @@ router_dump_router_to_string(char *s, size_t maxlen, routerinfo_t *router,
                   router->cache_info.extra_info_digest, DIGEST_LEN);
   }
 
+  if (router->ipv6_orport &&
+      tor_addr_family(&router->ipv6_addr) == AF_INET6) {
+    char addr[TOR_ADDR_BUF_LEN];
+    const char *a;
+    a = tor_addr_to_str(addr, &router->ipv6_addr, sizeof(addr), 1);
+    if (a) {
+      tor_asprintf(&extra_or_address,
+                   "or-address %s:%d\n", a, router->ipv6_orport);
+      log_notice(LD_OR, "My line is <%s>", extra_or_address);
+    }
+  }
+
   /* Generate the easy portion of the router descriptor. */
   result = tor_snprintf(s, maxlen,
                     "router %s %s %d 0 %d\n"
+                    "%s"
                     "platform %s\n"
                     "opt protocols Link 1 2 Circuit 1\n"
                     "published %s\n"
@@ -1944,6 +2004,7 @@ router_dump_router_to_string(char *s, size_t maxlen, routerinfo_t *router,
     router->address,
     router->or_port,
     decide_to_advertise_dirport(options, router->dir_port),
+    extra_or_address ? extra_or_address : "",
     router->platform,
     published,
     fingerprint,
@@ -1964,6 +2025,7 @@ router_dump_router_to_string(char *s, size_t maxlen, routerinfo_t *router,
   tor_free(family_line);
   tor_free(onion_pkey);
   tor_free(identity_pkey);
+  tor_free(extra_or_address);
 
   if (result < 0) {
     log_warn(LD_BUG,"descriptor snprintf #1 ran out of room!");
@@ -2057,6 +2119,52 @@ router_dump_router_to_string(char *s, size_t maxlen, routerinfo_t *router,
 #endif
 
   return (int)written+1;
+}
+
+/** Copy the primary (IPv4) OR port (IP address and TCP port) for
+ * <b>router</b> into *<b>ap_out</b>. */
+void
+router_get_prim_orport(const routerinfo_t *router, tor_addr_port_t *ap_out)
+{
+  tor_assert(ap_out != NULL);
+  tor_addr_from_ipv4h(&ap_out->addr, router->addr);
+  ap_out->port = router->or_port;
+}
+
+/** Return 1 if we prefer the IPv6 address and OR TCP port of
+ * <b>router</b>, else 0.
+ *
+ *  We prefer the IPv6 address if the router has one and
+ *  i) the routerinfo_t says so
+ *  or
+ *  ii) the router has no IPv4 address.  */
+int
+router_ipv6_preferred(const routerinfo_t *router)
+{
+  return (!tor_addr_is_null(&router->ipv6_addr)
+          && (router->ipv6_preferred || router->addr == 0));
+}
+
+/** Copy the preferred OR port (IP address and TCP port) for
+ * <b>router</b> into *<b>addr_out</b>.  */
+void
+router_get_pref_orport(const routerinfo_t *router, tor_addr_port_t *ap_out)
+{
+  if (router_ipv6_preferred(router))
+    router_get_pref_ipv6_orport(router, ap_out);
+  else
+    router_get_prim_orport(router, ap_out);
+}
+
+/** Copy the preferred IPv6 OR port (IP address and TCP port) for
+ * <b>router</b> into *<b>ap_out</b>. */
+void
+router_get_pref_ipv6_orport(const routerinfo_t *router,
+                            tor_addr_port_t *ap_out)
+{
+  tor_assert(ap_out != NULL);
+  tor_addr_copy(&ap_out->addr, &router->ipv6_addr);
+  ap_out->port = router->ipv6_orport;
 }
 
 /** Load the contents of <b>filename</b>, find the last line starting with

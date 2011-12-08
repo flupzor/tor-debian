@@ -1017,7 +1017,14 @@ circuit_has_opened(origin_circuit_t *circ)
   switch (TO_CIRCUIT(circ)->purpose) {
     case CIRCUIT_PURPOSE_C_ESTABLISH_REND:
       rend_client_rendcirc_has_opened(circ);
-      can_try_clearing_isolation = 1;
+      /* XXXX We'd like to set something like "can_try_clearing_isolation"
+       * here, so that we can change the isolation of this circuit (and maybe
+       * its purpose too) if it turns out that we no longer have any streams
+       * that want to use it.  But connection_ap_attach_pending() doesn't
+       * actually attach streams to a C_ESTABLISH_REND circuit-- streams
+       * don't get attached until the circuit is in C_REND_JOINED... so
+       * we can't clear isolation now.
+       */
       connection_ap_attach_pending();
       break;
     case CIRCUIT_PURPOSE_C_INTRODUCING:
@@ -1439,7 +1446,10 @@ circuit_get_open_circ_or_launch(entry_connection_t *conn,
         int opt = conn->chosen_exit_optional;
         r = node_get_by_nickname(conn->chosen_exit_name, 1);
         if (r && node_has_descriptor(r)) {
-          extend_info = extend_info_from_node(r);
+          /* We might want to connect to an IPv6 bridge for loading
+             descriptors so we use the preferred address rather than
+             the primary.  */
+          extend_info = extend_info_from_node(r, conn->want_onehop ? 1 : 0);
         } else {
           log_debug(LD_DIR, "considering %d, %s",
                     want_onehop, conn->chosen_exit_name);
@@ -1488,6 +1498,12 @@ circuit_get_open_circ_or_launch(entry_connection_t *conn,
       new_circ_purpose = CIRCUIT_PURPOSE_C_INTRODUCING;
     else
       new_circ_purpose = desired_circuit_purpose;
+
+    if (options->Tor2webMode &&
+        (new_circ_purpose == CIRCUIT_PURPOSE_C_ESTABLISH_REND ||
+         new_circ_purpose == CIRCUIT_PURPOSE_C_INTRODUCING)) {
+      want_onehop = 1;
+    }
 
     {
       int flags = CIRCLAUNCH_NEED_CAPACITY;
@@ -1684,7 +1700,7 @@ consider_recording_trackhost(const entry_connection_t *conn,
 
   addressmap_register(conn->socks_request->address, new_address,
                       time(NULL) + options->TrackHostExitsExpire,
-                      ADDRMAPSRC_TRACKEXIT);
+                      ADDRMAPSRC_TRACKEXIT, 0, 0);
 }
 
 /** Attempt to attach the connection <b>conn</b> to <b>circ</b>, and send a

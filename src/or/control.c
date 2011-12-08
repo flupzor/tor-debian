@@ -737,7 +737,7 @@ control_setconf_helper(control_connection_t *conn, uint32_t len, char *body,
   SMARTLIST_FOREACH(entries, char *, cp, tor_free(cp));
   smartlist_free(entries);
 
-  if (config_get_lines(config, &lines) < 0) {
+  if (config_get_lines(config, &lines, 0) < 0) {
     log_warn(LD_CONTROL,"Controller gave us config lines we can't parse.");
     connection_write_str_to_buf("551 Couldn't parse configuration\r\n",
                                 conn);
@@ -883,7 +883,7 @@ handle_control_loadconf(control_connection_t *conn, uint32_t len,
   const char *msg = NULL;
   (void) len;
 
-  retval = options_init_from_string(body, CMD_RUN_TOR, NULL, &errstring);
+  retval = options_init_from_string(NULL, body, CMD_RUN_TOR, NULL, &errstring);
 
   if (retval != SETOPT_OK)
     log_warn(LD_CONTROL,
@@ -1331,7 +1331,8 @@ handle_control_mapaddress(control_connection_t *conn, uint32_t len,
           smartlist_add(reply, ans);
         }
       } else {
-        addressmap_register(from, tor_strdup(to), 1, ADDRMAPSRC_CONTROLLER);
+        addressmap_register(from, tor_strdup(to), 1,
+                            ADDRMAPSRC_CONTROLLER, 0, 0);
         tor_snprintf(ans, anslen, "250-%s", line);
         smartlist_add(reply, ans);
       }
@@ -1378,7 +1379,9 @@ getinfo_helper_misc(control_connection_t *conn, const char *question,
   if (!strcmp(question, "version")) {
     *answer = tor_strdup(get_version());
   } else if (!strcmp(question, "config-file")) {
-    *answer = tor_strdup(get_torrc_fname());
+    *answer = tor_strdup(get_torrc_fname(0));
+  } else if (!strcmp(question, "config-defaults-file")) {
+    *answer = tor_strdup(get_torrc_fname(1));
   } else if (!strcmp(question, "config-text")) {
     *answer = options_dump(get_options(), 1);
   } else if (!strcmp(question, "info/names")) {
@@ -2024,6 +2027,7 @@ typedef struct getinfo_item_t {
 static const getinfo_item_t getinfo_items[] = {
   ITEM("version", misc, "The current version of Tor."),
   ITEM("config-file", misc, "Current location of the \"torrc\" file."),
+  ITEM("config-defaults-file", misc, "Current location of the defaults file."),
   ITEM("config-text", misc,
        "Return the string that would be written by a saveconf command."),
   ITEM("accounting/bytes", accounting,
@@ -2399,7 +2403,7 @@ handle_control_extendcircuit(control_connection_t *conn, uint32_t len,
   /* now circ refers to something that is ready to be extended */
   SMARTLIST_FOREACH(nodes, const node_t *, node,
   {
-    extend_info_t *info = extend_info_from_node(node);
+    extend_info_t *info = extend_info_from_node(node, 0);
     tor_assert(info); /* True, since node_has_descriptor(node) == true */
     circuit_append_new_exit(circ, info);
     extend_info_free(info);

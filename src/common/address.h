@@ -31,6 +31,13 @@ typedef struct tor_addr_t
   } addr;
 } tor_addr_t;
 
+/** Holds an IP address and a TCP/UDP port.  */
+typedef struct tor_addr_port_t
+{
+  tor_addr_t addr;
+  uint16_t port;
+} tor_addr_port_t;
+
 static INLINE const struct in6_addr *tor_addr_to_in6(const tor_addr_t *a);
 static INLINE uint32_t tor_addr_to_ipv4n(const tor_addr_t *a);
 static INLINE uint32_t tor_addr_to_ipv4h(const tor_addr_t *a);
@@ -149,7 +156,7 @@ int tor_addr_compare_masked(const tor_addr_t *addr1, const tor_addr_t *addr2,
 
 unsigned int tor_addr_hash(const tor_addr_t *addr);
 int tor_addr_is_v4(const tor_addr_t *addr);
-int tor_addr_is_internal(const tor_addr_t *ip, int for_listening) ATTR_PURE;
+int tor_addr_is_internal(const tor_addr_t *ip, int for_listening);
 
 /** Longest length that can be required for a reverse lookup name. */
 /* 32 nybbles, 32 dots, 8 characters of "ip6.arpa", 1 NUL: 73 characters. */
@@ -185,7 +192,7 @@ int tor_addr_port_split(int severity, const char *addrport,
                         char **address_out, uint16_t *port_out);
 
 /* IPv4 helpers */
-int is_internal_IP(uint32_t ip, int for_listening) ATTR_PURE;
+int is_internal_IP(uint32_t ip, int for_listening);
 int addr_port_lookup(int severity, const char *addrport, char **address,
                     uint32_t *addr, uint16_t *port_out);
 int parse_port_range(const char *port, uint16_t *port_min_out,

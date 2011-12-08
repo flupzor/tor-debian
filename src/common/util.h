@@ -173,19 +173,15 @@ int n_bits_set_u8(uint8_t v);
 #define HEX_CHARACTERS "0123456789ABCDEFabcdef"
 void tor_strlower(char *s) ATTR_NONNULL((1));
 void tor_strupper(char *s) ATTR_NONNULL((1));
-int tor_strisprint(const char *s) ATTR_PURE ATTR_NONNULL((1));
-int tor_strisnonupper(const char *s) ATTR_PURE ATTR_NONNULL((1));
-int strcmp_opt(const char *s1, const char *s2) ATTR_PURE;
-int strcmpstart(const char *s1, const char *s2) ATTR_PURE ATTR_NONNULL((1,2));
-int strcmp_len(const char *s1, const char *s2, size_t len)
-  ATTR_PURE ATTR_NONNULL((1,2));
-int strcasecmpstart(const char *s1, const char *s2)
-  ATTR_PURE ATTR_NONNULL((1,2));
-int strcmpend(const char *s1, const char *s2) ATTR_PURE ATTR_NONNULL((1,2));
-int strcasecmpend(const char *s1, const char *s2)
-  ATTR_PURE ATTR_NONNULL((1,2));
-int fast_memcmpstart(const void *mem, size_t memlen,
-                     const char *prefix) ATTR_PURE;
+int tor_strisprint(const char *s) ATTR_NONNULL((1));
+int tor_strisnonupper(const char *s) ATTR_NONNULL((1));
+int strcmp_opt(const char *s1, const char *s2);
+int strcmpstart(const char *s1, const char *s2) ATTR_NONNULL((1,2));
+int strcmp_len(const char *s1, const char *s2, size_t len) ATTR_NONNULL((1,2));
+int strcasecmpstart(const char *s1, const char *s2) ATTR_NONNULL((1,2));
+int strcmpend(const char *s1, const char *s2) ATTR_NONNULL((1,2));
+int strcasecmpend(const char *s1, const char *s2) ATTR_NONNULL((1,2));
+int fast_memcmpstart(const void *mem, size_t memlen, const char *prefix);
 
 void tor_strstrip(char *s, const char *strip) ATTR_NONNULL((1,2));
 long tor_parse_long(const char *s, int base, long min,
@@ -197,19 +193,19 @@ double tor_parse_double(const char *s, double min, double max, int *ok,
 uint64_t tor_parse_uint64(const char *s, int base, uint64_t min,
                          uint64_t max, int *ok, char **next);
 const char *hex_str(const char *from, size_t fromlen) ATTR_NONNULL((1));
-const char *eat_whitespace(const char *s) ATTR_PURE;
-const char *eat_whitespace_eos(const char *s, const char *eos) ATTR_PURE;
-const char *eat_whitespace_no_nl(const char *s) ATTR_PURE;
-const char *eat_whitespace_eos_no_nl(const char *s, const char *eos) ATTR_PURE;
-const char *find_whitespace(const char *s) ATTR_PURE;
-const char *find_whitespace_eos(const char *s, const char *eos) ATTR_PURE;
-const char *find_str_at_start_of_line(const char *haystack, const char *needle)
-  ATTR_PURE;
+const char *eat_whitespace(const char *s);
+const char *eat_whitespace_eos(const char *s, const char *eos);
+const char *eat_whitespace_no_nl(const char *s);
+const char *eat_whitespace_eos_no_nl(const char *s, const char *eos);
+const char *find_whitespace(const char *s);
+const char *find_whitespace_eos(const char *s, const char *eos);
+const char *find_str_at_start_of_line(const char *haystack,
+                                      const char *needle);
 int string_is_C_identifier(const char *string);
 
-int tor_mem_is_zero(const char *mem, size_t len) ATTR_PURE;
-int tor_digest_is_zero(const char *digest) ATTR_PURE;
-int tor_digest256_is_zero(const char *digest) ATTR_PURE;
+int tor_mem_is_zero(const char *mem, size_t len);
+int tor_digest_is_zero(const char *digest);
+int tor_digest256_is_zero(const char *digest);
 char *esc_for_log(const char *string) ATTR_MALLOC;
 const char *escaped(const char *string);
 struct smartlist_t;
@@ -315,6 +311,7 @@ int check_private_dir(const char *dirname, cpd_check_t check,
                       const char *effective_user);
 #define OPEN_FLAGS_REPLACE (O_WRONLY|O_CREAT|O_TRUNC)
 #define OPEN_FLAGS_APPEND (O_WRONLY|O_CREAT|O_APPEND)
+#define OPEN_FLAGS_DONT_REPLACE (O_CREAT|O_EXCL|O_APPEND|O_WRONLY)
 typedef struct open_file_t open_file_t;
 int start_writing_to_file(const char *fname, int open_flags, int mode,
                           open_file_t **data_out);
@@ -336,6 +333,8 @@ int write_chunks_to_file(const char *fname, const struct smartlist_t *chunks,
                          int bin);
 int append_bytes_to_file(const char *fname, const char *str, size_t len,
                          int bin);
+int write_bytes_to_new_file(const char *fname, const char *str, size_t len,
+                            int bin);
 
 /** Flag for read_file_to_str: open the file in binary mode. */
 #define RFTS_BIN            1
@@ -349,7 +348,7 @@ const char *parse_config_line_from_str(const char *line,
                                        char **key_out, char **value_out);
 char *expand_filename(const char *filename);
 struct smartlist_t *tor_listdir(const char *dirname);
-int path_is_relative(const char *filename) ATTR_PURE;
+int path_is_relative(const char *filename);
 
 /* Process helpers */
 void start_daemon(void);
@@ -360,10 +359,14 @@ void write_pidfile(char *filename);
 void tor_check_port_forwarding(const char *filename,
                                int dir_port, int or_port, time_t now);
 
-int tor_terminate_process(pid_t pid);
-typedef struct process_handle_s process_handle_t;
+typedef struct process_handle_t process_handle_t;
 int tor_spawn_background(const char *const filename, const char **argv,
-                         const char **envp, process_handle_t *process_handle);
+#ifdef MS_WINDOWS
+                         LPVOID envp,
+#else
+                         const char **envp,
+#endif
+                         process_handle_t **process_handle_out);
 
 #define SPAWN_ERROR_MESSAGE "ERR: Failed to spawn background process - code "
 
@@ -371,16 +374,16 @@ int tor_spawn_background(const char *const filename, const char **argv,
 HANDLE load_windows_system_library(const TCHAR *library_name);
 #endif
 
-#ifdef UTIL_PRIVATE
-/* Prototypes for private functions only used by util.c (and unit tests) */
-
 /* Values of process_handle_t.status. PROCESS_STATUS_NOTRUNNING must be
  * 0 because tor_check_port_forwarding depends on this being the initial
  * statue of the static instance of process_handle_t */
 #define PROCESS_STATUS_NOTRUNNING 0
 #define PROCESS_STATUS_RUNNING 1
 #define PROCESS_STATUS_ERROR -1
-struct process_handle_s {
+
+#ifdef UTIL_PRIVATE
+/*DOCDOC*/
+struct process_handle_t {
   int status;
 #ifdef MS_WINDOWS
   HANDLE stdout_pipe;
@@ -394,12 +397,13 @@ struct process_handle_s {
   pid_t pid;
 #endif // MS_WINDOWS
 };
+#endif
 
 /* Return values of tor_get_exit_code() */
 #define PROCESS_EXIT_RUNNING 1
 #define PROCESS_EXIT_EXITED 0
 #define PROCESS_EXIT_ERROR -1
-int tor_get_exit_code(const process_handle_t process_handle,
+int tor_get_exit_code(const process_handle_t *process_handle,
                       int block, int *exit_code);
 int tor_split_lines(struct smartlist_t *sl, char *buf, int len);
 #ifdef MS_WINDOWS
@@ -415,6 +419,20 @@ ssize_t tor_read_all_from_process_stdout(
 ssize_t tor_read_all_from_process_stderr(
     const process_handle_t *process_handle, char *buf, size_t count);
 char *tor_join_win_cmdline(const char *argv[]);
+
+int tor_process_get_pid(process_handle_t *process_handle);
+#ifdef MS_WINDOWS
+HANDLE tor_process_get_stdout_pipe(process_handle_t *process_handle);
+#else
+FILE *tor_process_get_stdout_pipe(process_handle_t *process_handle);
+#endif
+
+int tor_terminate_process(process_handle_t *process_handle);
+void tor_process_handle_destroy(process_handle_t *process_handle,
+                                int also_terminate_process);
+
+#ifdef UTIL_PRIVATE
+/* Prototypes for private functions only used by util.c (and unit tests) */
 
 void format_helper_exit_status(unsigned char child_state,
                                int saved_errno, char *hex_errno);
