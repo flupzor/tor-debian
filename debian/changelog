@@ -1,3 +1,13 @@
+tor (0.2.3.10-alpha-2) experimental; urgency=low
+
+  * No longer patch Tor to set DataDirectory, RunAsDaemon etc. when run
+    as root or debian-tor.
+    Instead ship with a file setting all these options in
+    /usr/share/tor/tor-service-defaults-torrc and cause our init-script
+    to pass --defaults-torrc <that-file> to the tor started by that script.
+
+ -- Peter Palfrader <weasel@debian.org>  Mon, 19 Dec 2011 20:55:26 +0100
+
 tor (0.2.3.10-alpha-1) experimental; urgency=high
 
   * New upstream version, fixing a heap overflow bug related to Tor's

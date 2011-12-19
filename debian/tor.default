@@ -31,7 +31,7 @@ RUN_DAEMON="yes"
 
 # Additional arguments to pass on tor's command line.
 #
-# ARGS=""
+# ARGS="$ARGS "
 
 #
 # Uncomment the ulimit call below if you want tor to produce coredumps on

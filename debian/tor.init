@@ -24,6 +24,7 @@ TORPIDDIR=/var/run/tor
 TORPID=$TORPIDDIR/tor.pid
 DEFAULTSFILE=/etc/default/$NAME
 WAITFORDAEMON=60
+DEFAULT_ARGS="--defaults-torrc /usr/share/tor/tor-service-defaults-torrc"
 ARGS=""
 # Let's try to figure our some sane defaults:
 if [ -r /proc/sys/fs/file-max ]; then
@@ -132,7 +133,7 @@ case "$1" in
 	start-stop-daemon --start --quiet --oknodo \
 		--pidfile $TORPID \
 		$NICE \
-		--exec $DAEMON -- $ARGS
+		--exec $DAEMON -- $DEFAULT_ARGS $ARGS
 	echo "done."
 	;;
   stop)
