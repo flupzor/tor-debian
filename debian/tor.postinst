@@ -115,6 +115,11 @@ EOF
 	fi
 fi
 
+tor_error_init() {
+	echo "Tor was unable to start due to configuration errors.";
+	echo "Please fix them and manually restart the tor daemon using";
+	echo " ´service start tor´";
+}
 
 #DEBHELPER#
 
