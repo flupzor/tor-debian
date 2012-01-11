@@ -5,8 +5,10 @@ tor (0.2.3.10-alpha-2) experimental; urgency=low
     Instead ship with a file setting all these options in
     /usr/share/tor/tor-service-defaults-torrc and cause our init-script
     to pass --defaults-torrc <that-file> to the tor started by that script.
+  * No longer fail postinst when the init script fails to restart tor.
+    Patch provided by Carl Fuerstenberg (closes: #652884).
 
- -- Peter Palfrader <weasel@debian.org>  Mon, 19 Dec 2011 20:55:26 +0100
+ -- Peter Palfrader <weasel@debian.org>  Wed, 11 Jan 2012 21:02:44 +0100
 
 tor (0.2.3.10-alpha-1) experimental; urgency=high
 
