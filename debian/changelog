@@ -1,4 +1,4 @@
-tor (0.2.3.10-alpha-2) experimental; urgency=low
+tor (0.2.3.10-alpha-X) XXperimental; urgency=low
 
   * No longer patch Tor to set DataDirectory, RunAsDaemon etc. when run
     as root or debian-tor.
@@ -8,7 +8,7 @@ tor (0.2.3.10-alpha-2) experimental; urgency=low
   * No longer fail postinst when the init script fails to restart tor.
     Patch provided by Carl Fuerstenberg (closes: #652884).
 
- -- Peter Palfrader <weasel@debian.org>  Wed, 11 Jan 2012 21:02:44 +0100
+ -- Peter Palfrader <weasel@debian.org>  Wed, 11 Jan 2012 21:19:23 +0100
 
 tor (0.2.3.10-alpha-1) experimental; urgency=high
 
