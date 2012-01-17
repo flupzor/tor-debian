@@ -1,21 +1,16 @@
 This is the Debian package for Tor, The Onion Router.
 
-Some changes have been made to the Tor source to integrate it better into
-Debian.  If Tor is started as root or the 'debian-tor' user, then:
+If Tor is started by the init script, it loads the configuration
+snippets from /usr/share/tor/tor-service-defaults-torrc before
+consulting /etc/tor/torrc.
 
-- RunAsDaemon is enabled,
-- PidFile is set to /var/run/tor/tor.pid (No default upstream),
-- default logging goes to /var/log/tor/log (instead of stdout),
-- DataDirectory is set to /var/lib/tor (uses $HOME/.tor upstream),
-- User is set to "debian-tor".
-- ControlSocket is enabled at /var/run/tor/control, is made
-  group writable (ControlSocketsGroupWritable).  Additionally
-  CookieAuthentication is enabled, the cookie file written to
-  /var/run/tor/control.authcookie (CookieAuthFile) and made
-  group readable (CookieAuthFileGroupReadable).
+The tor-service-defaults-torrc file tells Tor to run as daemon, create
+pidfile, sets its data directory and configures cookie authentication.
 
-If Tor is started as any other user it behaves just like upstream's.
+If Tor is started not from the init script, then it will behave like
+upstream's Tor.
 
 -- 
 Peter Palfrader, Mon, 24 Jul 2006 05:20:30 +0200
                  Sat, 23 Feb 2008 13:44:40 +0100
+                 Wed, 11 Jan 2012 21:31:44 +0100
