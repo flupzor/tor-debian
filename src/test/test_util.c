@@ -19,9 +19,10 @@ test_util_time(void)
 {
   struct timeval start, end;
   struct tm a_time;
-  char timestr[RFC1123_TIME_LEN+1];
+  char timestr[128];
   time_t t_res;
   int i;
+  struct timeval tv;
 
   start.tv_sec = 5;
   start.tv_usec = 5000;
@@ -82,6 +83,24 @@ test_util_time(void)
   tor_gettimeofday(&end);
   /* We might've timewarped a little. */
   tt_int_op(tv_udiff(&start, &end), >=, -5000);
+
+  /* Now let's check some format_iso_time variants */
+  tv.tv_sec = (time_t)1326296338;
+  tv.tv_usec = 3060;
+  format_iso_time(timestr, tv.tv_sec);
+  test_streq("2012-01-11 15:38:58", timestr);
+  /* The output of format_local_iso_time will vary by timezone, and setting
+     our timezone for testing purposes would be a nontrivial flaky pain.
+     Skip this test for now.
+  format_local_iso_time(timestr, tv.tv_sec);
+  test_streq("2012-01-11 10:38:58", timestr);
+  */
+  format_iso_time_nospace(timestr, tv.tv_sec);
+  test_streq("2012-01-11T15:38:58", timestr);
+  test_eq(strlen(timestr), ISO_TIME_LEN);
+  format_iso_time_nospace_usec(timestr, &tv);
+  test_streq("2012-01-11T15:38:58.003060", timestr);
+  test_eq(strlen(timestr), ISO_TIME_USEC_LEN);
 
  done:
   ;
@@ -378,7 +397,7 @@ test_util_strmisc(void)
 
   /* Test wrap_string */
   {
-    smartlist_t *sl = smartlist_create();
+    smartlist_t *sl = smartlist_new();
     wrap_string(sl, "This is a test of string wrapping functionality: woot.",
                 10, "", "");
     cp = smartlist_join_strings(sl, "", 0, NULL);
@@ -909,7 +928,7 @@ test_util_mempool(void)
   test_eq(pool->item_alloc_size & 0x03, 0);
   test_assert(pool->new_chunk_capacity < 60);
 
-  allocated = smartlist_create();
+  allocated = smartlist_new();
   for (i = 0; i < 20000; ++i) {
     if (smartlist_len(allocated) < 20 || crypto_rand_int(2)) {
       void *m = mp_pool_get(pool);
@@ -1460,23 +1479,24 @@ test_util_spawn_background_ok(void *ptr)
 static void
 test_util_spawn_background_fail(void *ptr)
 {
-#ifdef MS_WINDOWS
   const char *argv[] = {BUILDDIR "/src/test/no-such-file", "--test", NULL};
-  const char *expected_out = "ERR: Failed to spawn background process "
-                             "- code          9/2\n";
   const char *expected_err = "";
+  char expected_out[1024];
+  char code[32];
+#ifdef MS_WINDOWS
   const int expected_status = PROCESS_STATUS_ERROR;
 #else
-  const char *argv[] = {BUILDDIR "/src/test/no-such-file", "--test", NULL};
-  const char *expected_out = "ERR: Failed to spawn background process "
-                             "- code          9/2\n";
-  const char *expected_err = "";
   /* TODO: Once we can signal failure to exec, set this to be
    * PROCESS_STATUS_ERROR */
   const int expected_status = PROCESS_STATUS_RUNNING;
 #endif
 
   (void)ptr;
+
+  tor_snprintf(code, sizeof(code), "%x/%x",
+    9 /* CHILD_STATE_FAILEXEC */ , ENOENT);
+  tor_snprintf(expected_out, sizeof(expected_out),
+    "ERR: Failed to spawn background process - code %12s\n", code);
 
   run_util_spawn_background(argv, expected_out, expected_err, 255,
                             expected_status);
@@ -1665,7 +1685,7 @@ test_util_split_lines(void *ptr)
   (void)ptr;
 
   for (i=0; tests[i].orig_line; i++) {
-    sl = smartlist_create();
+    sl = smartlist_new();
     /* Allocate space for string and trailing NULL */
     orig_line = tor_memdup(tests[i].orig_line, tests[i].orig_length + 1);
     tor_split_lines(sl, orig_line, tests[i].orig_length);

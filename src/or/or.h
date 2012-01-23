@@ -833,6 +833,7 @@ typedef enum {
 #define CELL_CERTS 129
 #define CELL_AUTH_CHALLENGE 130
 #define CELL_AUTHENTICATE 131
+#define CELL_AUTHORIZE 132
 
 /** How long to test reachability before complaining to the user. */
 #define TIMEOUT_UNTIL_UNREACHABILITY_COMPLAINT (20*60)
@@ -1019,7 +1020,8 @@ typedef struct connection_t {
   /** CONNECT/SOCKS proxy client handshake state (for outgoing connections). */
   unsigned int proxy_state:4;
 
-  /** Our socket; -1 if this connection is closed, or has no socket. */
+  /** Our socket; set to TOR_INVALID_SOCKET if this connection is closed,
+   * or has no socket. */
   tor_socket_t s;
   int conn_array_index; /**< Index into the global connection array. */
 
@@ -1171,8 +1173,8 @@ typedef struct or_handshake_state_t {
    *
    * @{
    */
-  crypto_digest_env_t *digest_sent;
-  crypto_digest_env_t *digest_received;
+  crypto_digest_t *digest_sent;
+  crypto_digest_t *digest_received;
   /** @} */
 
   /** Certificates that a connection initiator sent us in a CERTS cell; we're
@@ -1731,8 +1733,8 @@ typedef struct {
   tor_addr_t ipv6_addr;
   uint16_t ipv6_orport;
 
-  crypto_pk_env_t *onion_pkey; /**< Public RSA key for onions. */
-  crypto_pk_env_t *identity_pkey;  /**< Public RSA key for signing. */
+  crypto_pk_t *onion_pkey; /**< Public RSA key for onions. */
+  crypto_pk_t *identity_pkey;  /**< Public RSA key for signing. */
 
   char *platform; /**< What software/operating system is this OR using? */
 
@@ -1960,7 +1962,7 @@ typedef struct microdesc_t {
   /* Fields in the microdescriptor. */
 
   /** As routerinfo_t.onion_pkey */
-  crypto_pk_env_t *onion_pkey;
+  crypto_pk_t *onion_pkey;
   /** As routerinfo_t.family */
   smartlist_t *family;
   /** Exit policy summary */
@@ -2068,7 +2070,7 @@ typedef struct networkstatus_v2_t {
 
   char identity_digest[DIGEST_LEN]; /**< Digest of signing key. */
   char *contact; /**< How to contact directory admin? (may be NULL). */
-  crypto_pk_env_t *signing_key; /**< Key used to sign this directory. */
+  crypto_pk_t *signing_key; /**< Key used to sign this directory. */
   char *client_versions; /**< comma-separated list of recommended client
                           * versions. */
   char *server_versions; /**< comma-separated list of recommended server
@@ -2297,7 +2299,7 @@ typedef struct extend_info_t {
   char identity_digest[DIGEST_LEN]; /**< Hash of this router's identity key. */
   uint16_t port; /**< OR port. */
   tor_addr_t addr; /**< IP address. */
-  crypto_pk_env_t *onion_key; /**< Current onionskin key. */
+  crypto_pk_t *onion_key; /**< Current onionskin key. */
 } extend_info_t;
 
 /** Certificate for v3 directory protocol: binds long-term authority identity
@@ -2306,9 +2308,9 @@ typedef struct authority_cert_t {
   /** Information relating to caching this cert on disk and looking it up. */
   signed_descriptor_t cache_info;
   /** This authority's long-term authority identity key. */
-  crypto_pk_env_t *identity_key;
+  crypto_pk_t *identity_key;
   /** This authority's medium-term signing key. */
-  crypto_pk_env_t *signing_key;
+  crypto_pk_t *signing_key;
   /** The digest of <b>signing_key</b> */
   char signing_key_digest[DIGEST_LEN];
   /** The listed expiration time of this certificate. */
@@ -2360,19 +2362,19 @@ typedef struct crypt_path_t {
   /* crypto environments */
   /** Encryption key and counter for cells heading towards the OR at this
    * step. */
-  crypto_cipher_env_t *f_crypto;
+  crypto_cipher_t *f_crypto;
   /** Encryption key and counter for cells heading back from the OR at this
    * step. */
-  crypto_cipher_env_t *b_crypto;
+  crypto_cipher_t *b_crypto;
 
   /** Digest state for cells heading towards the OR at this step. */
-  crypto_digest_env_t *f_digest; /* for integrity checking */
+  crypto_digest_t *f_digest; /* for integrity checking */
   /** Digest state for cells heading away from the OR at this step. */
-  crypto_digest_env_t *b_digest;
+  crypto_digest_t *b_digest;
 
   /** Current state of Diffie-Hellman key negotiation with the OR at this
    * step. */
-  crypto_dh_env_t *dh_handshake_state;
+  crypto_dh_t *dh_handshake_state;
   /** Current state of 'fast' (non-PK) key negotiation with the OR at this
    * step. Used to save CPU when TLS is already providing all the
    * authentication, secrecy, and integrity we need, and we're already
@@ -2406,6 +2408,18 @@ typedef struct crypt_path_t {
                        * at this step? */
 } crypt_path_t;
 
+/** A reference-counted pointer to a crypt_path_t, used only to share
+ * the final rendezvous cpath to be used on a service-side rendezvous
+ * circuit among multiple circuits built in parallel to the same
+ * destination rendezvous point. */
+typedef struct {
+  /** The reference count. */
+  unsigned int refcount;
+  /** The pointer.  Set to NULL when the crypt_path_t is put into use
+   * on an opened rendezvous circuit. */
+  crypt_path_t *cpath;
+} crypt_path_reference_t;
+
 #define CPATH_KEY_MATERIAL_LEN (20*2+16*2)
 
 #define DH_KEY_LEN DH_BYTES
@@ -2432,6 +2446,9 @@ typedef struct {
   unsigned int onehop_tunnel : 1;
   /** The crypt_path_t to append after rendezvous: used for rendezvous. */
   crypt_path_t *pending_final_cpath;
+  /** A ref-counted reference to the crypt_path_t to append after
+   * rendezvous; used on the service side. */
+  crypt_path_reference_t *service_pending_final_cpath_ref;
   /** How many times has building a circuit for this task failed? */
   int failure_count;
   /** At what time should we give up on this task? */
@@ -2607,6 +2624,30 @@ typedef struct origin_circuit_t {
    * cannibalized circuits. */
   unsigned int has_opened : 1;
 
+  /** Set iff this is a hidden-service circuit which has timed out
+   * according to our current circuit-build timeout, but which has
+   * been kept around because it might still succeed in connecting to
+   * its destination, and which is not a fully-connected rendezvous
+   * circuit.
+   *
+   * (We clear this flag for client-side rendezvous circuits when they
+   * are 'joined' to the other side's rendezvous circuit, so that
+   * connection_ap_handshake_attach_circuit can put client streams on
+   * the circuit.  We also clear this flag for service-side rendezvous
+   * circuits when they are 'joined' to a client's rend circ, but only
+   * for symmetry with the client case.  Client-side introduction
+   * circuits are closed when we get a joined rend circ, and
+   * service-side introduction circuits never have this flag set.) */
+  unsigned int hs_circ_has_timed_out : 1;
+
+  /** Set iff this is a service-side rendezvous circuit for which a
+   * new connection attempt has been launched.  We consider launching
+   * a new service-side rend circ to a client when the previous one
+   * fails; now that we don't necessarily close a service-side rend
+   * circ when we launch a new one to the same client, this flag keeps
+   * us from launching two retries for the same failed rend circ. */
+  unsigned int hs_service_side_rend_circ_has_been_relaunched : 1;
+
   /** What commands were sent over this circuit that decremented the
    * RELAY_EARLY counter? This is for debugging task 878. */
   uint8_t relay_early_commands[MAX_RELAY_EARLY_CELLS_PER_CIRCUIT];
@@ -2622,7 +2663,7 @@ typedef struct origin_circuit_t {
   /* The intro key replaces the hidden service's public key if purpose is
    * S_ESTABLISH_INTRO or S_INTRO, provided that no unversioned rendezvous
    * descriptor is used. */
-  crypto_pk_env_t *intro_key;
+  crypto_pk_t *intro_key;
 
   /** Quasi-global identifier for this circuit; used for control.c */
   /* XXXX NM This can get re-used after 2**32 circuits. */
@@ -2706,19 +2747,19 @@ typedef struct or_circuit_t {
   edge_connection_t *resolving_streams;
   /** The cipher used by intermediate hops for cells heading toward the
    * OP. */
-  crypto_cipher_env_t *p_crypto;
+  crypto_cipher_t *p_crypto;
   /** The cipher used by intermediate hops for cells heading away from
    * the OP. */
-  crypto_cipher_env_t *n_crypto;
+  crypto_cipher_t *n_crypto;
 
   /** The integrity-checking digest used by intermediate hops, for
    * cells packaged here and heading towards the OP.
    */
-  crypto_digest_env_t *p_digest;
+  crypto_digest_t *p_digest;
   /** The integrity-checking digest used by intermediate hops, for
    * cells packaged at the OP and arriving here.
    */
-  crypto_digest_env_t *n_digest;
+  crypto_digest_t *n_digest;
 
   /** Points to spliced circuit if purpose is REND_ESTABLISHED, and circuit
    * is not marked for close. */
@@ -3050,6 +3091,15 @@ typedef struct {
    * circuits.) */
   int Tor2webMode;
 
+  /** Close hidden service client circuits immediately when they reach
+   * the normal circuit-build timeout, even if they have already sent
+   * an INTRODUCE1 cell on its way to the service. */
+  int CloseHSClientCircuitsImmediatelyOnTimeout;
+
+  /** Close hidden-service-side rendezvous circuits immediately when
+   * they reach the normal circuit-build timeout. */
+  int CloseHSServiceRendCircuitsImmediatelyOnTimeout;
+
   int ConnLimit; /**< Demanded minimum number of simultaneous connections. */
   int _ConnLimit; /**< Maximum allowed number of simultaneous connections. */
   int RunAsDaemon; /**< If true, run in the background. (Unix only) */
@@ -3188,6 +3238,19 @@ typedef struct {
                                  * reject. */
   config_line_t *AuthDirInvalid; /**< Address policy for descriptors to
                                   * never mark as valid. */
+  /** @name AuthDir...CC
+   *
+   * Lists of country codes to mark as BadDir, BadExit, or Invalid, or to
+   * reject entirely.
+   *
+   * @{
+   */
+  smartlist_t *AuthDirBadDirCCs;
+  smartlist_t *AuthDirBadExitCCs;
+  smartlist_t *AuthDirInvalidCCs;
+  smartlist_t *AuthDirRejectCCs;
+  /**@}*/
+
   int AuthDirListBadDirs; /**< True iff we should list bad dirs,
                            * and vote for all other dir mirrors as good. */
   int AuthDirListBadExits; /**< True iff we should list bad exits,
@@ -3804,6 +3867,13 @@ typedef enum circuit_status_event_t {
   CIRC_EVENT_CLOSED   = 4,
 } circuit_status_event_t;
 
+/** Used to indicate the type of a CIRC_MINOR event passed to the controller.
+ * The various types are defined in control-spec.txt . */
+typedef enum circuit_status_minor_event_t {
+  CIRC_MINOR_EVENT_PURPOSE_CHANGED,
+  CIRC_MINOR_EVENT_CANNIBALIZED,
+} circuit_status_minor_event_t;
+
 /** Used to indicate the type of a stream event passed to the controller.
  * The various types are defined in control-spec.txt */
 typedef enum stream_status_event_t {
@@ -4056,7 +4126,7 @@ typedef enum {
 typedef struct rend_authorized_client_t {
   char *client_name;
   char descriptor_cookie[REND_DESC_COOKIE_LEN];
-  crypto_pk_env_t *client_key;
+  crypto_pk_t *client_key;
 } rend_authorized_client_t;
 
 /** ASCII-encoded v2 hidden service descriptor. */
@@ -4095,7 +4165,7 @@ typedef struct rend_encoded_v2_service_descriptor_t {
  * client and service side). */
 typedef struct rend_intro_point_t {
   extend_info_t *extend_info; /**< Extend info of this introduction point. */
-  crypto_pk_env_t *intro_key; /**< Introduction key that replaces the service
+  crypto_pk_t *intro_key; /**< Introduction key that replaces the service
                                * key, if this descriptor is V2. */
 
   /** (Client side only) Flag indicating that a timeout has occurred
@@ -4113,6 +4183,11 @@ typedef struct rend_intro_point_t {
   /** (Service side only) Flag indicating that this intro point was
    * included in the last HS descriptor we generated. */
   unsigned int listed_in_last_desc : 1;
+
+  /** (Service side only) Flag indicating that
+   * rend_service_note_removing_intro_point has been called for this
+   * intro point. */
+  unsigned int rend_service_note_removing_intro_point_called : 1;
 
   /** (Service side only) A digestmap recording the INTRODUCE2 cells
    * this intro point's circuit has received.  Each key is the digest
@@ -4145,7 +4220,7 @@ typedef struct rend_intro_point_t {
 /** Information used to connect to a hidden service.  Used on both the
  * service side and the client side. */
 typedef struct rend_service_descriptor_t {
-  crypto_pk_env_t *pk; /**< This service's public key. */
+  crypto_pk_t *pk; /**< This service's public key. */
   int version; /**< Version of the descriptor format: 0 or 2. */
   time_t timestamp; /**< Time when the descriptor was generated. */
   uint16_t protocols; /**< Bitmask: which rendezvous protocols are supported?

@@ -218,9 +218,9 @@ int tor_sscanf(const char *buf, const char *pattern, ...)
 #endif
   ;
 
-void smartlist_asprintf_add(struct smartlist_t *sl, const char *pattern, ...)
+void smartlist_add_asprintf(struct smartlist_t *sl, const char *pattern, ...)
   CHECK_PRINTF(2, 3);
-void smartlist_vasprintf_add(struct smartlist_t *sl, const char *pattern,
+void smartlist_add_vasprintf(struct smartlist_t *sl, const char *pattern,
                              va_list args);
 
 int hex_decode_digit(char c);
@@ -238,8 +238,11 @@ time_t tor_timegm(struct tm *tm);
 void format_rfc1123_time(char *buf, time_t t);
 int parse_rfc1123_time(const char *buf, time_t *t);
 #define ISO_TIME_LEN 19
+#define ISO_TIME_USEC_LEN (ISO_TIME_LEN+7)
 void format_local_iso_time(char *buf, time_t t);
 void format_iso_time(char *buf, time_t t);
+void format_iso_time_nospace(char *buf, time_t t);
+void format_iso_time_nospace_usec(char *buf, const struct timeval *tv);
 int parse_iso_time(const char *buf, time_t *t);
 int parse_http_time(const char *buf, struct tm *tm);
 int format_time_interval(char *out, size_t out_len, long interval);

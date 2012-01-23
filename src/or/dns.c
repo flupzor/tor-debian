@@ -376,7 +376,7 @@ set_expiry(cached_resolve_t *resolve, time_t expires)
 {
   tor_assert(resolve && resolve->expire == 0);
   if (!cached_resolve_pqueue)
-    cached_resolve_pqueue = smartlist_create();
+    cached_resolve_pqueue = smartlist_new();
   resolve->expire = expires;
   smartlist_pqueue_add(cached_resolve_pqueue,
                        _compare_cached_resolves_by_expiry,
@@ -454,7 +454,7 @@ purge_expired_resolves(time_t now)
         pend = resolve->pending_connections;
         resolve->pending_connections = pend->next;
         /* Connections should only be pending if they have no socket. */
-        tor_assert(pend->conn->_base.s == -1);
+        tor_assert(!SOCKET_OK(pend->conn->_base.s));
         pendconn = pend->conn;
         connection_edge_end(pendconn, END_STREAM_REASON_TIMEOUT);
         circuit_detach_stream(circuit_get_by_edge_conn(pendconn), pendconn);
@@ -681,7 +681,7 @@ dns_resolve_impl(edge_connection_t *exitconn, int is_resolve,
   uint8_t is_reverse = 0;
   int r;
   assert_connection_ok(TO_CONN(exitconn), 0);
-  tor_assert(exitconn->_base.s == -1);
+  tor_assert(!SOCKET_OK(exitconn->_base.s));
   assert_cache_ok();
   tor_assert(oncirc);
 
@@ -849,7 +849,7 @@ assert_all_pending_dns_resolves_ok(void)
          pend;
          pend = pend->next) {
       assert_connection_ok(TO_CONN(pend->conn), 0);
-      tor_assert(pend->conn->_base.s == -1);
+      tor_assert(!SOCKET_OK(pend->conn->_base.s));
       tor_assert(!connection_in_array(TO_CONN(pend->conn)));
     }
   }
@@ -955,7 +955,7 @@ dns_cancel_pending_resolve(const char *address)
     pend->conn->_base.state = EXIT_CONN_STATE_RESOLVEFAILED;
     pendconn = pend->conn;
     assert_connection_ok(TO_CONN(pendconn), 0);
-    tor_assert(pendconn->_base.s == -1);
+    tor_assert(!SOCKET_OK(pendconn->_base.s));
     if (!pendconn->_base.marked_for_close) {
       connection_edge_end(pendconn, END_STREAM_REASON_RESOLVEFAILED);
     }
@@ -1489,7 +1489,7 @@ wildcard_increment_answer(const char *id)
   ++*ip;
 
   if (*ip > 5 && n_wildcard_requests > 10) {
-    if (!dns_wildcard_list) dns_wildcard_list = smartlist_create();
+    if (!dns_wildcard_list) dns_wildcard_list = smartlist_new();
     if (!smartlist_string_isin(dns_wildcard_list, id)) {
     log(dns_wildcard_notice_given ? LOG_INFO : LOG_NOTICE, LD_EXIT,
         "Your DNS provider has given \"%s\" as an answer for %d different "
@@ -1511,7 +1511,7 @@ add_wildcarded_test_address(const char *address)
 {
   int n, n_test_addrs;
   if (!dns_wildcarded_test_address_list)
-    dns_wildcarded_test_address_list = smartlist_create();
+    dns_wildcarded_test_address_list = smartlist_new();
 
   if (smartlist_string_isin_case(dns_wildcarded_test_address_list, address))
     return;

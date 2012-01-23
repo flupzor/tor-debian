@@ -92,7 +92,7 @@ uint64_t stats_n_relay_cells_delivered = 0;
  * cell.
  */
 static void
-relay_set_digest(crypto_digest_env_t *digest, cell_t *cell)
+relay_set_digest(crypto_digest_t *digest, cell_t *cell)
 {
   char integrity[4];
   relay_header_t rh;
@@ -113,11 +113,11 @@ relay_set_digest(crypto_digest_env_t *digest, cell_t *cell)
  * and cell to their original state and return 0.
  */
 static int
-relay_digest_matches(crypto_digest_env_t *digest, cell_t *cell)
+relay_digest_matches(crypto_digest_t *digest, cell_t *cell)
 {
   char received_integrity[4], calculated_integrity[4];
   relay_header_t rh;
-  crypto_digest_env_t *backup_digest=NULL;
+  crypto_digest_t *backup_digest=NULL;
 
   backup_digest = crypto_digest_dup(digest);
 
@@ -141,10 +141,10 @@ relay_digest_matches(crypto_digest_env_t *digest, cell_t *cell)
     /* restore the relay header */
     memcpy(rh.integrity, received_integrity, 4);
     relay_header_pack(cell->payload, &rh);
-    crypto_free_digest_env(backup_digest);
+    crypto_digest_free(backup_digest);
     return 0;
   }
-  crypto_free_digest_env(backup_digest);
+  crypto_digest_free(backup_digest);
   return 1;
 }
 
@@ -156,7 +156,7 @@ relay_digest_matches(crypto_digest_env_t *digest, cell_t *cell)
  * Return -1 if the crypto fails, else return 0.
  */
 static int
-relay_crypt_one_payload(crypto_cipher_env_t *cipher, uint8_t *in,
+relay_crypt_one_payload(crypto_cipher_t *cipher, uint8_t *in,
                         int encrypt_mode)
 {
   int r;
@@ -607,7 +607,7 @@ relay_send_command_from_edge(streamid_t stream_id, circuit_t *circ,
       /* If no RELAY_EARLY cells can be sent over this circuit, log which
        * commands have been sent as RELAY_EARLY cells before; helps debug
        * task 878. */
-      smartlist_t *commands_list = smartlist_create();
+      smartlist_t *commands_list = smartlist_new();
       int i = 0;
       char *commands = NULL;
       for (; i < origin_circ->relay_early_cells_sent; i++)
@@ -1188,13 +1188,40 @@ connection_edge_process_relay_cell(cell_t *cell, circuit_t *circ,
         connection_mark_and_flush(TO_CONN(conn));
       }
       return 0;
-    case RELAY_COMMAND_EXTEND:
+    case RELAY_COMMAND_EXTEND: {
+      static uint64_t total_n_extend=0, total_nonearly=0;
+      total_n_extend++;
       if (conn) {
         log_fn(LOG_PROTOCOL_WARN, domain,
                "'extend' cell received for non-zero stream. Dropping.");
         return 0;
       }
+      if (cell->command != CELL_RELAY_EARLY &&
+          !networkstatus_get_param(NULL,"AllowNonearlyExtend",0,0,1)) {
+#define EARLY_WARNING_INTERVAL 3600
+        static ratelim_t early_warning_limit =
+          RATELIM_INIT(EARLY_WARNING_INTERVAL);
+        char *m;
+        if (cell->command == CELL_RELAY) {
+          ++total_nonearly;
+          if ((m = rate_limit_log(&early_warning_limit, approx_time()))) {
+            double percentage = ((double)total_nonearly)/total_n_extend;
+            percentage *= 100;
+            log_fn(LOG_PROTOCOL_WARN, domain, "EXTEND cell received, "
+                   "but not via RELAY_EARLY. Dropping.%s", m);
+            log_fn(LOG_PROTOCOL_WARN, domain, "  (We have dropped %.02f%% of "
+                   "all EXTEND cells for this reason)", percentage);
+            tor_free(m);
+          }
+        } else {
+          log_fn(LOG_WARN, domain,
+                 "EXTEND cell received, in a cell with type %d! Dropping.",
+                 cell->command);
+        }
+        return 0;
+      }
       return circuit_extend(cell, circ);
+    }
     case RELAY_COMMAND_EXTENDED:
       if (!layer_hint) {
         log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
@@ -2494,10 +2521,6 @@ append_cell_to_circuit_queue(circuit_t *circ, or_connection_t *orconn,
     or_circuit_t *orcirc = TO_OR_CIRCUIT(circ);
     queue = &orcirc->p_conn_cells;
     streams_blocked = circ->streams_blocked_on_p_conn;
-  }
-  if (cell->command == CELL_RELAY_EARLY && orconn->link_proto < 2) {
-    /* V1 connections don't understand RELAY_EARLY. */
-    cell->command = CELL_RELAY;
   }
 
   cell_queue_append_packed_copy(queue, cell);

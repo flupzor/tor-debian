@@ -89,6 +89,10 @@ typedef struct config_abbrev_t {
 /** A list of abbreviations and aliases to map command-line options, obsolete
  * option names, or alternative option names, to their current values. */
 static config_abbrev_t _option_abbrevs[] = {
+  PLURAL(AuthDirBadDirCC),
+  PLURAL(AuthDirBadExitCC),
+  PLURAL(AuthDirInvalidCC),
+  PLURAL(AuthDirRejectCC),
   PLURAL(ExitNode),
   PLURAL(EntryNode),
   PLURAL(ExcludeNode),
@@ -182,11 +186,15 @@ static config_var_t _option_vars[] = {
   V(AlternateHSAuthority,        LINELIST, NULL),
   V(AssumeReachable,             BOOL,     "0"),
   V(AuthDirBadDir,               LINELIST, NULL),
+  V(AuthDirBadDirCCs,            CSV,      ""),
   V(AuthDirBadExit,              LINELIST, NULL),
+  V(AuthDirBadExitCCs,           CSV,      ""),
   V(AuthDirInvalid,              LINELIST, NULL),
+  V(AuthDirInvalidCCs,           CSV,      ""),
   V(AuthDirFastGuarantee,        MEMUNIT,  "100 KB"),
   V(AuthDirGuardBWGuarantee,     MEMUNIT,  "250 KB"),
   V(AuthDirReject,               LINELIST, NULL),
+  V(AuthDirRejectCCs,            CSV,      ""),
   V(AuthDirRejectUnlisted,       BOOL,     "0"),
   V(AuthDirListBadDirs,          BOOL,     "0"),
   V(AuthDirListBadExits,         BOOL,     "0"),
@@ -306,6 +314,8 @@ static config_var_t _option_vars[] = {
   V(HidServAuth,                 LINELIST, NULL),
   V(HSAuthoritativeDir,          BOOL,     "0"),
   OBSOLETE("HSAuthorityRecordStats"),
+  V(CloseHSClientCircuitsImmediatelyOnTimeout, BOOL, "0"),
+  V(CloseHSServiceRendCircuitsImmediatelyOnTimeout, BOOL, "0"),
   V(HTTPProxy,                   STRING,   NULL),
   V(HTTPProxyAuthenticator,      STRING,   NULL),
   V(HTTPSProxy,                  STRING,   NULL),
@@ -738,7 +748,7 @@ set_options(or_options_t *new_val, char **msg)
   /* Issues a CONF_CHANGED event to notify controller of the change. If Tor is
    * just starting up then the old_options will be undefined. */
   if (old_options) {
-    elements = smartlist_create();
+    elements = smartlist_new();
     for (i=0; options_format.vars[i].name; ++i) {
       const config_var_t *var = &options_format.vars[i];
       const char *var_name = var->name;
@@ -771,22 +781,20 @@ set_options(or_options_t *new_val, char **msg)
 extern const char tor_git_revision[]; /* from tor_main.c */
 
 /** The version of this Tor process, as parsed. */
-static char *_version = NULL;
+static char *the_tor_version = NULL;
 
 /** Return the current Tor version. */
 const char *
 get_version(void)
 {
-  if (_version == NULL) {
+  if (the_tor_version == NULL) {
     if (strlen(tor_git_revision)) {
-      size_t len = strlen(VERSION)+strlen(tor_git_revision)+16;
-      _version = tor_malloc(len);
-      tor_snprintf(_version, len, "%s (git-%s)", VERSION, tor_git_revision);
+      tor_asprintf(&the_tor_version, "%s (git-%s)", VERSION, tor_git_revision);
     } else {
-      _version = tor_strdup(VERSION);
+      the_tor_version = tor_strdup(VERSION);
     }
   }
-  return _version;
+  return the_tor_version;
 }
 
 /** Release additional memory allocated in options
@@ -831,7 +839,7 @@ config_free_all(void)
 
   tor_free(torrc_fname);
   tor_free(torrc_defaults_fname);
-  tor_free(_version);
+  tor_free(the_tor_version);
   tor_free(global_dirfrontpagecontents);
 }
 
@@ -1044,8 +1052,8 @@ consider_adding_dir_authorities(const or_options_t *options,
 static int
 options_act_reversible(const or_options_t *old_options, char **msg)
 {
-  smartlist_t *new_listeners = smartlist_create();
-  smartlist_t *replaced_listeners = smartlist_create();
+  smartlist_t *new_listeners = smartlist_new();
+  smartlist_t *replaced_listeners = smartlist_new();
   static int libevent_initialized = 0;
   or_options_t *options = get_options_mutable();
   int running_tor = options->command == CMD_RUN_TOR;
@@ -1164,9 +1172,8 @@ options_act_reversible(const or_options_t *old_options, char **msg)
   control_ports_write_to_file();
 
   if (directory_caches_v2_dir_info(options)) {
-    size_t len = strlen(options->DataDirectory)+32;
-    char *fn = tor_malloc(len);
-    tor_snprintf(fn, len, "%s"PATH_SEPARATOR"cached-status",
+    char *fn = NULL;
+    tor_asprintf(&fn, "%s"PATH_SEPARATOR"cached-status",
                  options->DataDirectory);
     if (check_private_dir(fn, running_tor ? CPD_CREATE : CPD_CHECK,
                           options->User) < 0) {
@@ -1324,12 +1331,26 @@ options_act(const or_options_t *old_options)
   const int transition_affects_workers =
     old_options && options_transition_affects_workers(old_options, options);
 
-   /* disable ptrace and later, other basic debugging techniques */
-  if (options->DisableDebuggerAttachment) {
-    tor_disable_debugger_attach();
-  } else {
-    log_notice(LD_CONFIG,"Debugger attachment enabled "
-               "for unprivileged users.");
+  /* disable ptrace and later, other basic debugging techniques */
+  {
+    /* Remember if we already disabled debugger attachment */
+    static int disabled_debugger_attach = 0;
+    /* Remember if we already warned about being configured not to disable
+     * debugger attachment */
+    static int warned_debugger_attach = 0;
+    if (options->DisableDebuggerAttachment && !disabled_debugger_attach) {
+      int ok = tor_disable_debugger_attach();
+      if (warned_debugger_attach && ok == 1) {
+        log_notice(LD_CONFIG, "Disabled attaching debuggers for unprivileged "
+                   "users.");
+      }
+      disabled_debugger_attach = (ok == 1);
+    } else if (!options->DisableDebuggerAttachment &&
+               !warned_debugger_attach) {
+      log_notice(LD_CONFIG, "Not disabling debugger attaching for "
+                 "unprivileged users.");
+      warned_debugger_attach = 1;
+    }
   }
 
   if (running_tor && !have_lockfile()) {
@@ -1626,10 +1647,8 @@ options_act(const or_options_t *old_options)
 #ifdef WIN32
     if (!strcmp(actual_fname, "<default>")) {
       const char *conf_root = get_windows_conf_root();
-      size_t len = strlen(conf_root)+16;
       tor_free(actual_fname);
-      actual_fname = tor_malloc(len+1);
-      tor_snprintf(actual_fname, len, "%s\\geoip", conf_root);
+      tor_asprintf(&actual_fname, "%s\\geoip", conf_root);
     }
 #endif
     geoip_load_file(actual_fname, options);
@@ -2163,7 +2182,7 @@ config_assign_value(const config_format_t *fmt, or_options_t *options,
       SMARTLIST_FOREACH(*(smartlist_t**)lvalue, char *, cp, tor_free(cp));
       smartlist_clear(*(smartlist_t**)lvalue);
     } else {
-      *(smartlist_t**)lvalue = smartlist_create();
+      *(smartlist_t**)lvalue = smartlist_new();
     }
 
     smartlist_split_string(*(smartlist_t**)lvalue, c->value, ",",
@@ -2760,7 +2779,7 @@ static void
 list_torrc_options(void)
 {
   int i;
-  smartlist_t *lines = smartlist_create();
+  smartlist_t *lines = smartlist_new();
   for (i = 0; _option_vars[i].name; ++i) {
     const config_var_t *var = &_option_vars[i];
     if (var->type == CONFIG_TYPE_OBSOLETE ||
@@ -3105,7 +3124,7 @@ config_dump(const config_format_t *fmt, const void *default_options,
     }
   }
 
-  elements = smartlist_create();
+  elements = smartlist_new();
   for (i=0; fmt->vars[i].name; ++i) {
     int comment_option = 0;
     if (fmt->vars[i].type == CONFIG_TYPE_OBSOLETE ||
@@ -3123,11 +3142,9 @@ config_dump(const config_format_t *fmt, const void *default_options,
     line = assigned = get_assigned_option(fmt, options, fmt->vars[i].name, 1);
 
     for (; line; line = line->next) {
-      char *tmp;
-      tor_asprintf(&tmp, "%s%s %s\n",
+      smartlist_add_asprintf(elements, "%s%s %s\n",
                    comment_option ? "# " : "",
                    line->key, line->value);
-      smartlist_add(elements, tmp);
     }
     config_free_lines(assigned);
   }
@@ -3135,9 +3152,7 @@ config_dump(const config_format_t *fmt, const void *default_options,
   if (fmt->extra) {
     line = *(config_line_t**)STRUCT_VAR_P(options, fmt->extra->var_offset);
     for (; line; line = line->next) {
-      char *tmp;
-      tor_asprintf(&tmp, "%s %s\n", line->key, line->value);
-      smartlist_add(elements, tmp);
+      smartlist_add_asprintf(elements, "%s %s\n", line->key, line->value);
     }
   }
 
@@ -3372,7 +3387,7 @@ options_validate(or_options_t *old_options, or_options_t *options,
   }
 
   if (options->NodeFamilies) {
-    options->NodeFamilySets = smartlist_create();
+    options->NodeFamilySets = smartlist_new();
     for (cl = options->NodeFamilies; cl; cl = cl->next) {
       routerset_t *rs = routerset_new();
       if (routerset_parse(rs, cl->value, cl->key) == 0) {
@@ -3478,7 +3493,7 @@ options_validate(or_options_t *old_options, or_options_t *options,
       /* We already have firewall ports set, so migrate them to
        * ReachableAddresses, which will set ReachableORAddresses and
        * ReachableDirAddresses if they aren't set explicitly. */
-      smartlist_t *instead = smartlist_create();
+      smartlist_t *instead = smartlist_new();
       config_line_t *new_line = tor_malloc_zero(sizeof(config_line_t));
       new_line->key = tor_strdup("ReachableAddresses");
       /* If we're configured with the old format, we need to prepend some
@@ -3486,11 +3501,8 @@ options_validate(or_options_t *old_options, or_options_t *options,
       SMARTLIST_FOREACH(options->FirewallPorts, const char *, portno,
       {
         int p = atoi(portno);
-        char *s;
         if (p<0) continue;
-        s = tor_malloc(16);
-        tor_snprintf(s, 16, "*:%d", p);
-        smartlist_add(instead, s);
+        smartlist_add_asprintf(instead, "*:%d", p);
       });
       new_line->value = smartlist_join_strings(instead,",",0,NULL);
       /* These have been deprecated since 0.1.1.5-alpha-cvs */
@@ -3565,6 +3577,10 @@ options_validate(or_options_t *old_options, or_options_t *options,
    * circuits, yet we never actually use them. */
   if (options->UseBridges && options->EntryNodes)
     REJECT("You cannot set both UseBridges and EntryNodes.");
+
+  if (options->EntryNodes && !options->UseEntryGuards)
+    log_warn(LD_CONFIG, "EntryNodes is set, but UseEntryGuards is disabled. "
+             "EntryNodes will be ignored.");
 
   options->_AllowInvalid = 0;
   if (options->AllowInvalidNodes) {
@@ -4164,6 +4180,13 @@ options_transition_allowed(const or_options_t *old,
     return -1;
   }
 
+  if (old->DisableDebuggerAttachment &&
+      !new_val->DisableDebuggerAttachment) {
+    *msg = tor_strdup("While Tor is running, disabling "
+                      "DisableDebuggerAttachment is not allowed.");
+    return -1;
+  }
+
   return 0;
 }
 
@@ -4315,7 +4338,7 @@ check_nickname_list(const char *lst, const char *name, char **msg)
 
   if (!lst)
     return 0;
-  sl = smartlist_create();
+  sl = smartlist_new();
 
   smartlist_split_string(sl, lst, ",",
     SPLIT_SKIP_SPACE|SPLIT_IGNORE_BLANK|SPLIT_STRIP_SPACE, 0);
@@ -4356,6 +4379,14 @@ find_torrc_filename(int argc, char **argv,
         tor_free(fname);
       }
       fname = expand_filename(argv[i+1]);
+
+      {
+        char *absfname;
+        absfname = make_path_absolute(fname);
+        tor_free(fname);
+        fname = absfname;
+      }
+
       *using_default_torrc = 0;
       ++i;
     } else if (ignore_opt && !strcmp(argv[i],ignore_opt)) {
@@ -4686,7 +4717,7 @@ config_register_addressmaps(const or_options_t *options)
   char *from, *to;
 
   addressmap_clear_configured();
-  elts = smartlist_create();
+  elts = smartlist_new();
   for (opt = options->AddressMap; opt; opt = opt->next) {
     int from_wildcard = 0, to_wildcard = 0;
     smartlist_split_string(elts, opt->value, NULL,
@@ -4794,7 +4825,7 @@ options_init_logs(or_options_t *options, int validate_only)
   }
 
   ok = 1;
-  elts = smartlist_create();
+  elts = smartlist_new();
 
   for (opt = options->Logs; opt; opt = opt->next) {
     log_severity_list_t *severity;
@@ -4888,7 +4919,7 @@ parse_bridge_line(const char *line, int validate_only)
   uint16_t port = 0;
   char digest[DIGEST_LEN];
 
-  items = smartlist_create();
+  items = smartlist_new();
   smartlist_split_string(items, line, NULL,
                          SPLIT_SKIP_SPACE|SPLIT_IGNORE_BLANK, -1);
   if (smartlist_len(items) < 1) {
@@ -4990,7 +5021,7 @@ parse_client_transport_line(const char *line, int validate_only)
 
   int line_length;
 
-  items = smartlist_create();
+  items = smartlist_new();
   smartlist_split_string(items, line, NULL,
                          SPLIT_SKIP_SPACE|SPLIT_IGNORE_BLANK, -1);
 
@@ -5004,7 +5035,7 @@ parse_client_transport_line(const char *line, int validate_only)
      transport_list (in case it's multiple transports) and validate
      the transport names. */
   transports = smartlist_get(items, 0);
-  transport_list = smartlist_create();
+  transport_list = smartlist_new();
   smartlist_split_string(transport_list, transports, ",",
                          SPLIT_SKIP_SPACE|SPLIT_IGNORE_BLANK, 0);
   SMARTLIST_FOREACH_BEGIN(transport_list, const char *, transport_name) {
@@ -5118,7 +5149,7 @@ parse_server_transport_line(const char *line, int validate_only)
 
   int line_length;
 
-  items = smartlist_create();
+  items = smartlist_new();
   smartlist_split_string(items, line, NULL,
                          SPLIT_SKIP_SPACE|SPLIT_IGNORE_BLANK, -1);
 
@@ -5132,7 +5163,7 @@ parse_server_transport_line(const char *line, int validate_only)
      transport_list (in case it's multiple transports) and validate
      the transport names. */
   transports = smartlist_get(items, 0);
-  transport_list = smartlist_create();
+  transport_list = smartlist_new();
   smartlist_split_string(transport_list, transports, ",",
                          SPLIT_SKIP_SPACE|SPLIT_IGNORE_BLANK, 0);
   SMARTLIST_FOREACH_BEGIN(transport_list, const char *, transport_name) {
@@ -5232,7 +5263,7 @@ parse_dir_server_line(const char *line, dirinfo_type_t required_type,
   dirinfo_type_t type = V2_DIRINFO;
   int is_not_hidserv_authority = 0, is_not_v2_authority = 0;
 
-  items = smartlist_create();
+  items = smartlist_new();
   smartlist_split_string(items, line, NULL,
                          SPLIT_SKIP_SPACE|SPLIT_IGNORE_BLANK, -1);
   if (smartlist_len(items) < 1) {
@@ -5566,7 +5597,7 @@ parse_port_config(smartlist_t *out,
 
   /* At last we can actually parse the FooPort lines.  The syntax is:
    * [Addr:](Port|auto) [Options].*/
-  elts = smartlist_create();
+  elts = smartlist_new();
 
   for (; ports; ports = ports->next) {
     tor_addr_t addr;
@@ -5797,7 +5828,7 @@ parse_ports(const or_options_t *options, int validate_only,
   smartlist_t *ports;
   int retval = -1;
 
-  ports = smartlist_create();
+  ports = smartlist_new();
 
   *n_ports_out = 0;
 
@@ -5979,7 +6010,7 @@ const smartlist_t *
 get_configured_ports(void)
 {
   if (!configured_ports)
-    configured_ports = smartlist_create();
+    configured_ports = smartlist_new();
   return configured_ports;
 }
 
@@ -6111,18 +6142,12 @@ write_configuration_file(const char *fname, const or_options_t *options)
 
   if (rename_old) {
     int i = 1;
-    size_t fn_tmp_len = strlen(fname)+32;
-    char *fn_tmp;
-    tor_assert(fn_tmp_len > strlen(fname)); /*check for overflow*/
-    fn_tmp = tor_malloc(fn_tmp_len);
+    char *fn_tmp = NULL;
     while (1) {
-      if (tor_snprintf(fn_tmp, fn_tmp_len, "%s.orig.%d", fname, i)<0) {
-        log_warn(LD_BUG, "tor_snprintf failed inexplicably");
-        tor_free(fn_tmp);
-        goto err;
-      }
+      tor_asprintf(&fn_tmp, "%s.orig.%d", fname, i);
       if (file_status(fn_tmp) == FN_NOENT)
         break;
+      tor_free(fn_tmp);
       ++i;
     }
     log_notice(LD_CONFIG, "Renaming old configuration file to \"%s\"", fn_tmp);
@@ -6460,7 +6485,7 @@ state_transport_line_is_valid(const char *line)
   uint16_t port = 0;
   int r;
 
-  items = smartlist_create();
+  items = smartlist_new();
   smartlist_split_string(items, line, NULL,
                          SPLIT_SKIP_SPACE|SPLIT_IGNORE_BLANK, -1);
 
@@ -6569,13 +6594,13 @@ or_state_save_broken(char *fname)
 {
   int i;
   file_status_t status;
-  size_t len = strlen(fname)+16;
-  char *fname2 = tor_malloc(len);
+  char *fname2 = NULL;
   for (i = 0; i < 100; ++i) {
-    tor_snprintf(fname2, len, "%s.%d", fname, i);
+    tor_asprintf(&fname2, "%s.%d", fname, i);
     status = file_status(fname2);
     if (status == FN_NOENT)
       break;
+    tor_free(fname2);
   }
   if (i == 100) {
     log_warn(LD_BUG, "Unable to parse state in \"%s\"; too many saved bad "
@@ -6778,7 +6803,7 @@ get_transport_in_state_by_name(const char *transport)
   for (line = or_state->TransportProxies ; line ; line = line->next) {
     tor_assert(!strcmp(line->key, "TransportProxy"));
 
-    items = smartlist_create();
+    items = smartlist_new();
     smartlist_split_string(items, line->value, NULL,
                            SPLIT_SKIP_SPACE|SPLIT_IGNORE_BLANK, -1);
     if (smartlist_len(items) != 2) /* broken state */
@@ -6828,21 +6853,29 @@ get_transport_bindaddr(const char *line, const char *transport)
   return NULL;
 }
 
-/** Return a static string containing the address:port a proxy
- *  transport should bind on. */
-const char *
-get_bindaddr_for_transport(const char *transport)
+/** Return a string containing the address:port that a proxy transport
+ *  should bind on. The string is stored on the heap and must be freed
+ *  by the caller of this function. */
+char *
+get_stored_bindaddr_for_server_transport(const char *transport)
 {
-  static const char default_addrport[] = "127.0.0.1:0";
-  const char *bindaddr = NULL;
+  char *default_addrport = NULL;
+  const char *stored_bindaddr = NULL;
 
   config_line_t *line = get_transport_in_state_by_name(transport);
-  if (!line)
-    return default_addrport;
+  if (!line) /* Found no references in state for this transport. */
+    goto no_bindaddr_found;
 
-  bindaddr = get_transport_bindaddr(line->value, transport);
+  stored_bindaddr = get_transport_bindaddr(line->value, transport);
+  if (stored_bindaddr) /* found stored bindaddr in state file. */
+    return tor_strdup(stored_bindaddr);
 
-  return bindaddr ? bindaddr : default_addrport;
+ no_bindaddr_found:
+  /** If we didn't find references for this pluggable transport in the
+      state file, we should instruct the pluggable transport proxy to
+      listen on INADDR_ANY on a random ephemeral port. */
+  tor_asprintf(&default_addrport, "%s:%s", fmt_addr32(INADDR_ANY), "0");
+  return default_addrport;
 }
 
 /** Save <b>transport</b> listening on <b>addr</b>:<b>port</b> to
@@ -6938,12 +6971,11 @@ getinfo_helper_config(control_connection_t *conn,
   (void) conn;
   (void) errmsg;
   if (!strcmp(question, "config/names")) {
-    smartlist_t *sl = smartlist_create();
+    smartlist_t *sl = smartlist_new();
     int i;
     for (i = 0; _option_vars[i].name; ++i) {
       const config_var_t *var = &_option_vars[i];
       const char *type;
-      char *line;
       switch (var->type) {
         case CONFIG_TYPE_STRING: type = "String"; break;
         case CONFIG_TYPE_FILENAME: type = "Filename"; break;
@@ -6967,8 +6999,7 @@ getinfo_helper_config(control_connection_t *conn,
       }
       if (!type)
         continue;
-      tor_asprintf(&line, "%s %s\n",var->name,type);
-      smartlist_add(sl, line);
+      smartlist_add_asprintf(sl, "%s %s\n",var->name,type);
     }
     *answer = smartlist_join_strings(sl, "", 0, NULL);
     SMARTLIST_FOREACH(sl, char *, c, tor_free(c));

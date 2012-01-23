@@ -675,8 +675,7 @@ circuit_build_times_update_state(circuit_build_times_t *cbt,
     if (histogram[i] == 0) continue;
     *next = line = tor_malloc_zero(sizeof(config_line_t));
     line->key = tor_strdup("CircuitBuildTimeBin");
-    line->value = tor_malloc(25);
-    tor_snprintf(line->value, 25, "%d %d",
+    tor_asprintf(&line->value, "%d %d",
             CBT_BIN_TO_MS(i), histogram[i]);
     next = &(line->next);
   }
@@ -794,7 +793,7 @@ circuit_build_times_parse_state(circuit_build_times_t *cbt,
   loaded_times = tor_malloc_zero(sizeof(build_time_t)*state->TotalBuildTimes);
 
   for (line = state->BuildtimeHistogram; line; line = line->next) {
-    smartlist_t *args = smartlist_create();
+    smartlist_t *args = smartlist_new();
     smartlist_split_string(args, line->value, " ",
                            SPLIT_SKIP_SPACE|SPLIT_IGNORE_BLANK, 0);
     if (smartlist_len(args) < 2) {
@@ -1541,19 +1540,17 @@ circuit_list_path_impl(origin_circuit_t *circ, int verbose, int verbose_names)
   const char *states[] = {"closed", "waiting for keys", "open"};
   char *s;
 
-  elements = smartlist_create();
+  elements = smartlist_new();
 
   if (verbose) {
     const char *nickname = build_state_get_exit_nickname(circ->build_state);
-    char *cp;
-    tor_asprintf(&cp, "%s%s circ (length %d%s%s):",
+    smartlist_add_asprintf(elements, "%s%s circ (length %d%s%s):",
                  circ->build_state->is_internal ? "internal" : "exit",
                  circ->build_state->need_uptime ? " (high-uptime)" : "",
                  circ->build_state->desired_path_len,
                  circ->_base.state == CIRCUIT_STATE_OPEN ? "" : ", last hop ",
                  circ->_base.state == CIRCUIT_STATE_OPEN ? "" :
                  (nickname?nickname:"*unnamed*"));
-    smartlist_add(elements, cp);
   }
 
   hop = circ->cpath;
@@ -1594,11 +1591,8 @@ circuit_list_path_impl(origin_circuit_t *circ, int verbose, int verbose_names)
     }
     tor_assert(elt);
     if (verbose) {
-      size_t len = strlen(elt)+2+strlen(states[hop->state])+1;
-      char *v = tor_malloc(len);
       tor_assert(hop->state <= 2);
-      tor_snprintf(v,len,"%s(%s)",elt,states[hop->state]);
-      smartlist_add(elements, v);
+      smartlist_add_asprintf(elements,"%s(%s)",elt,states[hop->state]);
       tor_free(elt);
     } else {
       smartlist_add(elements, elt);
@@ -1831,7 +1825,7 @@ circuit_n_conn_done(or_connection_t *or_conn, int status)
             or_conn->nickname ? or_conn->nickname : "NULL",
             or_conn->_base.address, status);
 
-  pending_circs = smartlist_create();
+  pending_circs = smartlist_new();
   circuit_get_all_pending_on_or_conn(pending_circs, or_conn);
 
   SMARTLIST_FOREACH_BEGIN(pending_circs, circuit_t *, circ)
@@ -2326,17 +2320,17 @@ int
 circuit_init_cpath_crypto(crypt_path_t *cpath, const char *key_data,
                           int reverse)
 {
-  crypto_digest_env_t *tmp_digest;
-  crypto_cipher_env_t *tmp_crypto;
+  crypto_digest_t *tmp_digest;
+  crypto_cipher_t *tmp_crypto;
 
   tor_assert(cpath);
   tor_assert(key_data);
   tor_assert(!(cpath->f_crypto || cpath->b_crypto ||
              cpath->f_digest || cpath->b_digest));
 
-  cpath->f_digest = crypto_new_digest_env();
+  cpath->f_digest = crypto_digest_new();
   crypto_digest_add_bytes(cpath->f_digest, key_data, DIGEST_LEN);
-  cpath->b_digest = crypto_new_digest_env();
+  cpath->b_digest = crypto_digest_new();
   crypto_digest_add_bytes(cpath->b_digest, key_data+DIGEST_LEN, DIGEST_LEN);
 
   if (!(cpath->f_crypto =
@@ -2799,7 +2793,7 @@ choose_good_exit_server_general(int need_uptime, int need_capacity)
   /* If any routers definitely support any pending connections, choose one
    * at random. */
   if (best_support > 0) {
-    smartlist_t *supporting = smartlist_create();
+    smartlist_t *supporting = smartlist_new();
 
     SMARTLIST_FOREACH(the_nodes, const node_t *, node, {
       if (n_supported[node_sl_idx] == best_support)
@@ -2830,7 +2824,7 @@ choose_good_exit_server_general(int need_uptime, int need_capacity)
                  "choosing a doomed exit at random.",
                  options->_ExcludeExitNodesUnion ? " or are Excluded" : "");
     }
-    supporting = smartlist_create();
+    supporting = smartlist_new();
     needed_ports = circuit_get_unhandled_ports(time(NULL));
     for (attempt = 0; attempt < 2; attempt++) {
       /* try once to pick only from routers that satisfy a needed port,
@@ -3132,7 +3126,7 @@ choose_good_middle_server(uint8_t purpose,
              purpose <= _CIRCUIT_PURPOSE_MAX);
 
   log_debug(LD_CIRC, "Contemplating intermediate hop: random choice.");
-  excluded = smartlist_create();
+  excluded = smartlist_new();
   if ((r = build_state_get_exit_node(state))) {
     nodelist_add_node_and_family(excluded, r);
   }
@@ -3177,7 +3171,7 @@ choose_good_entry_server(uint8_t purpose, cpath_build_state_t *state)
     return choose_random_entry(state);
   }
 
-  excluded = smartlist_create();
+  excluded = smartlist_new();
 
   if (state && (node = build_state_get_exit_node(state))) {
     /* Exclude the exit node from the state, if we have one.  Also exclude its
@@ -3312,7 +3306,7 @@ onion_append_hop(crypt_path_t **head_ptr, extend_info_t *choice)
 /** Allocate a new extend_info object based on the various arguments. */
 extend_info_t *
 extend_info_alloc(const char *nickname, const char *digest,
-                  crypto_pk_env_t *onion_key,
+                  crypto_pk_t *onion_key,
                   const tor_addr_t *addr, uint16_t port)
 {
   extend_info_t *info = tor_malloc_zero(sizeof(extend_info_t));
@@ -3375,7 +3369,7 @@ extend_info_free(extend_info_t *info)
 {
   if (!info)
     return;
-  crypto_free_pk_env(info->onion_key);
+  crypto_pk_free(info->onion_key);
   tor_free(info);
 }
 
@@ -3593,25 +3587,23 @@ is_an_entry_guard(const char *digest)
 static void
 log_entry_guards(int severity)
 {
-  smartlist_t *elements = smartlist_create();
+  smartlist_t *elements = smartlist_new();
   char *s;
 
   SMARTLIST_FOREACH_BEGIN(entry_guards, entry_guard_t *, e)
     {
       const char *msg = NULL;
-      char *cp;
       if (entry_is_live(e, 0, 1, 0, &msg))
-        tor_asprintf(&cp, "%s [%s] (up %s)",
+        smartlist_add_asprintf(elements, "%s [%s] (up %s)",
                      e->nickname,
                      hex_str(e->identity, DIGEST_LEN),
                      e->made_contact ? "made-contact" : "never-contacted");
       else
-        tor_asprintf(&cp, "%s [%s] (%s, %s)",
+        smartlist_add_asprintf(elements, "%s [%s] (%s, %s)",
                      e->nickname,
                      hex_str(e->identity, DIGEST_LEN),
                      msg,
                      e->made_contact ? "made-contact" : "never-contacted");
-      smartlist_add(elements, cp);
     }
   SMARTLIST_FOREACH_END(e);
 
@@ -3755,9 +3747,8 @@ remove_obsolete_entry_guards(time_t now)
       msg = "does not seem to be from any recognized version of Tor";
       version_is_bad = 1;
     } else {
-      size_t len = strlen(ver)+5;
-      char *tor_ver = tor_malloc(len);
-      tor_snprintf(tor_ver, len, "Tor %s", ver);
+      char *tor_ver = NULL;
+      tor_asprintf(&tor_ver, "Tor %s", ver);
       if ((tor_version_as_new_as(tor_ver, "0.1.0.10-alpha") &&
            !tor_version_as_new_as(tor_ver, "0.1.2.16-dev")) ||
           (tor_version_as_new_as(tor_ver, "0.2.0.0-alpha") &&
@@ -4050,11 +4041,11 @@ entry_guards_set_from_config(const or_options_t *options)
     tor_free(string);
   }
 
-  entry_nodes = smartlist_create();
-  worse_entry_nodes = smartlist_create();
-  entry_fps = smartlist_create();
-  old_entry_guards_on_list = smartlist_create();
-  old_entry_guards_not_on_list = smartlist_create();
+  entry_nodes = smartlist_new();
+  worse_entry_nodes = smartlist_new();
+  entry_fps = smartlist_new();
+  old_entry_guards_on_list = smartlist_new();
+  old_entry_guards_not_on_list = smartlist_new();
 
   /* Split entry guards into those on the list and those not. */
 
@@ -4140,8 +4131,8 @@ const node_t *
 choose_random_entry(cpath_build_state_t *state)
 {
   const or_options_t *options = get_options();
-  smartlist_t *live_entry_guards = smartlist_create();
-  smartlist_t *exit_family = smartlist_create();
+  smartlist_t *live_entry_guards = smartlist_new();
+  smartlist_t *exit_family = smartlist_new();
   const node_t *chosen_exit =
     state?build_state_get_exit_node(state) : NULL;
   const node_t *node = NULL;
@@ -4155,7 +4146,7 @@ choose_random_entry(cpath_build_state_t *state)
   }
 
   if (!entry_guards)
-    entry_guards = smartlist_create();
+    entry_guards = smartlist_new();
 
   if (should_add_entry_nodes)
     entry_guards_set_from_config(options);
@@ -4282,7 +4273,7 @@ int
 entry_guards_parse_state(or_state_t *state, int set, char **msg)
 {
   entry_guard_t *node = NULL;
-  smartlist_t *new_entry_guards = smartlist_create();
+  smartlist_t *new_entry_guards = smartlist_new();
   config_line_t *line;
   time_t now = time(NULL);
   const char *state_version = state->TorVersion;
@@ -4291,7 +4282,7 @@ entry_guards_parse_state(or_state_t *state, int set, char **msg)
   *msg = NULL;
   for (line = state->EntryGuards; line; line = line->next) {
     if (!strcasecmp(line->key, "EntryGuard")) {
-      smartlist_t *args = smartlist_create();
+      smartlist_t *args = smartlist_new();
       node = tor_malloc_zero(sizeof(entry_guard_t));
       /* all entry guards on disk have been contacted */
       node->made_contact = 1;
@@ -4437,7 +4428,7 @@ entry_guards_update_state(or_state_t *state)
   next = &state->EntryGuards;
   *next = NULL;
   if (!entry_guards)
-    entry_guards = smartlist_create();
+    entry_guards = smartlist_new();
   SMARTLIST_FOREACH(entry_guards, entry_guard_t *, e,
     {
       char dbuf[HEX_DIGEST_LEN+1];
@@ -4445,10 +4436,8 @@ entry_guards_update_state(or_state_t *state)
         continue; /* don't write this one to disk */
       *next = line = tor_malloc_zero(sizeof(config_line_t));
       line->key = tor_strdup("EntryGuard");
-      line->value = tor_malloc(HEX_DIGEST_LEN+MAX_NICKNAME_LEN+2);
       base16_encode(dbuf, sizeof(dbuf), e->identity, DIGEST_LEN);
-      tor_snprintf(line->value,HEX_DIGEST_LEN+MAX_NICKNAME_LEN+2,
-                   "%s %s", e->nickname, dbuf);
+      tor_asprintf(&line->value, "%s %s", e->nickname, dbuf);
       next = &(line->next);
       if (e->unreachable_since) {
         *next = line = tor_malloc_zero(sizeof(config_line_t));
@@ -4472,15 +4461,11 @@ entry_guards_update_state(or_state_t *state)
           !strchr(e->chosen_by_version, ' ')) {
         char d[HEX_DIGEST_LEN+1];
         char t[ISO_TIME_LEN+1];
-        size_t val_len;
         *next = line = tor_malloc_zero(sizeof(config_line_t));
         line->key = tor_strdup("EntryGuardAddedBy");
-        val_len = (HEX_DIGEST_LEN+1+strlen(e->chosen_by_version)
-                   +1+ISO_TIME_LEN+1);
-        line->value = tor_malloc(val_len);
         base16_encode(d, sizeof(d), e->identity, DIGEST_LEN);
         format_iso_time(t, e->chosen_on_date);
-        tor_snprintf(line->value, val_len, "%s %s %s",
+        tor_asprintf(&line->value, "%s %s %s",
                      d, e->chosen_by_version, t);
         next = &(line->next);
       }
@@ -4506,14 +4491,12 @@ getinfo_helper_entry_guards(control_connection_t *conn,
 
   if (!strcmp(question,"entry-guards") ||
       !strcmp(question,"helper-nodes")) {
-    smartlist_t *sl = smartlist_create();
+    smartlist_t *sl = smartlist_new();
     char tbuf[ISO_TIME_LEN+1];
     char nbuf[MAX_VERBOSE_NICKNAME_LEN+1];
     if (!entry_guards)
-      entry_guards = smartlist_create();
+      entry_guards = smartlist_new();
     SMARTLIST_FOREACH_BEGIN(entry_guards, entry_guard_t *, e) {
-        size_t len = MAX_VERBOSE_NICKNAME_LEN+ISO_TIME_LEN+32;
-        char *c = tor_malloc(len);
         const char *status = NULL;
         time_t when = 0;
         const node_t *node;
@@ -4539,11 +4522,10 @@ getinfo_helper_entry_guards(control_connection_t *conn,
 
         if (when) {
           format_iso_time(tbuf, when);
-          tor_snprintf(c, len, "%s %s %s\n", nbuf, status, tbuf);
+          smartlist_add_asprintf(sl, "%s %s %s\n", nbuf, status, tbuf);
         } else {
-          tor_snprintf(c, len, "%s %s\n", nbuf, status);
+          smartlist_add_asprintf(sl, "%s %s\n", nbuf, status);
         }
-        smartlist_add(sl, c);
     } SMARTLIST_FOREACH_END(e);
     *answer = smartlist_join_strings(sl, "", 0, NULL);
     SMARTLIST_FOREACH(sl, char *, c, tor_free(c));
@@ -4564,7 +4546,7 @@ void
 mark_bridge_list(void)
 {
   if (!bridge_list)
-    bridge_list = smartlist_create();
+    bridge_list = smartlist_new();
   SMARTLIST_FOREACH(bridge_list, bridge_info_t *, b,
                     b->marked_for_removal = 1);
 }
@@ -4575,7 +4557,7 @@ void
 sweep_bridge_list(void)
 {
   if (!bridge_list)
-    bridge_list = smartlist_create();
+    bridge_list = smartlist_new();
   SMARTLIST_FOREACH_BEGIN(bridge_list, bridge_info_t *, b) {
     if (b->marked_for_removal) {
       SMARTLIST_DEL_CURRENT(bridge_list, b);
@@ -4589,7 +4571,7 @@ static void
 clear_bridge_list(void)
 {
   if (!bridge_list)
-    bridge_list = smartlist_create();
+    bridge_list = smartlist_new();
   SMARTLIST_FOREACH(bridge_list, bridge_info_t *, b, bridge_free(b));
   smartlist_clear(bridge_list);
 }
@@ -4614,7 +4596,7 @@ void
 mark_transport_list(void)
 {
   if (!transport_list)
-    transport_list = smartlist_create();
+    transport_list = smartlist_new();
   SMARTLIST_FOREACH(transport_list, transport_t *, t,
                     t->marked_for_removal = 1);
 }
@@ -4625,7 +4607,7 @@ void
 sweep_transport_list(void)
 {
   if (!transport_list)
-    transport_list = smartlist_create();
+    transport_list = smartlist_new();
   SMARTLIST_FOREACH_BEGIN(transport_list, transport_t *, t) {
     if (t->marked_for_removal) {
       SMARTLIST_DEL_CURRENT(transport_list, t);
@@ -4640,7 +4622,7 @@ void
 clear_transport_list(void)
 {
   if (!transport_list)
-    transport_list = smartlist_create();
+    transport_list = smartlist_new();
   SMARTLIST_FOREACH(transport_list, transport_t *, t, transport_free(t));
   smartlist_clear(transport_list);
 }
@@ -4678,7 +4660,7 @@ transport_get_by_name(const char *name)
     protocol <b>name</b> listening at <b>addr</b>:<b>port</b> using
     SOCKS version <b>socks_ver</b>. */
 transport_t *
-transport_create(const tor_addr_t *addr, uint16_t port,
+transport_new(const tor_addr_t *addr, uint16_t port,
                  const char *name, int socks_ver)
 {
   transport_t *t = tor_malloc_zero(sizeof(transport_t));
@@ -4761,7 +4743,7 @@ transport_add(transport_t *t)
   switch (r) {
   case 0: /* should register transport */
     if (!transport_list)
-      transport_list = smartlist_create();
+      transport_list = smartlist_new();
     smartlist_add(transport_list, t);
     return 0;
   default: /* let our caller know the return code */
@@ -4776,7 +4758,7 @@ int
 transport_add_from_config(const tor_addr_t *addr, uint16_t port,
                           const char *name, int socks_ver)
 {
-  transport_t *t = transport_create(addr, port, name, socks_ver);
+  transport_t *t = transport_new(addr, port, name, socks_ver);
 
   int r = transport_add(t);
 
@@ -4942,7 +4924,7 @@ bridge_add_from_config(const tor_addr_t *addr, uint16_t port,
     b->transport_name = tor_strdup(transport_name);
   b->fetch_status.schedule = DL_SCHED_BRIDGE;
   if (!bridge_list)
-    bridge_list = smartlist_create();
+    bridge_list = smartlist_new();
 
   smartlist_add(bridge_list, b);
 }
@@ -5300,7 +5282,7 @@ entries_retry_helper(const or_options_t *options, int act)
   int any_running = 0;
   int need_bridges = options->UseBridges != 0;
   if (!entry_guards)
-    entry_guards = smartlist_create();
+    entry_guards = smartlist_new();
   SMARTLIST_FOREACH_BEGIN(entry_guards, entry_guard_t *, e) {
       node = node_get_by_id(e->identity);
       if (node && node_has_descriptor(node) &&

@@ -1053,17 +1053,17 @@ tor_socketpair(int family, int type, int protocol, tor_socket_t fd[2])
   r = socketpair(family, type, protocol, fd);
   if (r == 0) {
 #if !defined(SOCK_CLOEXEC) && defined(FD_CLOEXEC)
-    if (fd[0] >= 0)
+    if (SOCKET_OK(fd[0]))
       fcntl(fd[0], F_SETFD, FD_CLOEXEC);
-    if (fd[1] >= 0)
+    if (SOCKET_OK(fd[1]))
       fcntl(fd[1], F_SETFD, FD_CLOEXEC);
 #endif
     socket_accounting_lock();
-    if (fd[0] >= 0) {
+    if (SOCKET_OK(fd[0])) {
       ++n_sockets_open;
       mark_socket_open(fd[0]);
     }
-    if (fd[1] >= 0) {
+    if (SOCKET_OK(fd[1])) {
       ++n_sockets_open;
       mark_socket_open(fd[1]);
     }
@@ -1100,7 +1100,7 @@ tor_socketpair(int family, int type, int protocol, tor_socket_t fd[2])
     }
 
     listener = tor_open_socket(AF_INET, type, 0);
-    if (listener < 0)
+    if (!SOCKET_OK(listener))
       return -tor_socket_errno(-1);
     memset(&listen_addr, 0, sizeof(listen_addr));
     listen_addr.sin_family = AF_INET;
@@ -1113,7 +1113,7 @@ tor_socketpair(int family, int type, int protocol, tor_socket_t fd[2])
       goto tidy_up_and_fail;
 
     connector = tor_open_socket(AF_INET, type, 0);
-    if (connector < 0)
+    if (!SOCKET_OK(connector))
       goto tidy_up_and_fail;
     /* We want to find out the port number to connect to.  */
     size = sizeof(connect_addr);
@@ -1128,7 +1128,7 @@ tor_socketpair(int family, int type, int protocol, tor_socket_t fd[2])
     size = sizeof(listen_addr);
     acceptor = tor_accept_socket(listener,
                                  (struct sockaddr *) &listen_addr, &size);
-    if (acceptor < 0)
+    if (!SOCKET_OK(acceptor))
       goto tidy_up_and_fail;
     if (size != sizeof(listen_addr))
       goto abort_tidy_up_and_fail;
@@ -1351,31 +1351,19 @@ log_credential_status(void)
     return -1;
   } else {
     int i, retval = 0;
-    char *strgid;
     char *s = NULL;
-    smartlist_t *elts = smartlist_create();
+    smartlist_t *elts = smartlist_new();
 
     for (i = 0; i<ngids; i++) {
-      strgid = tor_malloc(11);
-      if (tor_snprintf(strgid, 11, "%u", (unsigned)sup_gids[i]) < 0) {
-        log_warn(LD_GENERAL, "Error printing supplementary GIDs");
-        tor_free(strgid);
-        retval = -1;
-        goto error;
-      }
-      smartlist_add(elts, strgid);
+      smartlist_add_asprintf(elts, "%u", (unsigned)sup_gids[i]);
     }
 
     s = smartlist_join_strings(elts, " ", 0, NULL);
 
     log_fn(CREDENTIAL_LOG_LEVEL, LD_GENERAL, "Supplementary groups are: %s",s);
 
-   error:
     tor_free(s);
-    SMARTLIST_FOREACH(elts, char *, cp,
-    {
-      tor_free(cp);
-    });
+    SMARTLIST_FOREACH(elts, char *, cp, tor_free(cp));
     smartlist_free(elts);
     tor_free(sup_gids);
 
@@ -1542,8 +1530,8 @@ switch_id(const char *user)
  * CAP_SYS_PTRACE and so it is very likely that root will still be able to
  * attach to the Tor process.
  */
-/** Attempt to disable debugger attachment: return 0 on success, -1 on
- * failure. */
+/** Attempt to disable debugger attachment: return 1 on success, -1 on
+ * failure, and 0 if we don't know how to try on this platform. */
 int
 tor_disable_debugger_attach(void)
 {
@@ -1568,11 +1556,12 @@ tor_disable_debugger_attach(void)
 
   // XXX: TODO - Mac OS X has dtrace and this may be disabled.
   // XXX: TODO - Windows probably has something similar
-  if (r == 0) {
+  if (r == 0 && attempted) {
     log_debug(LD_CONFIG,"Debugger attachment disabled for "
               "unprivileged users.");
+    return 1;
   } else if (attempted) {
-    log_warn(LD_CONFIG, "Unable to disable ptrace attach: %s",
+    log_warn(LD_CONFIG, "Unable to disable debugger attaching: %s",
              strerror(errno));
   }
   return r;
@@ -1632,6 +1621,42 @@ get_parent_directory(char *fname)
     }
   }
   return -1;
+}
+
+/** Expand possibly relative path <b>fname</b> to an absolute path.
+ * Return a newly allocated string, possibly equal to <b>fname</b>. */
+char *
+make_path_absolute(char *fname)
+{
+#ifdef WINDOWS
+  char *absfname_malloced = _fullpath(NULL, fname, 1);
+
+  /* We don't want to assume that tor_free can free a string allocated
+   * with malloc.  On failure, return fname (it's better than nothing). */
+  char *absfname = tor_strdup(absfname_malloced ? absfname_malloced : fname);
+  if (absfname_malloced) free(absfname_malloced);
+
+  return absfname;
+#else
+  char path[PATH_MAX+1];
+  char *absfname = NULL;
+
+  tor_assert(fname);
+
+  if (fname[0] == '/') {
+    absfname = tor_strdup(fname);
+  } else {
+    if (getcwd(path, PATH_MAX) != NULL) {
+      tor_asprintf(&absfname, "%s/%s", path, fname);
+    } else {
+      /* If getcwd failed, the best we can do here is keep using the
+       * relative path.  (Perhaps / isn't readable by this UID/GID.) */
+      absfname = tor_strdup(fname);
+    }
+  }
+
+  return absfname;
+#endif
 }
 
 /** Set *addr to the IP address (in dotted-quad notation) stored in c.
@@ -2562,7 +2587,7 @@ tor_cond_new(void)
 {
   tor_cond_t *cond = tor_malloc_zero(sizeof(tor_cond_t));
   InitializeCriticalSection(&cond->mutex);
-  cond->events = smartlist_create();
+  cond->events = smartlist_new();
   return cond;
 }
 void
@@ -2863,6 +2888,11 @@ network_init(void)
   if (r) {
     log_warn(LD_NET,"Error initializing windows network layer: code was %d",r);
     return -1;
+  }
+  if (sizeof(SOCKET) != sizeof(tor_socket_t)) {
+    log_warn(LD_BUG,"The tor_socket_t type does not match SOCKET in size; Tor "
+             "might not work. (Sizes are %d and %d respectively.)",
+             (int)sizeof(tor_socket_t), (int)sizeof(SOCKET));
   }
   /* WSAData.iMaxSockets might show the max sockets we're allowed to use.
    * We might use it to complain if we're trying to be a server but have
