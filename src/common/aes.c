@@ -17,10 +17,11 @@
 #include <openssl/aes.h>
 #include <openssl/evp.h>
 #include <openssl/engine.h>
-#if OPENSSL_VERSION_NUMBER >= 0x10000000L
+#include "crypto.h"
+#if OPENSSL_VERSION_NUMBER >= OPENSSL_V_SERIES(1,0,0)
 /* See comments about which counter mode implementation to use below. */
 #include <openssl/modes.h>
-#define USE_OPENSSL_CTR
+#define CAN_USE_OPENSSL_CTR
 #endif
 #include "compat.h"
 #include "aes.h"
@@ -45,7 +46,9 @@
  * Here we have a counter mode that's faster than the one shipping with
  * OpenSSL pre-1.0 (by about 10%!).  But OpenSSL 1.0.0 added a counter mode
  * implementation faster than the one here (by about 7%).  So we pick which
- * one to used based on the Openssl version above.
+ * one to used based on the Openssl version above.  (OpenSSL 1.0.0a fixed a
+ * critical bug in that counter mode implementation, so we need to test to
+ * make sure that we have a fixed version.)
  */
 
 /*======================================================================*/
@@ -59,7 +62,7 @@ struct aes_cnt_cipher {
     AES_KEY aes;
   } key;
 
-#if !defined(WORDS_BIGENDIAN) && !defined(USE_OPENSSL_CTR)
+#if !defined(WORDS_BIGENDIAN)
 #define USING_COUNTER_VARS
   /** These four values, together, implement a 128-bit counter, with
    * counter0 as the low-order word and counter3 as the high-order word. */
@@ -81,19 +84,21 @@ struct aes_cnt_cipher {
   /** The encrypted value of ctr_buf. */
   uint8_t buf[16];
   /** Our current stream position within buf. */
-#ifdef USE_OPENSSL_CTR
   unsigned int pos;
-#else
-  uint8_t pos;
-#endif
 
   /** True iff we're using the evp implementation of this cipher. */
   uint8_t using_evp;
 };
 
-/** True if we should prefer the EVP implementation for AES, either because
+/** True iff we should prefer the EVP implementation for AES, either because
  * we're testing it or because we have hardware acceleration configured */
 static int should_use_EVP = 0;
+
+#ifdef CAN_USE_OPENSSL_CTR
+/** True iff we have tested the counter-mode implementation and found that it
+ * doesn't have the counter-mode bug from OpenSSL 1.0.0. */
+static int should_use_openssl_CTR = 0;
+#endif
 
 /** Check whether we should use the EVP interface for AES. If <b>force_val</b>
  * is nonnegative, we use use EVP iff it is true.  Otherwise, we use EVP
@@ -125,7 +130,56 @@ evaluate_evp_for_aes(int force_val)
   return 0;
 }
 
-#ifndef USE_OPENSSL_CTR
+/** Test the OpenSSL counter mode implementation to see whether it has the
+ * counter-mode bug from OpenSSL 1.0.0. If the implementation works, then
+ * we will use it for future encryption/decryption operations.
+ *
+ * We can't just look at the OpenSSL version, since some distributions update
+ * their OpenSSL packages without changing the version number.
+ **/
+int
+evaluate_ctr_for_aes(void)
+{
+#ifdef CAN_USE_OPENSSL_CTR
+  /* Result of encrypting an all-zero block with an all-zero 128-bit AES key.
+   * This should be the same as encrypting an all-zero block with an all-zero
+   * 128-bit AES key in counter mode, starting at position 0 of the stream.
+   */
+  static const unsigned char encrypt_zero[] =
+    "\x66\xe9\x4b\xd4\xef\x8a\x2c\x3b\x88\x4c\xfa\x59\xca\x34\x2b\x2e";
+  unsigned char zero[16];
+  unsigned char output[16];
+  unsigned char ivec[16];
+  unsigned char ivec_tmp[16];
+  unsigned int pos, i;
+  AES_KEY key;
+  memset(zero, 0, sizeof(zero));
+  memset(ivec, 0, sizeof(ivec));
+  AES_set_encrypt_key(zero, 128, &key);
+
+  pos = 0;
+  /* Encrypting a block one byte at a time should make the error manifest
+   * itself for known bogus openssl versions. */
+  for (i=0; i<16; ++i)
+    AES_ctr128_encrypt(&zero[i], &output[i], 1, &key, ivec, ivec_tmp, &pos);
+
+  if (memcmp(output, encrypt_zero, 16)) {
+    /* Counter mode is buggy */
+    log_notice(LD_CRYPTO, "This OpenSSL has a buggy version of counter mode; "
+               "not using it.");
+  } else {
+    /* Counter mode is okay */
+    log_notice(LD_CRYPTO, "This OpenSSL has a good implementation of counter "
+               "mode; using it.");
+    should_use_openssl_CTR = 1;
+  }
+#else
+  log_notice(LD_CRYPTO, "This version of OpenSSL has a slow implementation of "
+             "counter mode; not using it.");
+#endif
+  return 0;
+}
+
 #if !defined(USING_COUNTER_VARS)
 #define COUNTER(c, n) ((c)->ctr_buf.buf32[3-(n)])
 #else
@@ -154,7 +208,6 @@ _aes_fill_buf(aes_cnt_cipher_t *cipher)
     AES_encrypt(cipher->ctr_buf.buf, cipher->buf, &cipher->key.aes);
   }
 }
-#endif
 
 /**
  * Return a newly allocated counter-mode AES128 cipher implementation.
@@ -200,17 +253,18 @@ aes_set_key(aes_cnt_cipher_t *cipher, const char *key, int key_bits)
 
   cipher->pos = 0;
 
-#ifdef USE_OPENSSL_CTR
-  memset(cipher->buf, 0, sizeof(cipher->buf));
-#else
-  _aes_fill_buf(cipher);
+#ifdef CAN_USE_OPENSSL_CTR
+  if (should_use_openssl_CTR)
+    memset(cipher->buf, 0, sizeof(cipher->buf));
+  else
 #endif
+    _aes_fill_buf(cipher);
 }
 
 /** Release storage held by <b>cipher</b>
  */
 void
-aes_free_cipher(aes_cnt_cipher_t *cipher)
+aes_cipher_free(aes_cnt_cipher_t *cipher)
 {
   if (!cipher)
     return;
@@ -229,7 +283,7 @@ aes_free_cipher(aes_cnt_cipher_t *cipher)
 #define UPDATE_CTR_BUF(c, n)
 #endif
 
-#ifdef USE_OPENSSL_CTR
+#ifdef CAN_USE_OPENSSL_CTR
 /* Helper function to use EVP with openssl's counter-mode wrapper. */
 static void evp_block128_fn(const uint8_t in[16],
                             uint8_t out[16],
@@ -249,52 +303,57 @@ void
 aes_crypt(aes_cnt_cipher_t *cipher, const char *input, size_t len,
           char *output)
 {
-#ifdef USE_OPENSSL_CTR
-  if (cipher->using_evp) {
-    /* In openssl 1.0.0, there's an if'd out EVP_aes_128_ctr in evp.h.  If
-     * it weren't disabled, it might be better just to use that.
-     */
-    CRYPTO_ctr128_encrypt((const unsigned char *)input,
-                          (unsigned char *)output,
-                          len,
-                          &cipher->key.evp,
-                          cipher->ctr_buf.buf,
-                          cipher->buf,
-                          &cipher->pos,
-                          evp_block128_fn);
-  } else {
-    AES_ctr128_encrypt((const unsigned char *)input,
-                       (unsigned char *)output,
-                       len,
-                       &cipher->key.aes,
-                       cipher->ctr_buf.buf,
-                       cipher->buf,
-                       &cipher->pos);
-  }
-#else
-  int c = cipher->pos;
-  if (PREDICT_UNLIKELY(!len)) return;
-
-  while (1) {
-    do {
-      if (len-- == 0) { cipher->pos = c; return; }
-      *(output++) = *(input++) ^ cipher->buf[c];
-    } while (++c != 16);
-    cipher->pos = c = 0;
-    if (PREDICT_UNLIKELY(! ++COUNTER(cipher, 0))) {
-      if (PREDICT_UNLIKELY(! ++COUNTER(cipher, 1))) {
-        if (PREDICT_UNLIKELY(! ++COUNTER(cipher, 2))) {
-          ++COUNTER(cipher, 3);
-          UPDATE_CTR_BUF(cipher, 3);
-        }
-        UPDATE_CTR_BUF(cipher, 2);
-      }
-      UPDATE_CTR_BUF(cipher, 1);
+#ifdef CAN_USE_OPENSSL_CTR
+  if (should_use_openssl_CTR) {
+    if (cipher->using_evp) {
+      /* In openssl 1.0.0, there's an if'd out EVP_aes_128_ctr in evp.h.  If
+       * it weren't disabled, it might be better just to use that.
+       */
+      CRYPTO_ctr128_encrypt((const unsigned char *)input,
+                            (unsigned char *)output,
+                            len,
+                            &cipher->key.evp,
+                            cipher->ctr_buf.buf,
+                            cipher->buf,
+                            &cipher->pos,
+                            evp_block128_fn);
+    } else {
+      AES_ctr128_encrypt((const unsigned char *)input,
+                         (unsigned char *)output,
+                         len,
+                         &cipher->key.aes,
+                         cipher->ctr_buf.buf,
+                         cipher->buf,
+                         &cipher->pos);
     }
-    UPDATE_CTR_BUF(cipher, 0);
-    _aes_fill_buf(cipher);
+    return;
   }
+  else
 #endif
+  {
+    int c = cipher->pos;
+    if (PREDICT_UNLIKELY(!len)) return;
+
+    while (1) {
+      do {
+        if (len-- == 0) { cipher->pos = c; return; }
+        *(output++) = *(input++) ^ cipher->buf[c];
+      } while (++c != 16);
+      cipher->pos = c = 0;
+      if (PREDICT_UNLIKELY(! ++COUNTER(cipher, 0))) {
+        if (PREDICT_UNLIKELY(! ++COUNTER(cipher, 1))) {
+          if (PREDICT_UNLIKELY(! ++COUNTER(cipher, 2))) {
+            ++COUNTER(cipher, 3);
+            UPDATE_CTR_BUF(cipher, 3);
+          }
+          UPDATE_CTR_BUF(cipher, 2);
+        }
+        UPDATE_CTR_BUF(cipher, 1);
+      }
+      UPDATE_CTR_BUF(cipher, 0);
+      _aes_fill_buf(cipher);
+    }
+  }
 }
 
 /** Encrypt <b>len</b> bytes from <b>input</b>, storing the results in place.
@@ -304,32 +363,37 @@ aes_crypt(aes_cnt_cipher_t *cipher, const char *input, size_t len,
 void
 aes_crypt_inplace(aes_cnt_cipher_t *cipher, char *data, size_t len)
 {
-#ifdef USE_OPENSSL_CTR
-  aes_crypt(cipher, data, len, data);
-#else
-  int c = cipher->pos;
-  if (PREDICT_UNLIKELY(!len)) return;
-
-  while (1) {
-    do {
-      if (len-- == 0) { cipher->pos = c; return; }
-      *(data++) ^= cipher->buf[c];
-    } while (++c != 16);
-    cipher->pos = c = 0;
-    if (PREDICT_UNLIKELY(! ++COUNTER(cipher, 0))) {
-      if (PREDICT_UNLIKELY(! ++COUNTER(cipher, 1))) {
-        if (PREDICT_UNLIKELY(! ++COUNTER(cipher, 2))) {
-          ++COUNTER(cipher, 3);
-          UPDATE_CTR_BUF(cipher, 3);
-        }
-        UPDATE_CTR_BUF(cipher, 2);
-      }
-      UPDATE_CTR_BUF(cipher, 1);
-    }
-    UPDATE_CTR_BUF(cipher, 0);
-    _aes_fill_buf(cipher);
+#ifdef CAN_USE_OPENSSL_CTR
+  if (should_use_openssl_CTR) {
+    aes_crypt(cipher, data, len, data);
+    return;
   }
+  else
 #endif
+  {
+    int c = cipher->pos;
+    if (PREDICT_UNLIKELY(!len)) return;
+
+    while (1) {
+      do {
+        if (len-- == 0) { cipher->pos = c; return; }
+        *(data++) ^= cipher->buf[c];
+      } while (++c != 16);
+      cipher->pos = c = 0;
+      if (PREDICT_UNLIKELY(! ++COUNTER(cipher, 0))) {
+        if (PREDICT_UNLIKELY(! ++COUNTER(cipher, 1))) {
+          if (PREDICT_UNLIKELY(! ++COUNTER(cipher, 2))) {
+            ++COUNTER(cipher, 3);
+            UPDATE_CTR_BUF(cipher, 3);
+          }
+          UPDATE_CTR_BUF(cipher, 2);
+        }
+        UPDATE_CTR_BUF(cipher, 1);
+      }
+      UPDATE_CTR_BUF(cipher, 0);
+      _aes_fill_buf(cipher);
+    }
+  }
 }
 
 /** Reset the 128-bit counter of <b>cipher</b> to the 16-bit big-endian value
@@ -346,8 +410,9 @@ aes_set_iv(aes_cnt_cipher_t *cipher, const char *iv)
   cipher->pos = 0;
   memcpy(cipher->ctr_buf.buf, iv, 16);
 
-#ifndef USE_OPENSSL_CTR
-  _aes_fill_buf(cipher);
+#ifdef CAN_USE_OPENSSL_CTR
+  if (!should_use_openssl_CTR)
 #endif
+    _aes_fill_buf(cipher);
 }
 

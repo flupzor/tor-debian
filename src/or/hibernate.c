@@ -140,7 +140,7 @@ accounting_parse_options(const or_options_t *options, int validate_only)
     return 0;
   }
 
-  items = smartlist_create();
+  items = smartlist_new();
   smartlist_split_string(items, v, NULL,
                          SPLIT_SKIP_SPACE|SPLIT_IGNORE_BLANK,0);
   if (smartlist_len(items)<2) {
@@ -240,6 +240,14 @@ accounting_is_enabled(const or_options_t *options)
   if (options->AccountingMax)
     return 1;
   return 0;
+}
+
+/** If accounting is enabled, return how long (in seconds) this
+ * interval lasts. */
+int
+accounting_get_interval_length(void)
+{
+  return (int)(interval_end_time - interval_start_time);
 }
 
 /** Called from main.c to tell us that <b>seconds</b> seconds have
@@ -503,8 +511,7 @@ static void
 accounting_set_wakeup_time(void)
 {
   char digest[DIGEST_LEN];
-  crypto_digest_env_t *d_env;
-  int time_in_interval;
+  crypto_digest_t *d_env;
   uint64_t time_to_exhaust_bw;
   int time_to_consider;
 
@@ -521,11 +528,11 @@ accounting_set_wakeup_time(void)
 
     crypto_pk_get_digest(get_server_identity_key(), digest);
 
-    d_env = crypto_new_digest_env();
+    d_env = crypto_digest_new();
     crypto_digest_add_bytes(d_env, buf, ISO_TIME_LEN);
     crypto_digest_add_bytes(d_env, digest, DIGEST_LEN);
     crypto_digest_get_digest(d_env, digest, DIGEST_LEN);
-    crypto_free_digest_env(d_env);
+    crypto_digest_free(d_env);
   } else {
     crypto_rand(digest, DIGEST_LEN);
   }
@@ -538,14 +545,12 @@ accounting_set_wakeup_time(void)
     interval_wakeup_time = interval_start_time;
 
     log_notice(LD_ACCT,
-           "Configured hibernation.  This interval begins at %s "
-           "and ends at %s.  We have no prior estimate for bandwidth, so "
+           "Configured hibernation. This interval begins at %s "
+           "and ends at %s. We have no prior estimate for bandwidth, so "
            "we will start out awake and hibernate when we exhaust our quota.",
            buf1, buf2);
     return;
   }
-
-  time_in_interval = (int)(interval_end_time - interval_start_time);
 
   time_to_exhaust_bw =
     (get_options()->AccountingMax/expected_bandwidth_usage)*60;
@@ -553,7 +558,8 @@ accounting_set_wakeup_time(void)
     time_to_exhaust_bw = INT_MAX;
     time_to_consider = 0;
   } else {
-    time_to_consider = time_in_interval - (int)time_to_exhaust_bw;
+    time_to_consider = accounting_get_interval_length() -
+                       (int)time_to_exhaust_bw;
   }
 
   if (time_to_consider<=0) {
@@ -970,8 +976,7 @@ getinfo_helper_accounting(control_connection_t *conn,
     else
       *answer = tor_strdup("awake");
   } else if (!strcmp(question, "accounting/bytes")) {
-    *answer = tor_malloc(32);
-    tor_snprintf(*answer, 32, U64_FORMAT" "U64_FORMAT,
+    tor_asprintf(answer, U64_FORMAT" "U64_FORMAT,
                  U64_PRINTF_ARG(n_bytes_read_in_interval),
                  U64_PRINTF_ARG(n_bytes_written_in_interval));
   } else if (!strcmp(question, "accounting/bytes-left")) {
@@ -981,8 +986,7 @@ getinfo_helper_accounting(control_connection_t *conn,
       read_left = limit - n_bytes_read_in_interval;
     if (n_bytes_written_in_interval < limit)
       write_left = limit - n_bytes_written_in_interval;
-    *answer = tor_malloc(64);
-    tor_snprintf(*answer, 64, U64_FORMAT" "U64_FORMAT,
+    tor_asprintf(answer, U64_FORMAT" "U64_FORMAT,
                  U64_PRINTF_ARG(read_left), U64_PRINTF_ARG(write_left));
   } else if (!strcmp(question, "accounting/interval-start")) {
     *answer = tor_malloc(ISO_TIME_LEN+1);

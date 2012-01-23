@@ -930,7 +930,7 @@ rep_hist_get_router_stability_doc(time_t now)
     return NULL;
 
   tor_free(last_stability_doc);
-  chunks = smartlist_create();
+  chunks = smartlist_new();
 
   if (rep_hist_have_measured_enough_stability()) {
     smartlist_add(chunks, tor_strdup("we-have-enough-measurements\n"));
@@ -941,7 +941,6 @@ rep_hist_get_router_stability_doc(time_t now)
   DIGESTMAP_FOREACH(history_map, id, or_history_t *, hist) {
     const node_t *node;
     char dbuf[BASE64_DIGEST_LEN+1];
-    char header_buf[512];
     char *info;
     digest_to_base64(dbuf, id);
     node = node_get_by_id(id);
@@ -954,7 +953,7 @@ rep_hist_get_router_stability_doc(time_t now)
         format_iso_time(tbuf, published);
       else
         strlcpy(tbuf, "???", sizeof(tbuf));
-      tor_snprintf(header_buf, sizeof(header_buf),
+      smartlist_add_asprintf(chunks,
                    "router %s %s %s\n"
                    "published %s\n"
                    "relevant-flags %s%s%s\n"
@@ -966,10 +965,9 @@ rep_hist_get_router_stability_doc(time_t now)
                    node->ri && node->ri->is_hibernating ? "Hibernating " : "",
                    node_get_declared_uptime(node));
     } else {
-      tor_snprintf(header_buf, sizeof(header_buf),
+      smartlist_add_asprintf(chunks,
                    "router %s {no descriptor}\n", dbuf);
     }
-    smartlist_add(chunks, tor_strdup(header_buf));
     info = rep_hist_format_router_status(hist, now);
     if (info)
       smartlist_add(chunks, info);
@@ -1063,7 +1061,7 @@ rep_hist_load_mtbf_data(time_t now)
     tor_free(filename);
     if (!d)
       return -1;
-    lines = smartlist_create();
+    lines = smartlist_new();
     smartlist_split_string(lines, d, "\n", SPLIT_SKIP_SPACE, 0);
     tor_free(d);
   }
@@ -1588,7 +1586,6 @@ rep_hist_update_bwhist_state_section(or_state_t *state,
                                      time_t *s_begins,
                                      int *s_interval)
 {
-  char *cp;
   int i,j;
   uint64_t maxval;
 
@@ -1612,31 +1609,31 @@ rep_hist_update_bwhist_state_section(or_state_t *state,
     }
     *s_begins = 0;
     *s_interval = 900;
-    *s_values = smartlist_create();
-    *s_maxima = smartlist_create();
+    *s_values = smartlist_new();
+    *s_maxima = smartlist_new();
     return;
   }
   *s_begins = b->next_period;
   *s_interval = NUM_SECS_BW_SUM_INTERVAL;
 
-  *s_values = smartlist_create();
-  *s_maxima = smartlist_create();
+  *s_values = smartlist_new();
+  *s_maxima = smartlist_new();
   /* Set i to first position in circular array */
   i = (b->num_maxes_set <= b->next_max_idx) ? 0 : b->next_max_idx;
   for (j=0; j < b->num_maxes_set; ++j,++i) {
     if (i >= NUM_TOTALS)
       i = 0;
-    tor_asprintf(&cp, U64_FORMAT, U64_PRINTF_ARG(b->totals[i] & ~0x3ff));
-    smartlist_add(*s_values, cp);
+    smartlist_add_asprintf(*s_values, U64_FORMAT,
+                           U64_PRINTF_ARG(b->totals[i] & ~0x3ff));
     maxval = b->maxima[i] / NUM_SECS_ROLLING_MEASURE;
-    tor_asprintf(&cp, U64_FORMAT, U64_PRINTF_ARG(maxval & ~0x3ff));
-    smartlist_add(*s_maxima, cp);
+    smartlist_add_asprintf(*s_maxima, U64_FORMAT,
+                           U64_PRINTF_ARG(maxval & ~0x3ff));
   }
-  tor_asprintf(&cp, U64_FORMAT, U64_PRINTF_ARG(b->total_in_period & ~0x3ff));
-  smartlist_add(*s_values, cp);
+  smartlist_add_asprintf(*s_values, U64_FORMAT,
+                         U64_PRINTF_ARG(b->total_in_period & ~0x3ff));
   maxval = b->max_total / NUM_SECS_ROLLING_MEASURE;
-  tor_asprintf(&cp, U64_FORMAT, U64_PRINTF_ARG(maxval & ~0x3ff));
-  smartlist_add(*s_maxima, cp);
+  smartlist_add_asprintf(*s_maxima, U64_FORMAT,
+                         U64_PRINTF_ARG(maxval & ~0x3ff));
 }
 
 /** Update <b>state</b> with the newest bandwidth history. Done before
@@ -1804,7 +1801,7 @@ add_predicted_port(time_t now, uint16_t port)
 static void
 predicted_ports_init(void)
 {
-  predicted_ports_list = smartlist_create();
+  predicted_ports_list = smartlist_new();
   add_predicted_port(time(NULL), 80); /* add one to kickstart us */
 }
 
@@ -1853,7 +1850,7 @@ rep_hist_note_used_port(time_t now, uint16_t port)
 smartlist_t *
 rep_hist_get_predicted_ports(time_t now)
 {
-  smartlist_t *out = smartlist_create();
+  smartlist_t *out = smartlist_new();
   tor_assert(predicted_ports_list);
 
   /* clean out obsolete entries */
@@ -2125,7 +2122,6 @@ rep_hist_format_exit_stats(time_t now)
   uint64_t cur_bytes = 0, other_read = 0, other_written = 0,
            total_read = 0, total_written = 0;
   uint32_t total_streams = 0, other_streams = 0;
-  char *buf;
   smartlist_t *written_strings, *read_strings, *streams_strings;
   char *written_string, *read_string, *streams_string;
   char t[ISO_TIME_LEN+1];
@@ -2188,9 +2184,9 @@ rep_hist_format_exit_stats(time_t now)
   }
 
   /* Add observations of top ports to smartlists. */
-  written_strings = smartlist_create();
-  read_strings = smartlist_create();
-  streams_strings = smartlist_create();
+  written_strings = smartlist_new();
+  read_strings = smartlist_new();
+  streams_strings = smartlist_new();
   other_read = total_read;
   other_written = total_written;
   other_streams = total_streams;
@@ -2204,9 +2200,8 @@ rep_hist_format_exit_stats(time_t now)
                      exit_bytes_written[cur_port],
                      EXIT_STATS_ROUND_UP_BYTES);
       num /= 1024;
-      buf = NULL;
-      tor_asprintf(&buf, "%d="U64_FORMAT, cur_port, U64_PRINTF_ARG(num));
-      smartlist_add(written_strings, buf);
+      smartlist_add_asprintf(written_strings, "%d="U64_FORMAT,
+                             cur_port, U64_PRINTF_ARG(num));
       other_written -= exit_bytes_written[cur_port];
     }
     if (exit_bytes_read[cur_port] > 0) {
@@ -2214,18 +2209,15 @@ rep_hist_format_exit_stats(time_t now)
                      exit_bytes_read[cur_port],
                      EXIT_STATS_ROUND_UP_BYTES);
       num /= 1024;
-      buf = NULL;
-      tor_asprintf(&buf, "%d="U64_FORMAT, cur_port, U64_PRINTF_ARG(num));
-      smartlist_add(read_strings, buf);
+      smartlist_add_asprintf(read_strings, "%d="U64_FORMAT,
+                             cur_port, U64_PRINTF_ARG(num));
       other_read -= exit_bytes_read[cur_port];
     }
     if (exit_streams[cur_port] > 0) {
       uint32_t num = round_uint32_to_next_multiple_of(
                      exit_streams[cur_port],
                      EXIT_STATS_ROUND_UP_STREAMS);
-      buf = NULL;
-      tor_asprintf(&buf, "%d=%u", cur_port, num);
-      smartlist_add(streams_strings, buf);
+      smartlist_add_asprintf(streams_strings, "%d=%u", cur_port, num);
       other_streams -= exit_streams[cur_port];
     }
   }
@@ -2234,20 +2226,16 @@ rep_hist_format_exit_stats(time_t now)
   other_written = round_uint64_to_next_multiple_of(other_written,
                   EXIT_STATS_ROUND_UP_BYTES);
   other_written /= 1024;
-  buf = NULL;
-  tor_asprintf(&buf, "other="U64_FORMAT, U64_PRINTF_ARG(other_written));
-  smartlist_add(written_strings, buf);
+  smartlist_add_asprintf(written_strings, "other="U64_FORMAT,
+                         U64_PRINTF_ARG(other_written));
   other_read = round_uint64_to_next_multiple_of(other_read,
                EXIT_STATS_ROUND_UP_BYTES);
   other_read /= 1024;
-  buf = NULL;
-  tor_asprintf(&buf, "other="U64_FORMAT, U64_PRINTF_ARG(other_read));
-  smartlist_add(read_strings, buf);
+  smartlist_add_asprintf(read_strings, "other="U64_FORMAT,
+                         U64_PRINTF_ARG(other_read));
   other_streams = round_uint32_to_next_multiple_of(other_streams,
                   EXIT_STATS_ROUND_UP_STREAMS);
-  buf = NULL;
-  tor_asprintf(&buf, "other=%u", other_streams);
-  smartlist_add(streams_strings, buf);
+  smartlist_add_asprintf(streams_strings, "other=%u", other_streams);
 
   /* Join all observations in single strings. */
   written_string = smartlist_join_strings(written_strings, ",", 0, NULL);
@@ -2382,7 +2370,7 @@ rep_hist_add_buffer_stats(double mean_num_cells_in_queue,
   stat->mean_time_cells_in_queue = mean_time_cells_in_queue;
   stat->processed_cells = processed_cells;
   if (!circuits_for_buffer_stats)
-    circuits_for_buffer_stats = smartlist_create();
+    circuits_for_buffer_stats = smartlist_new();
   smartlist_add(circuits_for_buffer_stats, stat);
 }
 
@@ -2451,7 +2439,7 @@ void
 rep_hist_reset_buffer_stats(time_t now)
 {
   if (!circuits_for_buffer_stats)
-    circuits_for_buffer_stats = smartlist_create();
+    circuits_for_buffer_stats = smartlist_new();
   SMARTLIST_FOREACH(circuits_for_buffer_stats, circ_buffer_stats_t *,
       stat, tor_free(stat));
   smartlist_clear(circuits_for_buffer_stats);
@@ -2468,7 +2456,6 @@ rep_hist_format_buffer_stats(time_t now)
   int processed_cells[SHARES], circs_in_share[SHARES],
       number_of_circuits, i;
   double queued_cells[SHARES], time_in_queue[SHARES];
-  char *buf = NULL;
   smartlist_t *processed_cells_strings, *queued_cells_strings,
               *time_in_queue_strings;
   char *processed_cells_string, *queued_cells_string,
@@ -2487,7 +2474,7 @@ rep_hist_format_buffer_stats(time_t now)
   memset(queued_cells, 0, SHARES * sizeof(double));
   memset(time_in_queue, 0, SHARES * sizeof(double));
   if (!circuits_for_buffer_stats)
-    circuits_for_buffer_stats = smartlist_create();
+    circuits_for_buffer_stats = smartlist_new();
   number_of_circuits = smartlist_len(circuits_for_buffer_stats);
   if (number_of_circuits > 0) {
     smartlist_sort(circuits_for_buffer_stats,
@@ -2506,23 +2493,23 @@ rep_hist_format_buffer_stats(time_t now)
   }
 
   /* Write deciles to strings. */
-  processed_cells_strings = smartlist_create();
-  queued_cells_strings = smartlist_create();
-  time_in_queue_strings = smartlist_create();
+  processed_cells_strings = smartlist_new();
+  queued_cells_strings = smartlist_new();
+  time_in_queue_strings = smartlist_new();
   for (i = 0; i < SHARES; i++) {
-    tor_asprintf(&buf,"%d", !circs_in_share[i] ? 0 :
-                 processed_cells[i] / circs_in_share[i]);
-    smartlist_add(processed_cells_strings, buf);
+    smartlist_add_asprintf(processed_cells_strings,
+                           "%d", !circs_in_share[i] ? 0 :
+                              processed_cells[i] / circs_in_share[i]);
   }
   for (i = 0; i < SHARES; i++) {
-    tor_asprintf(&buf, "%.2f", circs_in_share[i] == 0 ? 0.0 :
-                 queued_cells[i] / (double) circs_in_share[i]);
-    smartlist_add(queued_cells_strings, buf);
+    smartlist_add_asprintf(queued_cells_strings, "%.2f",
+                           circs_in_share[i] == 0 ? 0.0 :
+                             queued_cells[i] / (double) circs_in_share[i]);
   }
   for (i = 0; i < SHARES; i++) {
-    tor_asprintf(&buf, "%.0f", circs_in_share[i] == 0 ? 0.0 :
-                 time_in_queue[i] / (double) circs_in_share[i]);
-    smartlist_add(time_in_queue_strings, buf);
+    smartlist_add_asprintf(time_in_queue_strings, "%.0f",
+                           circs_in_share[i] == 0 ? 0.0 :
+                             time_in_queue[i] / (double) circs_in_share[i]);
   }
 
   /* Join all observations in single strings. */

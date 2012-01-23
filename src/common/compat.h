@@ -335,7 +335,7 @@ struct tm *tor_gmtime_r(const time_t *timep, struct tm *result);
 #define timeradd(tv1,tv2,tvout) \
   do {                                                  \
     (tvout)->tv_sec = (tv1)->tv_sec + (tv2)->tv_sec;    \
-    (tvout)->tv_usec = (tv2)->tv_usec + (tv2)->tv_usec; \
+    (tvout)->tv_usec = (tv1)->tv_usec + (tv2)->tv_usec; \
     if ((tvout)->tv_usec >= 1000000) {                  \
       (tvout)->tv_usec -= 1000000;                      \
       (tvout)->tv_sec++;                                \
@@ -349,7 +349,7 @@ struct tm *tor_gmtime_r(const time_t *timep, struct tm *result);
 #define timersub(tv1,tv2,tvout) \
   do {                                                  \
     (tvout)->tv_sec = (tv1)->tv_sec - (tv2)->tv_sec;    \
-    (tvout)->tv_usec = (tv2)->tv_usec - (tv2)->tv_usec; \
+    (tvout)->tv_usec = (tv1)->tv_usec - (tv2)->tv_usec; \
     if ((tvout)->tv_usec < 0) {                         \
       (tvout)->tv_usec += 1000000;                      \
       (tvout)->tv_sec--;                                \
@@ -399,11 +399,19 @@ typedef int socklen_t;
 #endif
 
 #ifdef MS_WINDOWS
+/* XXX Actually, this should arguably be SOCKET; we use intptr_t here so that
+ * any inadvertant checks for the socket being <= 0 or > 0 will probably
+ * still work. */
 #define tor_socket_t intptr_t
-#define SOCKET_OK(s) ((unsigned)(s) != INVALID_SOCKET)
+#define SOCKET_OK(s) ((SOCKET)(s) != INVALID_SOCKET)
+#define TOR_INVALID_SOCKET INVALID_SOCKET
 #else
+/** Type used for a network socket. */
 #define tor_socket_t int
+/** Macro: true iff 's' is a possible value for a valid initialized socket. */
 #define SOCKET_OK(s) ((s) >= 0)
+/** Error/uninitialized value for a tor_socket_t. */
+#define TOR_INVALID_SOCKET (-1)
 #endif
 
 int tor_close_socket(tor_socket_t s);
@@ -571,6 +579,7 @@ char *get_user_homedir(const char *username);
 #endif
 
 int get_parent_directory(char *fname);
+char *make_path_absolute(char *fname);
 
 int spawn_func(void (*func)(void *), void *data);
 void spawn_exit(void) ATTR_NORETURN;

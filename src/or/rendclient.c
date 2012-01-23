@@ -131,7 +131,7 @@ rend_client_send_introduction(origin_circuit_t *introcirc,
   rend_cache_entry_t *entry;
   crypt_path_t *cpath;
   off_t dh_offset;
-  crypto_pk_env_t *intro_key = NULL;
+  crypto_pk_t *intro_key = NULL;
 
   tor_assert(introcirc->_base.purpose == CIRCUIT_PURPOSE_C_INTRODUCING);
   tor_assert(rendcirc->_base.purpose == CIRCUIT_PURPOSE_C_REND_READY);
@@ -275,6 +275,12 @@ rend_client_send_introduction(origin_circuit_t *introcirc,
   payload_len = DIGEST_LEN + r;
   tor_assert(payload_len <= RELAY_PAYLOAD_SIZE); /* we overran something */
 
+  /* Copy the rendezvous cookie from rendcirc to introcirc, so that
+   * when introcirc gets an ack, we can change the state of the right
+   * rendezvous circuit. */
+  memcpy(introcirc->rend_data->rend_cookie, rendcirc->rend_data->rend_cookie,
+         REND_COOKIE_LEN);
+
   log_info(LD_REND, "Sending an INTRODUCE1 cell");
   if (relay_send_command_from_edge(0, TO_CIRCUIT(introcirc),
                                    RELAY_COMMAND_INTRODUCE1,
@@ -286,7 +292,8 @@ rend_client_send_introduction(origin_circuit_t *introcirc,
   }
 
   /* Now, we wait for an ACK or NAK on this circuit. */
-  introcirc->_base.purpose = CIRCUIT_PURPOSE_C_INTRODUCE_ACK_WAIT;
+  circuit_change_purpose(TO_CIRCUIT(introcirc),
+                         CIRCUIT_PURPOSE_C_INTRODUCE_ACK_WAIT);
   /* Set timestamp_dirty, because circuit_expire_building expects it
    * to specify when a circuit entered the _C_INTRODUCE_ACK_WAIT
    * state. */
@@ -344,13 +351,13 @@ rend_client_introduction_acked(origin_circuit_t *circ,
      * and tell it.
      */
     log_info(LD_REND,"Received ack. Telling rend circ...");
-    rendcirc = circuit_get_by_rend_query_and_purpose(
-               circ->rend_data->onion_address, CIRCUIT_PURPOSE_C_REND_READY);
+    rendcirc = circuit_get_ready_rend_circ_by_rend_data(circ->rend_data);
     if (rendcirc) { /* remember the ack */
 #ifndef NON_ANONYMOUS_MODE_ENABLED
       tor_assert(!(rendcirc->build_state->onehop_tunnel));
 #endif
-      rendcirc->_base.purpose = CIRCUIT_PURPOSE_C_REND_READY_INTRO_ACKED;
+      circuit_change_purpose(TO_CIRCUIT(rendcirc),
+                             CIRCUIT_PURPOSE_C_REND_READY_INTRO_ACKED);
       /* Set timestamp_dirty, because circuit_expire_building expects
        * it to specify when a circuit entered the
        * _C_REND_READY_INTRO_ACKED state. */
@@ -359,11 +366,12 @@ rend_client_introduction_acked(origin_circuit_t *circ,
       log_info(LD_REND,"...Found no rend circ. Dropping on the floor.");
     }
     /* close the circuit: we won't need it anymore. */
-    circ->_base.purpose = CIRCUIT_PURPOSE_C_INTRODUCE_ACKED;
+    circuit_change_purpose(TO_CIRCUIT(circ),
+                           CIRCUIT_PURPOSE_C_INTRODUCE_ACKED);
     circuit_mark_for_close(TO_CIRCUIT(circ), END_CIRC_REASON_FINISHED);
   } else {
     /* It's a NAK; the introduction point didn't relay our request. */
-    circ->_base.purpose = CIRCUIT_PURPOSE_C_INTRODUCING;
+    circuit_change_purpose(TO_CIRCUIT(circ), CIRCUIT_PURPOSE_C_INTRODUCING);
     /* Remove this intro point from the set of viable introduction
      * points. If any remain, extend to a new one and try again.
      * If none remain, refetch the service descriptor.
@@ -530,7 +538,7 @@ rend_client_purge_last_hid_serv_requests(void)
 static int
 directory_get_from_hs_dir(const char *desc_id, const rend_data_t *rend_query)
 {
-  smartlist_t *responsible_dirs = smartlist_create();
+  smartlist_t *responsible_dirs = smartlist_new();
   routerstatus_t *hs_dir;
   char desc_id_base32[REND_DESC_ID_V2_LEN_BASE32 + 1];
   time_t now = time(NULL);
@@ -818,7 +826,7 @@ rend_client_rendezvous_acked(origin_circuit_t *circ, const uint8_t *request,
   }
   log_info(LD_REND,"Got rendezvous ack. This circuit is now ready for "
            "rendezvous.");
-  circ->_base.purpose = CIRCUIT_PURPOSE_C_REND_READY;
+  circuit_change_purpose(TO_CIRCUIT(circ), CIRCUIT_PURPOSE_C_REND_READY);
   /* Set timestamp_dirty, because circuit_expire_building expects it
    * to specify when a circuit entered the _C_REND_READY state. */
   circ->_base.timestamp_dirty = time(NULL);
@@ -882,13 +890,18 @@ rend_client_receive_rendezvous(origin_circuit_t *circ, const uint8_t *request,
   hop->dh_handshake_state = NULL;
 
   /* All is well. Extend the circuit. */
-  circ->_base.purpose = CIRCUIT_PURPOSE_C_REND_JOINED;
+  circuit_change_purpose(TO_CIRCUIT(circ), CIRCUIT_PURPOSE_C_REND_JOINED);
   hop->state = CPATH_STATE_OPEN;
   /* set the windows to default. these are the windows
    * that alice thinks bob has.
    */
   hop->package_window = circuit_initial_package_window();
   hop->deliver_window = CIRCWINDOW_START;
+
+  /* Now that this circuit has finished connecting to its destination,
+   * make sure circuit_get_open_circ_or_launch is willing to return it
+   * so we can actually use it. */
+  circ->hs_circ_has_timed_out = 0;
 
   onion_append_to_cpath(&circ->cpath, hop);
   circ->build_state->pending_final_cpath = NULL; /* prevent double-free */
@@ -1027,7 +1040,7 @@ rend_client_get_random_intro_impl(const rend_cache_entry_t *entry,
 
   /* We'll keep a separate list of the usable nodes.  If this becomes empty,
    * no nodes are usable.  */
-  usable_nodes = smartlist_create();
+  usable_nodes = smartlist_new();
   smartlist_add_all(usable_nodes, entry->parsed->intro_nodes);
 
   /* Remove the intro points that have timed out during this HS
@@ -1157,7 +1170,7 @@ rend_parse_service_authorization(const or_options_t *options,
   config_line_t *line;
   int res = -1;
   strmap_t *parsed = strmap_new();
-  smartlist_t *sl = smartlist_create();
+  smartlist_t *sl = smartlist_new();
   rend_service_authorization_t *auth = NULL;
 
   for (line = options->HidServAuth; line; line = line->next) {

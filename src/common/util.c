@@ -1430,6 +1430,26 @@ format_iso_time(char *buf, time_t t)
   strftime(buf, ISO_TIME_LEN+1, "%Y-%m-%d %H:%M:%S", tor_gmtime_r(&t, &tm));
 }
 
+/** As format_iso_time, but use the yyyy-mm-ddThh:mm:ss format to avoid
+ * embedding an internal space. */
+void
+format_iso_time_nospace(char *buf, time_t t)
+{
+  format_iso_time(buf, t);
+  buf[10] = 'T';
+}
+
+/** As format_iso_time_nospace, but include microseconds in decimal
+ * fixed-point format.  Requires that buf be at least ISO_TIME_USEC_LEN+1
+ * bytes long. */
+void
+format_iso_time_nospace_usec(char *buf, const struct timeval *tv)
+{
+  tor_assert(tv);
+  format_iso_time_nospace(buf, tv->tv_sec);
+  tor_snprintf(buf+ISO_TIME_LEN, 8, ".%06d", (int)tv->tv_usec);
+}
+
 /** Given an ISO-formatted UTC time value (after the epoch) in <b>cp</b>,
  * parse it and store its value in *<b>t</b>.  Return 0 on success, -1 on
  * failure.  Ignore extraneous stuff in <b>cp</b> separated by whitespace from
@@ -1944,7 +1964,6 @@ int
 start_writing_to_file(const char *fname, int open_flags, int mode,
                       open_file_t **data_out)
 {
-  size_t tempname_len = strlen(fname)+16;
   open_file_t *new_file = tor_malloc_zero(sizeof(open_file_t));
   const char *open_name;
   int append = 0;
@@ -1955,7 +1974,6 @@ start_writing_to_file(const char *fname, int open_flags, int mode,
   tor_assert((open_flags & (O_BINARY|O_TEXT)) != 0);
 #endif
   new_file->fd = -1;
-  tor_assert(tempname_len > strlen(fname)); /*check for overflow*/
   new_file->filename = tor_strdup(fname);
   if (open_flags & O_APPEND) {
     open_name = fname;
@@ -1963,11 +1981,8 @@ start_writing_to_file(const char *fname, int open_flags, int mode,
     append = 1;
     open_flags &= ~O_APPEND;
   } else {
-    open_name = new_file->tempname = tor_malloc(tempname_len);
-    if (tor_snprintf(new_file->tempname, tempname_len, "%s.tmp", fname)<0) {
-      log_warn(LD_GENERAL, "Failed to generate filename");
-      goto err;
-    }
+    tor_asprintf(&new_file->tempname, "%s.tmp", fname);
+    open_name = new_file->tempname;
     /* We always replace an existing temporary file if there is one. */
     open_flags |= O_CREAT|O_TRUNC;
     open_flags &= ~O_EXCL;
@@ -2145,7 +2160,7 @@ write_bytes_to_file_impl(const char *fname, const char *str, size_t len,
 {
   int r;
   sized_chunk_t c = { str, len };
-  smartlist_t *chunks = smartlist_create();
+  smartlist_t *chunks = smartlist_new();
   smartlist_add(chunks, &c);
   r = write_chunks_to_file_impl(fname, chunks, flags);
   smartlist_free(chunks);
@@ -2737,17 +2752,17 @@ tor_sscanf(const char *buf, const char *pattern, ...)
 /** Append the string produced by tor_asprintf(<b>pattern</b>, <b>...</b>)
  * to <b>sl</b>. */
 void
-smartlist_asprintf_add(struct smartlist_t *sl, const char *pattern, ...)
+smartlist_add_asprintf(struct smartlist_t *sl, const char *pattern, ...)
 {
   va_list ap;
   va_start(ap, pattern);
-  smartlist_vasprintf_add(sl, pattern, ap);
+  smartlist_add_vasprintf(sl, pattern, ap);
   va_end(ap);
 }
 
-/** va_list-based backend of smartlist_asprintf_add. */
+/** va_list-based backend of smartlist_add_asprintf. */
 void
-smartlist_vasprintf_add(struct smartlist_t *sl, const char *pattern,
+smartlist_add_vasprintf(struct smartlist_t *sl, const char *pattern,
                         va_list args)
 {
   char *str = NULL;
@@ -2766,14 +2781,12 @@ tor_listdir(const char *dirname)
 {
   smartlist_t *result;
 #ifdef MS_WINDOWS
-  char *pattern;
+  char *pattern=NULL;
   TCHAR tpattern[MAX_PATH] = {0};
   char name[MAX_PATH] = {0};
   HANDLE handle;
   WIN32_FIND_DATA findData;
-  size_t pattern_len = strlen(dirname)+16;
-  pattern = tor_malloc(pattern_len);
-  tor_snprintf(pattern, pattern_len, "%s\\*", dirname);
+  tor_asprintf(&pattern, "%s\\*", dirname);
 #ifdef UNICODE
   mbstowcs(tpattern,pattern,MAX_PATH);
 #else
@@ -2783,7 +2796,7 @@ tor_listdir(const char *dirname)
     tor_free(pattern);
     return NULL;
   }
-  result = smartlist_create();
+  result = smartlist_new();
   while (1) {
 #ifdef UNICODE
     wcstombs(name,findData.cFileName,MAX_PATH);
@@ -2812,7 +2825,7 @@ tor_listdir(const char *dirname)
   if (!(d = opendir(dirname)))
     return NULL;
 
-  result = smartlist_create();
+  result = smartlist_new();
   while ((de = readdir(d))) {
     if (!strcmp(de->d_name, ".") ||
         !strcmp(de->d_name, ".."))
@@ -3021,7 +3034,7 @@ format_win_cmdline_argument(const char *arg)
 
   /* Smartlist of *char */
   smartlist_t *arg_chars;
-  arg_chars = smartlist_create();
+  arg_chars = smartlist_new();
 
   /* Quote string if it contains whitespace or is empty */
   need_quotes = (strchr(arg, ' ') || strchr(arg, '\t') || '\0' == arg[0]);
@@ -3087,7 +3100,7 @@ tor_join_win_cmdline(const char *argv[])
   int i;
 
   /* Format each argument and put the result in a smartlist */
-  argv_list = smartlist_create();
+  argv_list = smartlist_new();
   for (i=0; argv[i] != NULL; i++) {
     smartlist_add(argv_list, (void *)format_win_cmdline_argument(argv[i]));
   }
@@ -3910,7 +3923,7 @@ log_from_handle(HANDLE *pipe, int severity)
   log_debug(LD_GENERAL, "Subprocess had %d bytes to say", pos);
 
   /* Split up the buffer */
-  lines = smartlist_create();
+  lines = smartlist_new();
   tor_split_lines(lines, buf, pos);
 
   /* Log each line */

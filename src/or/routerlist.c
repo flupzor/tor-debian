@@ -136,7 +136,7 @@ get_cert_list(const char *id_digest)
   if (!cl) {
     cl = tor_malloc_zero(sizeof(cert_list_t));
     cl->dl_status.schedule = DL_SCHED_CONSENSUS;
-    cl->certs = smartlist_create();
+    cl->certs = smartlist_new();
     digestmap_set(trusted_dir_certs, id_digest, cl);
   }
   return cl;
@@ -285,7 +285,7 @@ trusted_dirs_flush_certs_to_disk(void)
   if (!trusted_dir_servers_certs_changed || !trusted_dir_certs)
     return;
 
-  chunks = smartlist_create();
+  chunks = smartlist_new();
   DIGESTMAP_FOREACH(trusted_dir_certs, key, cert_list_t *, cl) {
     SMARTLIST_FOREACH(cl->certs, authority_cert_t *, cert,
           {
@@ -486,7 +486,7 @@ authority_certs_fetch_missing(networkstatus_t *status, time_t now)
     return;
 
   pending = digestmap_new();
-  missing_digests = smartlist_create();
+  missing_digests = smartlist_new();
 
   list_pending_downloads(pending, DIR_PURPOSE_FETCH_CERTIFICATE, "fp/");
   if (status) {
@@ -546,7 +546,7 @@ authority_certs_fetch_missing(networkstatus_t *status, time_t now)
   if (!smartlist_len(missing_digests)) {
     goto done;
   } else {
-    smartlist_t *fps = smartlist_create();
+    smartlist_t *fps = smartlist_new();
     smartlist_add(fps, tor_strdup("fp/"));
     SMARTLIST_FOREACH(missing_digests, const char *, d, {
         char *fp;
@@ -695,10 +695,10 @@ router_rebuild_store(int flags, desc_store_t *store)
   fname = get_datadir_fname(store->fname_base);
   fname_tmp = get_datadir_fname_suffix(store->fname_base, ".tmp");
 
-  chunk_list = smartlist_create();
+  chunk_list = smartlist_new();
 
   /* We sort the routers by age to enhance locality on disk. */
-  signed_descriptors = smartlist_create();
+  signed_descriptors = smartlist_new();
   if (store->type == EXTRAINFO_STORE) {
     eimap_iter_t *iter;
     for (iter = eimap_iter_init(routerlist->extra_info_map);
@@ -912,7 +912,7 @@ smartlist_t *
 router_get_trusted_dir_servers(void)
 {
   if (!trusted_dir_servers)
-    trusted_dir_servers = smartlist_create();
+    trusted_dir_servers = smartlist_new();
 
   return trusted_dir_servers;
 }
@@ -1094,12 +1094,12 @@ router_pick_directory_server_impl(dirinfo_type_t type, int flags)
 
  retry_without_exclude:
 
-  direct = smartlist_create();
-  tunnel = smartlist_create();
-  trusted_direct = smartlist_create();
-  trusted_tunnel = smartlist_create();
-  overloaded_direct = smartlist_create();
-  overloaded_tunnel = smartlist_create();
+  direct = smartlist_new();
+  tunnel = smartlist_new();
+  trusted_direct = smartlist_new();
+  trusted_tunnel = smartlist_new();
+  overloaded_direct = smartlist_new();
+  overloaded_tunnel = smartlist_new();
 
   /* Find all the running dirservers we know about. */
   SMARTLIST_FOREACH_BEGIN(nodelist_get_list(), const node_t *, node) {
@@ -1219,10 +1219,10 @@ router_pick_trusteddirserver_impl(dirinfo_type_t type, int flags,
 
  retry_without_exclude:
 
-  direct = smartlist_create();
-  tunnel = smartlist_create();
-  overloaded_direct = smartlist_create();
-  overloaded_tunnel = smartlist_create();
+  direct = smartlist_new();
+  tunnel = smartlist_new();
+  overloaded_direct = smartlist_new();
+  overloaded_tunnel = smartlist_new();
 
   SMARTLIST_FOREACH_BEGIN(trusted_dir_servers, trusted_dir_server_t *, d)
     {
@@ -1517,7 +1517,7 @@ router_nickname_is_in_list(const routerinfo_t *router, const char *list)
     return 0; /* definitely not */
   tor_assert(router);
 
-  nickname_list = smartlist_create();
+  nickname_list = smartlist_new();
   smartlist_split_string(nickname_list, list, ",",
     SPLIT_SKIP_SPACE|SPLIT_STRIP_SPACE|SPLIT_IGNORE_BLANK, 0);
   SMARTLIST_FOREACH(nickname_list, const char *, cp,
@@ -2165,8 +2165,8 @@ router_choose_random_node(smartlist_t *excludedsmartlist,
   const int weight_for_exit = (flags & CRN_WEIGHT_AS_EXIT) != 0;
   const int need_desc = (flags & CRN_NEED_DESC) != 0;
 
-  smartlist_t *sl=smartlist_create(),
-    *excludednodes=smartlist_create();
+  smartlist_t *sl=smartlist_new(),
+    *excludednodes=smartlist_new();
   const node_t *choice = NULL;
   const routerinfo_t *r;
   bandwidth_weight_rule_t rule;
@@ -2404,12 +2404,10 @@ router_get_by_nickname(const char *nickname, int warn_if_unnamed)
 
   if (best_match) {
     if (warn_if_unnamed && n_matches > 1) {
-      smartlist_t *fps = smartlist_create();
+      smartlist_t *fps = smartlist_new();
       int any_unwarned = 0;
       SMARTLIST_FOREACH_BEGIN(routerlist->routers, routerinfo_t *, router) {
           routerstatus_t *rs;
-          char *desc;
-          size_t dlen;
           char fp[HEX_DIGEST_LEN+1];
           if (strcasecmp(router->nickname, nickname))
             continue;
@@ -2421,11 +2419,8 @@ router_get_by_nickname(const char *nickname, int warn_if_unnamed)
           }
           base16_encode(fp, sizeof(fp),
                         router->cache_info.identity_digest, DIGEST_LEN);
-          dlen = 32 + HEX_DIGEST_LEN + strlen(router->address);
-          desc = tor_malloc(dlen);
-          tor_snprintf(desc, dlen, "\"$%s\" for the one at %s:%d",
+          smartlist_add_asprintf(fps, "\"$%s\" for the one at %s:%d",
                        fp, router->address, router->or_port);
-          smartlist_add(fps, desc);
       } SMARTLIST_FOREACH_END(router);
       if (any_unwarned) {
         char *alternatives = smartlist_join_strings(fps, "; ",0,NULL);
@@ -2657,8 +2652,8 @@ router_get_routerlist(void)
 {
   if (PREDICT_UNLIKELY(!routerlist)) {
     routerlist = tor_malloc_zero(sizeof(routerlist_t));
-    routerlist->routers = smartlist_create();
-    routerlist->old_routers = smartlist_create();
+    routerlist->routers = smartlist_new();
+    routerlist->old_routers = smartlist_new();
     routerlist->identity_map = rimap_new();
     routerlist->desc_digest_map = sdmap_new();
     routerlist->desc_by_eid_map = sdmap_new();
@@ -2690,9 +2685,9 @@ routerinfo_free(routerinfo_t *router)
   tor_free(router->platform);
   tor_free(router->contact_info);
   if (router->onion_pkey)
-    crypto_free_pk_env(router->onion_pkey);
+    crypto_pk_free(router->onion_pkey);
   if (router->identity_pkey)
-    crypto_free_pk_env(router->identity_pkey);
+    crypto_pk_free(router->identity_pkey);
   if (router->declared_family) {
     SMARTLIST_FOREACH(router->declared_family, char *, s, tor_free(s));
     smartlist_free(router->declared_family);
@@ -3219,7 +3214,7 @@ void
 routerlist_reset_warnings(void)
 {
   if (!warned_nicknames)
-    warned_nicknames = smartlist_create();
+    warned_nicknames = smartlist_new();
   SMARTLIST_FOREACH(warned_nicknames, char *, cp, tor_free(cp));
   smartlist_clear(warned_nicknames); /* now the list is empty. */
 
@@ -3826,7 +3821,7 @@ router_load_single_router(const char *s, uint8_t purpose, int cache,
   if (!cache) /* obey the preference of the controller */
     ri->cache_info.do_not_cache = 1;
 
-  lst = smartlist_create();
+  lst = smartlist_new();
   smartlist_add(lst, ri);
   routers_update_status_from_consensus_networkstatus(lst, 0);
 
@@ -3868,7 +3863,7 @@ router_load_routers_from_string(const char *s, const char *eos,
                                 int descriptor_digests,
                                 const char *prepend_annotations)
 {
-  smartlist_t *routers = smartlist_create(), *changed = smartlist_create();
+  smartlist_t *routers = smartlist_new(), *changed = smartlist_new();
   char fp[HEX_DIGEST_LEN+1];
   const char *msg;
   int from_cache = (saved_location != SAVED_NOWHERE);
@@ -3943,7 +3938,7 @@ router_load_extrainfo_from_string(const char *s, const char *eos,
                                   smartlist_t *requested_fingerprints,
                                   int descriptor_digests)
 {
-  smartlist_t *extrainfo_list = smartlist_create();
+  smartlist_t *extrainfo_list = smartlist_new();
   const char *msg;
   int from_cache = (saved_location != SAVED_NOWHERE);
 
@@ -4071,9 +4066,8 @@ add_trusted_dir_server(const char *nickname, const char *address,
   trusted_dir_server_t *ent;
   uint32_t a;
   char *hostname = NULL;
-  size_t dlen;
   if (!trusted_dir_servers)
-    trusted_dir_servers = smartlist_create();
+    trusted_dir_servers = smartlist_new();
 
   if (!address) { /* The address is us; we should guess. */
     if (resolve_my_address(LOG_WARN, get_options(), &a, &hostname) < 0) {
@@ -4104,13 +4098,11 @@ add_trusted_dir_server(const char *nickname, const char *address,
   if (v3_auth_digest && (type & V3_DIRINFO))
     memcpy(ent->v3_identity_digest, v3_auth_digest, DIGEST_LEN);
 
-  dlen = 64 + strlen(hostname) + (nickname?strlen(nickname):0);
-  ent->description = tor_malloc(dlen);
   if (nickname)
-    tor_snprintf(ent->description, dlen, "directory server \"%s\" at %s:%d",
+    tor_asprintf(&ent->description, "directory server \"%s\" at %s:%d",
                  nickname, hostname, (int)dir_port);
   else
-    tor_snprintf(ent->description, dlen, "directory server at %s:%d",
+    tor_asprintf(&ent->description, "directory server at %s:%d",
                  hostname, (int)dir_port);
 
   ent->fake_status.addr = ent->addr;
@@ -4141,8 +4133,8 @@ authority_cert_free(authority_cert_t *cert)
     return;
 
   tor_free(cert->cache_info.signed_descriptor_body);
-  crypto_free_pk_env(cert->signing_key);
-  crypto_free_pk_env(cert->identity_key);
+  crypto_pk_free(cert->signing_key);
+  crypto_pk_free(cert->identity_key);
 
   tor_free(cert);
 }
@@ -4169,7 +4161,7 @@ clear_trusted_dir_servers(void)
                       trusted_dir_server_free(ent));
     smartlist_clear(trusted_dir_servers);
   } else {
-    trusted_dir_servers = smartlist_create();
+    trusted_dir_servers = smartlist_new();
   }
   router_dir_info_changed();
 }
@@ -4196,7 +4188,7 @@ list_pending_downloads(digestmap_t *result,
                        int purpose, const char *prefix)
 {
   const size_t p_len = strlen(prefix);
-  smartlist_t *tmp = smartlist_create();
+  smartlist_t *tmp = smartlist_new();
   smartlist_t *conns = get_connection_array();
   int flags = DSR_HEX;
   if (purpose == DIR_PURPOSE_FETCH_MICRODESC)
@@ -4499,8 +4491,8 @@ update_router_descriptor_cache_downloads_v2(time_t now)
     {
       trusted_dir_server_t *ds;
       smartlist_t *dl;
-      dl = downloadable[ns_sl_idx] = smartlist_create();
-      download_from[ns_sl_idx] = smartlist_create();
+      dl = downloadable[ns_sl_idx] = smartlist_new();
+      download_from[ns_sl_idx] = smartlist_new();
       if (ns->published_on + MAX_NETWORKSTATUS_AGE+10*60 < now) {
         /* Don't download if the networkstatus is almost ancient. */
         /* Actually, I suspect what's happening here is that we ask
@@ -4612,8 +4604,8 @@ update_consensus_router_descriptor_downloads(time_t now, int is_vote,
 {
   const or_options_t *options = get_options();
   digestmap_t *map = NULL;
-  smartlist_t *no_longer_old = smartlist_create();
-  smartlist_t *downloadable = smartlist_create();
+  smartlist_t *no_longer_old = smartlist_new();
+  smartlist_t *downloadable = smartlist_new();
   routerstatus_t *source = NULL;
   int authdir = authdir_mode(options);
   int n_delayed=0, n_have=0, n_would_reject=0, n_wouldnt_use=0,
@@ -4796,7 +4788,7 @@ update_extrainfo_downloads(time_t now)
   pending = digestmap_new();
   list_pending_descriptor_downloads(pending, 1);
   rl = router_get_routerlist();
-  wanted = smartlist_create();
+  wanted = smartlist_new();
   for (old_routers = 0; old_routers < 2; ++old_routers) {
     smartlist_t *lst = old_routers ? rl->old_routers : rl->routers;
     for (i = 0; i < smartlist_len(lst); ++i) {
@@ -5333,7 +5325,6 @@ esc_router_info(const routerinfo_t *router)
 {
   static char *info=NULL;
   char *esc_contact, *esc_platform;
-  size_t len;
   tor_free(info);
 
   if (!router)
@@ -5342,10 +5333,7 @@ esc_router_info(const routerinfo_t *router)
   esc_contact = esc_for_log(router->contact_info);
   esc_platform = esc_for_log(router->platform);
 
-  len = strlen(esc_contact)+strlen(esc_platform)+32;
-  info = tor_malloc(len);
-  tor_snprintf(info, len, "Contact %s, Platform %s", esc_contact,
-               esc_platform);
+  tor_asprintf(&info, "Contact %s, Platform %s", esc_contact, esc_platform);
   tor_free(esc_contact);
   tor_free(esc_platform);
 
@@ -5408,11 +5396,11 @@ routerset_t *
 routerset_new(void)
 {
   routerset_t *result = tor_malloc_zero(sizeof(routerset_t));
-  result->list = smartlist_create();
+  result->list = smartlist_new();
   result->names = strmap_new();
   result->digests = digestmap_new();
-  result->policies = smartlist_create();
-  result->country_names = smartlist_create();
+  result->policies = smartlist_new();
+  result->country_names = smartlist_new();
   return result;
 }
 
@@ -5473,7 +5461,7 @@ routerset_parse(routerset_t *target, const char *s, const char *description)
   int r = 0;
   int added_countries = 0;
   char *countryname;
-  smartlist_t *list = smartlist_create();
+  smartlist_t *list = smartlist_new();
   smartlist_split_string(list, s, ",",
                          SPLIT_SKIP_SPACE | SPLIT_IGNORE_BLANK, 0);
   SMARTLIST_FOREACH_BEGIN(list, char *, nick) {
@@ -5892,7 +5880,7 @@ hid_serv_responsible_for_desc_id(const char *query)
   if (!(me = router_get_my_routerinfo()))
     return 0; /* This is redundant, but let's be paranoid. */
   my_id = me->cache_info.identity_digest;
-  responsible = smartlist_create();
+  responsible = smartlist_new();
   if (hid_serv_get_responsible_directories(responsible, query) < 0) {
     smartlist_free(responsible);
     return 0;

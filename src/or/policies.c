@@ -14,6 +14,7 @@
 #include "nodelist.h"
 #include "policies.h"
 #include "routerparse.h"
+#include "geoip.h"
 #include "ht.h"
 
 /** Policy that addresses for incoming SOCKS connections must match. */
@@ -74,7 +75,7 @@ policy_expand_private(smartlist_t **policy)
   if (!*policy) /*XXXX disallow NULL policies? */
     return;
 
-  tmp = smartlist_create();
+  tmp = smartlist_new();
 
   SMARTLIST_FOREACH(*policy, addr_policy_t *, p,
   {
@@ -121,8 +122,8 @@ parse_addr_policy(config_line_t *cfg, smartlist_t **dest,
   if (!cfg)
     return 0;
 
-  result = smartlist_create();
-  entries = smartlist_create();
+  result = smartlist_new();
+  entries = smartlist_new();
   for (; cfg; cfg = cfg->next) {
     smartlist_split_string(entries, cfg->value, ",",
                            SPLIT_SKIP_SPACE|SPLIT_IGNORE_BLANK, 0);
@@ -313,13 +314,29 @@ socks_policy_permits_address(const tor_addr_t *addr)
   return addr_policy_permits_tor_addr(addr, 1, socks_policy);
 }
 
+/** Return true iff the address <b>addr</b> is in a country listed in the
+ * case-insensitive list of country codes <b>cc_list</b>. */
+static int
+addr_is_in_cc_list(uint32_t addr, const smartlist_t *cc_list)
+{
+  country_t country;
+  const char *name;
+  if (!cc_list)
+    return 0;
+  country = geoip_get_country_by_ip(addr);
+  name = geoip_get_country_name(country);
+  return smartlist_string_isin_case(cc_list, name);
+}
+
 /** Return 1 if <b>addr</b>:<b>port</b> is permitted to publish to our
  * directory, based on <b>authdir_reject_policy</b>. Else return 0.
  */
 int
 authdir_policy_permits_address(uint32_t addr, uint16_t port)
 {
-  return addr_policy_permits_address(addr, port, authdir_reject_policy);
+  if (! addr_policy_permits_address(addr, port, authdir_reject_policy))
+    return 0;
+  return !addr_is_in_cc_list(addr, get_options()->AuthDirRejectCCs);
 }
 
 /** Return 1 if <b>addr</b>:<b>port</b> is considered valid in our
@@ -328,7 +345,9 @@ authdir_policy_permits_address(uint32_t addr, uint16_t port)
 int
 authdir_policy_valid_address(uint32_t addr, uint16_t port)
 {
-  return addr_policy_permits_address(addr, port, authdir_invalid_policy);
+  if (! addr_policy_permits_address(addr, port, authdir_invalid_policy))
+    return 0;
+  return !addr_is_in_cc_list(addr, get_options()->AuthDirInvalidCCs);
 }
 
 /** Return 1 if <b>addr</b>:<b>port</b> should be marked as a bad dir,
@@ -337,7 +356,9 @@ authdir_policy_valid_address(uint32_t addr, uint16_t port)
 int
 authdir_policy_baddir_address(uint32_t addr, uint16_t port)
 {
-  return ! addr_policy_permits_address(addr, port, authdir_baddir_policy);
+  if (! addr_policy_permits_address(addr, port, authdir_baddir_policy))
+    return 1;
+  return addr_is_in_cc_list(addr, get_options()->AuthDirBadDirCCs);
 }
 
 /** Return 1 if <b>addr</b>:<b>port</b> should be marked as a bad exit,
@@ -346,7 +367,9 @@ authdir_policy_baddir_address(uint32_t addr, uint16_t port)
 int
 authdir_policy_badexit_address(uint32_t addr, uint16_t port)
 {
-  return ! addr_policy_permits_address(addr, port, authdir_badexit_policy);
+  if (! addr_policy_permits_address(addr, port, authdir_badexit_policy))
+    return 1;
+  return addr_is_in_cc_list(addr, get_options()->AuthDirBadExitCCs);
 }
 
 #define REJECT(arg) \
@@ -1041,7 +1064,7 @@ policy_summary_create(void)
   item->reject_count = 0;
   item->accepted = 0;
 
-  summary = smartlist_create();
+  summary = smartlist_new();
   smartlist_add(summary, item);
 
   return summary;
@@ -1195,7 +1218,7 @@ policy_summarize(smartlist_t *policy)
   smartlist_t *summary = policy_summary_create();
   smartlist_t *accepts, *rejects;
   int i, last, start_prt;
-  size_t accepts_len, rejects_len, shorter_len, final_size;
+  size_t accepts_len, rejects_len;
   char *accepts_str = NULL, *rejects_str = NULL, *shorter_str, *result;
   const char *prefix;
 
@@ -1213,8 +1236,8 @@ policy_summarize(smartlist_t *policy)
    */
   i = 0;
   start_prt = 1;
-  accepts = smartlist_create();
-  rejects = smartlist_create();
+  accepts = smartlist_new();
+  rejects = smartlist_new();
   while (1) {
     last = i == smartlist_len(summary)-1;
     if (last ||
@@ -1267,21 +1290,15 @@ policy_summarize(smartlist_t *policy)
     tor_assert(*c == ',');
     *c = '\0';
 
-    shorter_len = strlen(shorter_str);
   } else if (rejects_len < accepts_len) {
     shorter_str = rejects_str;
-    shorter_len = rejects_len;
     prefix = "reject";
   } else {
     shorter_str = accepts_str;
-    shorter_len = accepts_len;
     prefix = "accept";
   }
 
-  final_size = strlen(prefix)+1+shorter_len+1;
-  tor_assert(final_size <= MAX_EXITPOLICY_SUMMARY_LEN+1);
-  result = tor_malloc(final_size);
-  tor_snprintf(result, final_size, "%s %s", prefix, shorter_str);
+  tor_asprintf(&result, "%s %s", prefix, shorter_str);
 
  cleanup:
   /* cleanup */

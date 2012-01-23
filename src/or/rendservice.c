@@ -28,6 +28,7 @@ static origin_circuit_t *find_intro_circuit(rend_intro_point_t *intro,
                                             const char *pk_digest);
 static rend_intro_point_t *find_intro_point(origin_circuit_t *circ);
 
+static int intro_point_accepted_intro_count(rend_intro_point_t *intro);
 static int intro_point_should_expire_now(rend_intro_point_t *intro,
                                          time_t now);
 
@@ -72,7 +73,7 @@ typedef struct rend_service_t {
                          * clients that may access our service. Can be NULL
                          * if no client authorization is performed. */
   /* Other fields */
-  crypto_pk_env_t *private_key; /**< Permanent hidden-service key. */
+  crypto_pk_t *private_key; /**< Permanent hidden-service key. */
   char service_id[REND_SERVICE_ID_LEN_BASE32+1]; /**< Onion address without
                                                   * '.onion' */
   char pk_digest[DIGEST_LEN]; /**< Hash of permanent hidden-service key. */
@@ -115,6 +116,17 @@ num_rend_services(void)
   return smartlist_len(rend_service_list);
 }
 
+/** Return a string identifying <b>service</b>, suitable for use in a
+ * log message.  The result does not need to be freed, but may be
+ * overwritten by the next call to this function. */
+static const char *
+rend_service_describe_for_log(rend_service_t *service)
+{
+  /* XXX024 Use this function throughout rendservice.c. */
+  /* XXX024 Return a more useful description? */
+  return safe_str_client(service->service_id);
+}
+
 /** Helper: free storage held by a single service authorized client entry. */
 static void
 rend_authorized_client_free(rend_authorized_client_t *client)
@@ -122,7 +134,7 @@ rend_authorized_client_free(rend_authorized_client_t *client)
   if (!client)
     return;
   if (client->client_key)
-    crypto_free_pk_env(client->client_key);
+    crypto_pk_free(client->client_key);
   tor_free(client->client_name);
   tor_free(client);
 }
@@ -146,7 +158,7 @@ rend_service_free(rend_service_t *service)
   SMARTLIST_FOREACH(service->ports, void*, p, tor_free(p));
   smartlist_free(service->ports);
   if (service->private_key)
-    crypto_free_pk_env(service->private_key);
+    crypto_pk_free(service->private_key);
   if (service->intro_nodes) {
     SMARTLIST_FOREACH(service->intro_nodes, rend_intro_point_t *, intro,
       rend_intro_point_free(intro););
@@ -185,7 +197,7 @@ rend_add_service(rend_service_t *service)
   int i;
   rend_service_port_config_t *p;
 
-  service->intro_nodes = smartlist_create();
+  service->intro_nodes = smartlist_new();
 
   if (service->auth_type != REND_NO_AUTH &&
       smartlist_len(service->clients) == 0) {
@@ -256,7 +268,7 @@ parse_port_config(const char *string)
   const char *addrport;
   rend_service_port_config_t *result = NULL;
 
-  sl = smartlist_create();
+  sl = smartlist_new();
   smartlist_split_string(sl, string, " ",
                          SPLIT_SKIP_SPACE|SPLIT_IGNORE_BLANK, 0);
   if (smartlist_len(sl) < 1 || smartlist_len(sl) > 2) {
@@ -321,7 +333,7 @@ rend_config_services(const or_options_t *options, int validate_only)
 
   if (!validate_only) {
     old_service_list = rend_service_list;
-    rend_service_list = smartlist_create();
+    rend_service_list = smartlist_new();
   }
 
   for (line = options->RendConfigLines; line; line = line->next) {
@@ -334,7 +346,7 @@ rend_config_services(const or_options_t *options, int validate_only)
       }
       service = tor_malloc_zero(sizeof(rend_service_t));
       service->directory = tor_strdup(line->value);
-      service->ports = smartlist_create();
+      service->ports = smartlist_new();
       service->intro_period_started = time(NULL);
       service->n_intro_points_wanted = NUM_INTRO_POINTS_DEFAULT;
       continue;
@@ -365,7 +377,7 @@ rend_config_services(const or_options_t *options, int validate_only)
         rend_service_free(service);
         return -1;
       }
-      type_names_split = smartlist_create();
+      type_names_split = smartlist_new();
       smartlist_split_string(type_names_split, line->value, " ", 0, 2);
       if (smartlist_len(type_names_split) < 1) {
         log_warn(LD_BUG, "HiddenServiceAuthorizeClient has no value. This "
@@ -390,7 +402,7 @@ rend_config_services(const or_options_t *options, int validate_only)
         rend_service_free(service);
         return -1;
       }
-      service->clients = smartlist_create();
+      service->clients = smartlist_new();
       if (smartlist_len(type_names_split) < 2) {
         log_warn(LD_CONFIG, "HiddenServiceAuthorizeClient contains "
                             "auth-type '%s', but no client names.",
@@ -399,7 +411,7 @@ rend_config_services(const or_options_t *options, int validate_only)
         smartlist_free(type_names_split);
         continue;
       }
-      clients = smartlist_create();
+      clients = smartlist_new();
       smartlist_split_string(clients, smartlist_get(type_names_split, 1),
                              ",", SPLIT_SKIP_SPACE, 0);
       SMARTLIST_FOREACH(type_names_split, char *, cp, tor_free(cp));
@@ -482,7 +494,7 @@ rend_config_services(const or_options_t *options, int validate_only)
    * keep the introduction points that are still needed and close the
    * other ones. */
   if (old_service_list && !validate_only) {
-    smartlist_t *surviving_services = smartlist_create();
+    smartlist_t *surviving_services = smartlist_new();
     circuit_t *circ;
 
     /* Copy introduction points to new services. */
@@ -553,7 +565,7 @@ rend_service_update_descriptor(rend_service_t *service)
   d = service->desc = tor_malloc_zero(sizeof(rend_service_descriptor_t));
   d->pk = crypto_pk_dup_key(service->private_key);
   d->timestamp = time(NULL);
-  d->intro_nodes = smartlist_create();
+  d->intro_nodes = smartlist_new();
   /* Support intro protocols 2 and 3. */
   d->protocols = (1 << 2) + (1 << 3);
 
@@ -722,19 +734,19 @@ rend_service_load_keys(void)
           client->client_key = crypto_pk_dup_key(parsed->client_key);
         } else if (s->auth_type == REND_STEALTH_AUTH) {
           /* Create private key for client. */
-          crypto_pk_env_t *prkey = NULL;
-          if (!(prkey = crypto_new_pk_env())) {
+          crypto_pk_t *prkey = NULL;
+          if (!(prkey = crypto_pk_new())) {
             log_warn(LD_BUG,"Error constructing client key");
             goto err;
           }
           if (crypto_pk_generate_key(prkey)) {
             log_warn(LD_BUG,"Error generating client key");
-            crypto_free_pk_env(prkey);
+            crypto_pk_free(prkey);
             goto err;
           }
           if (crypto_pk_check_key(prkey) <= 0) {
             log_warn(LD_BUG,"Generated client key seems invalid");
-            crypto_free_pk_env(prkey);
+            crypto_pk_free(prkey);
             goto err;
           }
           client->client_key = prkey;
@@ -914,6 +926,106 @@ clean_accepted_intro_dh_parts(rend_service_t *service, time_t now)
   } DIGESTMAP_FOREACH_END;
 }
 
+/** Called when <b>intro</b> will soon be removed from
+ * <b>service</b>'s list of intro points. */
+static void
+rend_service_note_removing_intro_point(rend_service_t *service,
+                                       rend_intro_point_t *intro)
+{
+  time_t now = time(NULL);
+
+  /* Don't process an intro point twice here. */
+  if (intro->rend_service_note_removing_intro_point_called) {
+    return;
+  } else {
+    intro->rend_service_note_removing_intro_point_called = 1;
+  }
+
+  /* Update service->n_intro_points_wanted based on how long intro
+   * lasted and how many introductions it handled. */
+  if (intro->time_published == -1) {
+    /* This intro point was never used.  Don't change
+     * n_intro_points_wanted. */
+  } else {
+    /* We want to increase the number of introduction points service
+     * operates if intro was heavily used, or decrease the number of
+     * intro points if intro was lightly used.
+     *
+     * We consider an intro point's target 'usage' to be
+     * INTRO_POINT_LIFETIME_INTRODUCTIONS introductions in
+     * INTRO_POINT_LIFETIME_MIN_SECONDS seconds.  To calculate intro's
+     * fraction of target usage, we divide the fraction of
+     * _LIFETIME_INTRODUCTIONS introductions that it has handled by
+     * the fraction of _LIFETIME_MIN_SECONDS for which it existed.
+     *
+     * Then we multiply that fraction of desired usage by a fudge
+     * factor of 1.5, to decide how many new introduction points
+     * should ideally replace intro (which is now closed or soon to be
+     * closed).  In theory, assuming that introduction load is
+     * distributed equally across all intro points and ignoring the
+     * fact that different intro points are established and closed at
+     * different times, that number of intro points should bring all
+     * of our intro points exactly to our target usage.
+     *
+     * Then we clamp that number to a number of intro points we might
+     * be willing to replace this intro point with and turn it into an
+     * integer. then we clamp it again to the number of new intro
+     * points we could establish now, then we adjust
+     * service->n_intro_points_wanted and let rend_services_introduce
+     * create the new intro points we want (if any).
+     */
+    const double intro_point_usage =
+      intro_point_accepted_intro_count(intro) /
+      (double)(now - intro->time_published);
+    const double intro_point_target_usage =
+      INTRO_POINT_LIFETIME_INTRODUCTIONS /
+      (double)INTRO_POINT_LIFETIME_MIN_SECONDS;
+    const double fractional_n_intro_points_wanted_to_replace_this_one =
+      (1.5 * (intro_point_usage / intro_point_target_usage));
+    unsigned int n_intro_points_wanted_to_replace_this_one;
+    unsigned int n_intro_points_wanted_now;
+    unsigned int n_intro_points_really_wanted_now;
+    int n_intro_points_really_replacing_this_one;
+
+    if (fractional_n_intro_points_wanted_to_replace_this_one >
+        NUM_INTRO_POINTS_MAX) {
+      n_intro_points_wanted_to_replace_this_one = NUM_INTRO_POINTS_MAX;
+    } else if (fractional_n_intro_points_wanted_to_replace_this_one < 0) {
+      n_intro_points_wanted_to_replace_this_one = 0;
+    } else {
+      n_intro_points_wanted_to_replace_this_one = (unsigned)
+        fractional_n_intro_points_wanted_to_replace_this_one;
+    }
+
+    n_intro_points_wanted_now =
+      service->n_intro_points_wanted +
+      n_intro_points_wanted_to_replace_this_one - 1;
+
+    if (n_intro_points_wanted_now < NUM_INTRO_POINTS_DEFAULT) {
+      /* XXXX This should be NUM_INTRO_POINTS_MIN instead.  Perhaps
+       * another use of NUM_INTRO_POINTS_DEFAULT should be, too. */
+      n_intro_points_really_wanted_now = NUM_INTRO_POINTS_DEFAULT;
+    } else if (n_intro_points_wanted_now > NUM_INTRO_POINTS_MAX) {
+      n_intro_points_really_wanted_now = NUM_INTRO_POINTS_MAX;
+    } else {
+      n_intro_points_really_wanted_now = n_intro_points_wanted_now;
+    }
+
+    n_intro_points_really_replacing_this_one =
+      n_intro_points_really_wanted_now - service->n_intro_points_wanted + 1;
+
+    log_info(LD_REND, "Replacing closing intro point for service %s "
+             "with %d new intro points (wanted %g replacements); "
+             "service will now try to have %u intro points",
+             rend_service_describe_for_log(service),
+             n_intro_points_really_replacing_this_one,
+             fractional_n_intro_points_wanted_to_replace_this_one,
+             n_intro_points_really_wanted_now);
+
+    service->n_intro_points_wanted = n_intro_points_really_wanted_now;
+  }
+}
+
 /******
  * Handle cells
  ******/
@@ -934,19 +1046,19 @@ rend_service_introduce(origin_circuit_t *circuit, const uint8_t *request,
   rend_intro_point_t *intro_point;
   int r, i, v3_shift = 0;
   size_t len, keylen;
-  crypto_dh_env_t *dh = NULL;
+  crypto_dh_t *dh = NULL;
   origin_circuit_t *launched = NULL;
   crypt_path_t *cpath = NULL;
   char serviceid[REND_SERVICE_ID_LEN_BASE32+1];
   char hexcookie[9];
   int circ_needs_uptime;
   int reason = END_CIRC_REASON_TORPROTOCOL;
-  crypto_pk_env_t *intro_key;
+  crypto_pk_t *intro_key;
   char intro_key_digest[DIGEST_LEN];
   int auth_type;
   size_t auth_len = 0;
   char auth_data[REND_DESC_COOKIE_LEN];
-  crypto_digest_env_t *digest = NULL;
+  crypto_digest_t *digest = NULL;
   time_t now = time(NULL);
   char diffie_hellman_hash[DIGEST_LEN];
   time_t *access_time;
@@ -1166,10 +1278,10 @@ rend_service_introduce(origin_circuit_t *circuit, const uint8_t *request,
   base16_encode(hexcookie,9,r_cookie,4);
 
   /* Determine hash of Diffie-Hellman, part 1 to detect replays. */
-  digest = crypto_new_digest_env();
+  digest = crypto_digest_new();
   crypto_digest_add_bytes(digest, ptr+REND_COOKIE_LEN, DH_KEY_LEN);
   crypto_digest_get_digest(digest, diffie_hellman_hash, DIGEST_LEN);
-  crypto_free_digest_env(digest);
+  crypto_digest_free(digest);
 
   /* Check whether there is a past request with the same Diffie-Hellman,
    * part 1. */
@@ -1275,7 +1387,12 @@ rend_service_introduce(origin_circuit_t *circuit, const uint8_t *request,
   memcpy(launched->rend_data->rend_cookie, r_cookie, REND_COOKIE_LEN);
   strlcpy(launched->rend_data->onion_address, service->service_id,
           sizeof(launched->rend_data->onion_address));
-  launched->build_state->pending_final_cpath = cpath =
+
+  launched->build_state->service_pending_final_cpath_ref =
+    tor_malloc_zero(sizeof(crypt_path_reference_t));
+  launched->build_state->service_pending_final_cpath_ref->refcount = 1;
+
+  launched->build_state->service_pending_final_cpath_ref->cpath = cpath =
     tor_malloc_zero(sizeof(crypt_path_t));
   cpath->magic = CRYPT_PATH_MAGIC;
   launched->build_state->expiry_time = now + MAX_REND_TIMEOUT;
@@ -1309,6 +1426,17 @@ rend_service_relaunch_rendezvous(origin_circuit_t *oldcirc)
 
   tor_assert(oldcirc->_base.purpose == CIRCUIT_PURPOSE_S_CONNECT_REND);
 
+  /* Don't relaunch the same rend circ twice. */
+  if (oldcirc->hs_service_side_rend_circ_has_been_relaunched) {
+    log_info(LD_REND, "Rendezvous circuit to %s has already been relaunched; "
+             "not relaunching it again.",
+             oldcirc->build_state ?
+             safe_str(extend_info_describe(oldcirc->build_state->chosen_exit))
+             : "*unknown*");
+    return;
+  }
+  oldcirc->hs_service_side_rend_circ_has_been_relaunched = 1;
+
   if (!oldcirc->build_state ||
       oldcirc->build_state->failure_count > MAX_REND_FAILURES ||
       oldcirc->build_state->expiry_time < time(NULL)) {
@@ -1324,7 +1452,7 @@ rend_service_relaunch_rendezvous(origin_circuit_t *oldcirc)
   oldstate = oldcirc->build_state;
   tor_assert(oldstate);
 
-  if (oldstate->pending_final_cpath == NULL) {
+  if (oldstate->service_pending_final_cpath_ref == NULL) {
     log_info(LD_REND,"Skipping relaunch of circ that failed on its first hop. "
              "Initiator will retry.");
     return;
@@ -1346,8 +1474,9 @@ rend_service_relaunch_rendezvous(origin_circuit_t *oldcirc)
   tor_assert(newstate);
   newstate->failure_count = oldstate->failure_count+1;
   newstate->expiry_time = oldstate->expiry_time;
-  newstate->pending_final_cpath = oldstate->pending_final_cpath;
-  oldstate->pending_final_cpath = NULL;
+  newstate->service_pending_final_cpath_ref =
+    oldstate->service_pending_final_cpath_ref;
+  ++(newstate->service_pending_final_cpath_ref->refcount);
 
   newcirc->rend_data = rend_data_dup(oldcirc->rend_data);
 }
@@ -1439,7 +1568,7 @@ rend_service_intro_has_opened(origin_circuit_t *circuit)
   char auth[DIGEST_LEN + 9];
   char serviceid[REND_SERVICE_ID_LEN_BASE32+1];
   int reason = END_CIRC_REASON_TORPROTOCOL;
-  crypto_pk_env_t *intro_key;
+  crypto_pk_t *intro_key;
 
   tor_assert(circuit->_base.purpose == CIRCUIT_PURPOSE_S_ESTABLISH_INTRO);
 #ifndef NON_ANONYMOUS_MODE_ENABLED
@@ -1479,7 +1608,7 @@ rend_service_intro_has_opened(origin_circuit_t *circuit)
                "circuit, but we already have enough. Redefining purpose to "
                "general; leaving as internal.");
 
-      TO_CIRCUIT(circuit)->purpose = CIRCUIT_PURPOSE_C_GENERAL;
+      circuit_change_purpose(TO_CIRCUIT(circuit), CIRCUIT_PURPOSE_C_GENERAL);
 
       {
         rend_data_t *rend_data = circuit->rend_data;
@@ -1487,9 +1616,9 @@ rend_service_intro_has_opened(origin_circuit_t *circuit)
         rend_data_free(rend_data);
       }
       {
-        crypto_pk_env_t *intro_key = circuit->intro_key;
+        crypto_pk_t *intro_key = circuit->intro_key;
         circuit->intro_key = NULL;
-        crypto_free_pk_env(intro_key);
+        crypto_pk_free(intro_key);
       }
 
       circuit_has_opened(circuit);
@@ -1571,7 +1700,7 @@ rend_service_intro_established(origin_circuit_t *circuit,
     goto err;
   }
   service->desc_is_dirty = time(NULL);
-  circuit->_base.purpose = CIRCUIT_PURPOSE_S_INTRO;
+  circuit_change_purpose(TO_CIRCUIT(circuit), CIRCUIT_PURPOSE_S_INTRO);
 
   base32_encode(serviceid, REND_SERVICE_ID_LEN_BASE32 + 1,
                 circuit->rend_data->rend_pk_digest, REND_SERVICE_ID_LEN);
@@ -1605,8 +1734,7 @@ rend_service_rendezvous_has_opened(origin_circuit_t *circuit)
   tor_assert(!(circuit->build_state->onehop_tunnel));
 #endif
   tor_assert(circuit->rend_data);
-  hop = circuit->build_state->pending_final_cpath;
-  tor_assert(hop);
+  hop = circuit->build_state->service_pending_final_cpath_ref->cpath;
 
   base16_encode(hexcookie,9,circuit->rend_data->rend_cookie,4);
   base32_encode(serviceid, REND_SERVICE_ID_LEN_BASE32+1,
@@ -1617,11 +1745,32 @@ rend_service_rendezvous_has_opened(origin_circuit_t *circuit)
            "cookie %s for service %s",
            circuit->_base.n_circ_id, hexcookie, serviceid);
 
+  /* Clear the 'in-progress HS circ has timed out' flag for
+   * consistency with what happens on the client side; this line has
+   * no effect on Tor's behaviour. */
+  circuit->hs_circ_has_timed_out = 0;
+
+  /* If hop is NULL, another rend circ has already connected to this
+   * rend point.  Close this circ. */
+  if (hop == NULL) {
+    log_info(LD_REND, "Another rend circ has already reached this rend point; "
+             "closing this rend circ.");
+    reason = END_CIRC_REASON_NONE;
+    goto err;
+  }
+
+  /* Remove our final cpath element from the reference, so that no
+   * other circuit will try to use it.  Store it in
+   * pending_final_cpath for now to ensure that it will be freed if
+   * our rendezvous attempt fails. */
+  circuit->build_state->pending_final_cpath = hop;
+  circuit->build_state->service_pending_final_cpath_ref->cpath = NULL;
+
   service = rend_service_get_by_pk_digest(
                 circuit->rend_data->rend_pk_digest);
   if (!service) {
     log_warn(LD_GENERAL, "Internal error: unrecognized service ID on "
-             "introduction circuit.");
+             "rendezvous circuit.");
     reason = END_CIRC_REASON_INTERNAL;
     goto err;
   }
@@ -1662,7 +1811,7 @@ rend_service_rendezvous_has_opened(origin_circuit_t *circuit)
   circuit->build_state->pending_final_cpath = NULL; /* prevent double-free */
 
   /* Change the circuit purpose. */
-  circuit->_base.purpose = CIRCUIT_PURPOSE_S_REND_JOINED;
+  circuit_change_purpose(TO_CIRCUIT(circuit), CIRCUIT_PURPOSE_S_REND_JOINED);
 
   return;
  err:
@@ -1744,8 +1893,8 @@ directory_post_to_hs_dir(rend_service_descriptor_t *renddesc,
                          int seconds_valid)
 {
   int i, j, failed_upload = 0;
-  smartlist_t *responsible_dirs = smartlist_create();
-  smartlist_t *successful_uploads = smartlist_create();
+  smartlist_t *responsible_dirs = smartlist_new();
+  smartlist_t *successful_uploads = smartlist_new();
   routerstatus_t *hs_dir;
   for (i = 0; i < smartlist_len(descs); i++) {
     rend_encoded_v2_service_descriptor_t *desc = smartlist_get(descs, i);
@@ -1813,7 +1962,7 @@ directory_post_to_hs_dir(rend_service_descriptor_t *renddesc,
     /* Remember which routers worked this time, so that we don't upload the
      * descriptor to them again. */
     if (!renddesc->successful_uploads)
-      renddesc->successful_uploads = smartlist_create();
+      renddesc->successful_uploads = smartlist_new();
     SMARTLIST_FOREACH(successful_uploads, const char *, c, {
       if (!smartlist_digest_isin(renddesc->successful_uploads, c)) {
         char *hsdir_id = tor_memdup(c, DIGEST_LEN);
@@ -1843,15 +1992,15 @@ upload_service_descriptor(rend_service_t *service)
     networkstatus_t *c = networkstatus_get_latest_consensus();
     if (c && smartlist_len(c->routerstatus_list) > 0) {
       int seconds_valid, i, j, num_descs;
-      smartlist_t *descs = smartlist_create();
-      smartlist_t *client_cookies = smartlist_create();
+      smartlist_t *descs = smartlist_new();
+      smartlist_t *client_cookies = smartlist_new();
       /* Either upload a single descriptor (including replicas) or one
        * descriptor for each authorized client in case of authorization
        * type 'stealth'. */
       num_descs = service->auth_type == REND_STEALTH_AUTH ?
                       smartlist_len(service->clients) : 1;
       for (j = 0; j < num_descs; j++) {
-        crypto_pk_env_t *client_key = NULL;
+        crypto_pk_t *client_key = NULL;
         rend_authorized_client_t *client = NULL;
         smartlist_clear(client_cookies);
         switch (service->auth_type) {
@@ -1937,6 +2086,18 @@ upload_service_descriptor(rend_service_t *service)
   service->desc_is_dirty = 0;
 }
 
+/** Return the number of INTRODUCE2 cells this hidden service has received
+ * from this intro point. */
+static int
+intro_point_accepted_intro_count(rend_intro_point_t *intro)
+{
+  if (intro->accepted_intro_rsa_parts == NULL) {
+    return 0;
+  } else {
+    return digestmap_size(intro->accepted_intro_rsa_parts);
+  }
+}
+
 /** Return non-zero iff <b>intro</b> should 'expire' now (i.e. we
  * should stop publishing it in new descriptors and eventually close
  * it). */
@@ -1957,8 +2118,7 @@ intro_point_should_expire_now(rend_intro_point_t *intro,
     return 1;
   }
 
-  if (intro->accepted_intro_rsa_parts != NULL &&
-      digestmap_size(intro->accepted_intro_rsa_parts) >=
+  if (intro_point_accepted_intro_count(intro) >=
       INTRO_POINT_LIFETIME_INTRODUCTIONS) {
     /* This intro point has been used too many times.  Expire it now. */
     return 1;
@@ -2002,7 +2162,7 @@ rend_services_introduce(void)
   time_t now;
   const or_options_t *options = get_options();
 
-  intro_nodes = smartlist_create();
+  intro_nodes = smartlist_new();
   now = time(NULL);
 
   for (i=0; i < smartlist_len(rend_service_list); ++i) {
@@ -2061,6 +2221,7 @@ rend_services_introduce(void)
                  " (circuit disappeared).",
                  safe_str_client(extend_info_describe(intro->extend_info)),
                  safe_str_client(service->service_id));
+        rend_service_note_removing_intro_point(service, intro);
         if (intro->time_expiring != -1) {
           log_info(LD_REND, "We were already expiring the intro point; "
                    "no need to mark the HS descriptor as dirty over this.");
@@ -2082,6 +2243,8 @@ rend_services_introduce(void)
         log_info(LD_REND, "Expiring %s as intro point for %s.",
                  safe_str_client(extend_info_describe(intro->extend_info)),
                  safe_str_client(service->service_id));
+
+        rend_service_note_removing_intro_point(service, intro);
 
         /* The polite (and generally Right) way to expire an intro
          * point is to establish a new one to replace it, publish a
@@ -2160,7 +2323,7 @@ rend_services_introduce(void)
       smartlist_add(intro_nodes, (void*)node);
       intro = tor_malloc_zero(sizeof(rend_intro_point_t));
       intro->extend_info = extend_info_from_node(node, 0);
-      intro->intro_key = crypto_new_pk_env();
+      intro->intro_key = crypto_pk_new();
       tor_assert(!crypto_pk_generate_key(intro->intro_key));
       intro->time_published = -1;
       intro->time_to_expire = -1;
@@ -2326,7 +2489,7 @@ rend_service_set_connection_addr_port(edge_connection_t *conn,
              serviceid, circ->_base.n_circ_id);
     return -1;
   }
-  matching_ports = smartlist_create();
+  matching_ports = smartlist_new();
   SMARTLIST_FOREACH(service->ports, rend_service_port_config_t *, p,
   {
     if (conn->_base.port == p->virtual_port) {

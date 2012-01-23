@@ -44,7 +44,7 @@
 #include <pwd.h>
 #endif
 
-static connection_t *connection_create_listener(
+static connection_t *connection_listener_new(
                                const struct sockaddr *listensockaddr,
                                socklen_t listensocklen, int type,
                                const char *address,
@@ -244,7 +244,7 @@ or_connection_new(int socket_family)
   or_conn->timestamp_last_added_nonpadding = time(NULL);
   or_conn->next_circ_id = crypto_rand_int(1<<15);
 
-  or_conn->active_circuit_pqueue = smartlist_create();
+  or_conn->active_circuit_pqueue = smartlist_new();
   or_conn->active_circuit_pqueue_last_recalibrated = cell_ewma_get_tick();
 
   return or_conn;
@@ -372,7 +372,7 @@ connection_init(time_t now, connection_t *conn, int type, int socket_family)
       break;
   }
 
-  conn->s = -1; /* give it a default of 'not used' */
+  conn->s = TOR_INVALID_SOCKET; /* give it a default of 'not used' */
   conn->conn_array_index = -1; /* also default to 'not used' */
   conn->global_identifier = n_connections_allocated++;
 
@@ -395,8 +395,8 @@ connection_init(time_t now, connection_t *conn, int type, int socket_family)
 void
 connection_link_connections(connection_t *conn_a, connection_t *conn_b)
 {
-  tor_assert(conn_a->s < 0);
-  tor_assert(conn_b->s < 0);
+  tor_assert(! SOCKET_OK(conn_a->s));
+  tor_assert(! SOCKET_OK(conn_b->s));
 
   conn_a->linked = 1;
   conn_b->linked = 1;
@@ -540,7 +540,7 @@ _connection_free(connection_t *conn)
   if (SOCKET_OK(conn->s)) {
     log_debug(LD_NET,"closing fd %d.",(int)conn->s);
     tor_close_socket(conn->s);
-    conn->s = -1;
+    conn->s = TOR_INVALID_SOCKET;
   }
 
   if (conn->type == CONN_TYPE_OR &&
@@ -625,7 +625,7 @@ connection_about_to_close_connection(connection_t *conn)
 /** Return true iff connection_close_immediate() has been called on this
  * connection. */
 #define CONN_IS_CLOSED(c) \
-  ((c)->linked ? ((c)->linked_conn_is_closed) : ((c)->s < 0))
+  ((c)->linked ? ((c)->linked_conn_is_closed) : (! SOCKET_OK(c->s)))
 
 /** Close the underlying socket for <b>conn</b>, so we don't try to
  * flush it. Must be used in conjunction with (right before)
@@ -651,7 +651,7 @@ connection_close_immediate(connection_t *conn)
 
   if (SOCKET_OK(conn->s))
     tor_close_socket(conn->s);
-  conn->s = -1;
+  conn->s = TOR_INVALID_SOCKET;
   if (conn->linked)
     conn->linked_conn_is_closed = 1;
   if (conn->outbuf)
@@ -817,7 +817,7 @@ check_location_for_unix_socket(const or_options_t *options, const char *path)
     log_warn(LD_GENERAL, "Before Tor can create a control socket in %s, the "
              "directory %s needs to exist, and to be accessible only by the "
              "user%s account that is running Tor.  (On some Unix systems, "
-             "anybody who can list a socket can conect to it, so Tor is "
+             "anybody who can list a socket can connect to it, so Tor is "
              "being careful.)", escpath, escdir,
              options->ControlSocketsGroupWritable ? " and group" : "");
     tor_free(escpath);
@@ -858,7 +858,7 @@ make_socket_reuseable(tor_socket_t sock)
  * to the conn.
  */
 static connection_t *
-connection_create_listener(const struct sockaddr *listensockaddr,
+connection_listener_new(const struct sockaddr *listensockaddr,
                            socklen_t socklen,
                            int type, const char *address,
                            const port_cfg_t *port_cfg)
@@ -958,7 +958,7 @@ connection_create_listener(const struct sockaddr *listensockaddr,
       goto err;
     }
     s = tor_open_socket(AF_UNIX, SOCK_STREAM, 0);
-    if (s < 0) {
+    if (! SOCKET_OK(s)) {
       log_warn(LD_NET,"Socket creation failed: %s.", strerror(errno));
       goto err;
     }
@@ -1051,7 +1051,12 @@ connection_create_listener(const struct sockaddr *listensockaddr,
 }
 
 /** Do basic sanity checking on a newly received socket. Return 0
- * if it looks ok, else return -1. */
+ * if it looks ok, else return -1.
+ *
+ * Notably, some TCP stacks can erroneously have accept() return successfully
+ * with socklen 0, when the client sends an RST before the accept call (as
+ * nmap does).  We want to detect that, and not go on with the connection.
+ */
 static int
 check_sockaddr(struct sockaddr *sa, int len, int level)
 {
@@ -1117,14 +1122,14 @@ connection_handle_listener_read(connection_t *conn, int new_type)
   tor_socket_t news; /* the new socket */
   connection_t *newconn;
   /* information about the remote peer when connecting to other routers */
-  char addrbuf[256];
-  struct sockaddr *remote = (struct sockaddr*)addrbuf;
+  struct sockaddr_storage addrbuf;
+  struct sockaddr *remote = (struct sockaddr*)&addrbuf;
   /* length of the remote address. Must be whatever accept() needs. */
   socklen_t remotelen = (socklen_t)sizeof(addrbuf);
   const or_options_t *options = get_options();
 
   tor_assert((size_t)remotelen >= sizeof(struct sockaddr_in));
-  memset(addrbuf, 0, sizeof(addrbuf));
+  memset(&addrbuf, 0, sizeof(addrbuf));
 
   news = tor_accept_socket(conn->s,remote,&remotelen);
   if (!SOCKET_OK(news)) { /* accept() error */
@@ -1161,21 +1166,9 @@ connection_handle_listener_read(connection_t *conn, int new_type)
     uint16_t port;
     if (check_sockaddr(remote, remotelen, LOG_INFO)<0) {
       log_info(LD_NET,
-               "accept() returned a strange address; trying getsockname().");
-      remotelen=sizeof(addrbuf);
-      memset(addrbuf, 0, sizeof(addrbuf));
-      if (getsockname(news, remote, &remotelen)<0) {
-        int e = tor_socket_errno(news);
-        log_warn(LD_NET, "getsockname() for new connection failed: %s",
-                 tor_socket_strerror(e));
-      } else {
-        if (check_sockaddr((struct sockaddr*)addrbuf, remotelen,
-                              LOG_WARN) < 0) {
-          log_warn(LD_NET,"Something's wrong with this conn. Closing it.");
-          tor_close_socket(news);
-          return 0;
-        }
-      }
+               "accept() returned a strange address; closing connection.");
+      tor_close_socket(news);
+      return 0;
     }
 
     if (check_sockaddr_family_match(remote->sa_family, conn) < 0) {
@@ -1303,7 +1296,7 @@ connection_connect(connection_t *conn, const char *address,
 {
   tor_socket_t s;
   int inprogress = 0;
-  char addrbuf[256];
+  struct sockaddr_storage addrbuf;
   struct sockaddr *dest_addr;
   int dest_addr_len;
   const or_options_t *options = get_options();
@@ -1338,7 +1331,7 @@ connection_connect(connection_t *conn, const char *address,
   }
 
   s = tor_open_socket(protocol_family,SOCK_STREAM,IPPROTO_TCP);
-  if (s < 0) {
+  if (! SOCKET_OK(s)) {
     *socket_error = tor_socket_errno(-1);
     log_warn(LD_NET,"Error creating network socket: %s",
              tor_socket_strerror(*socket_error));
@@ -1371,8 +1364,8 @@ connection_connect(connection_t *conn, const char *address,
   if (options->ConstrainedSockets)
     set_constrained_socket_buffers(s, (int)options->ConstrainedSockSize);
 
-  memset(addrbuf,0,sizeof(addrbuf));
-  dest_addr = (struct sockaddr*) addrbuf;
+  memset(&addrbuf,0,sizeof(addrbuf));
+  dest_addr = (struct sockaddr*) &addrbuf;
   dest_addr_len = tor_addr_to_sockaddr(addr, port, dest_addr, sizeof(addrbuf));
   tor_assert(dest_addr_len > 0);
 
@@ -1797,7 +1790,7 @@ retry_listener_ports(smartlist_t *old_conns,
                      const smartlist_t *ports,
                      smartlist_t *new_conns)
 {
-  smartlist_t *launch = smartlist_create();
+  smartlist_t *launch = smartlist_new();
   int r = 0;
 
   smartlist_add_all(launch, ports);
@@ -1873,7 +1866,7 @@ retry_listener_ports(smartlist_t *old_conns,
     }
 
     if (listensockaddr) {
-      conn = connection_create_listener(listensockaddr, listensocklen,
+      conn = connection_listener_new(listensockaddr, listensocklen,
                                         port->type, address, port);
       tor_free(listensockaddr);
       tor_free(address);
@@ -1905,7 +1898,7 @@ int
 retry_all_listeners(smartlist_t *replaced_conns,
                     smartlist_t *new_conns)
 {
-  smartlist_t *listeners = smartlist_create();
+  smartlist_t *listeners = smartlist_new();
   const or_options_t *options = get_options();
   int retval = 0;
   const uint16_t old_or_port = router_get_advertised_or_port(options);
@@ -1963,7 +1956,7 @@ connection_mark_all_noncontrol_listeners(void)
   } SMARTLIST_FOREACH_END(conn);
 }
 
-/** Mark every external conection not used for controllers for close. */
+/** Mark every external connection not used for controllers for close. */
 void
 connection_mark_all_noncontrol_connections(void)
 {
@@ -2960,6 +2953,9 @@ connection_handle_event_cb(struct bufferevent *bufev, short event, void *arg)
 {
   connection_t *conn = arg;
   (void) bufev;
+  if (conn->marked_for_close)
+    return;
+
   if (event & BEV_EVENT_CONNECTED) {
     tor_assert(connection_state_is_connecting(conn));
     if (connection_finished_connecting(conn)<0)
@@ -3686,7 +3682,7 @@ client_check_address_changed(tor_socket_t sock)
   if (!last_interface_ip)
     get_interface_address(LOG_INFO, &last_interface_ip);
   if (!outgoing_addrs)
-    outgoing_addrs = smartlist_create();
+    outgoing_addrs = smartlist_new();
 
   if (getsockname(sock, (struct sockaddr*)&out_addr, &out_addr_len)<0) {
     int e = tor_socket_errno(sock);

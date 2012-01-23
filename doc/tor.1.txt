@@ -111,10 +111,21 @@ Other options can be specified either on the command-line (--option
     published in the consensus and your relay will use that value. (Default: 0)
 
 **ClientTransportPlugin** __transport__ socks4|socks5 __IP__:__PORT__::
-    When set along with a corresponding Bridge line, the Tor client
-    forwards its traffic to a SOCKS-speaking proxy on "IP:PORT". It's
-    the duty of that proxy to properly forward the traffic to the
-    bridge.
+**ClientTransportPlugin** __transport__ exec __path-to-binary__ [options]::
+    In its first form, when set along with a corresponding Bridge line, the Tor
+    client forwards its traffic to a SOCKS-speaking proxy on "IP:PORT". It's the
+    duty of that proxy to properly forward the traffic to the bridge. +
+ +
+    In its second form, when set along with a corresponding Bridge line, the Tor
+    client launches the pluggable transport proxy exacutable in
+    __path-to-binary__ using __options__ as its command-line options, and
+    forwards its traffic to it. It's the duty of that proxy to properly forward
+    the traffic to the bridge.
+
+**ServerTransportPlugin** __transport__ exec __path-to-binary__ [options]::
+    The Tor relay launches the pluggable transport proxy in __path-to-binary__
+    using __options__ as its command-line options, and expects to receive
+    proxied client traffic from it.
 
 **ConnLimit** __NUM__::
     The minimum number of file descriptors that must be available to the Tor
@@ -282,8 +293,8 @@ Other options can be specified either on the command-line (--option
    to alter the system wide ptrace scope as it may not even exist. If you wish
    to attach to Tor with a debugger such as gdb or strace you will want to set
    this to 0 for the duration of your debugging. Normal users should leave it
-   on. (Default: 1)
- 
+   on. Disabling this option while Tor is running is prohibited. (Default: 1)
+
 **FetchDirInfoEarly** **0**|**1**::
     If set to 1, Tor will always fetch directory information like other
     directory caches, even if you don't meet the normal criteria for fetching
@@ -487,6 +498,21 @@ Other options can be specified either on the command-line (--option
     and you're running on Windows, setting this option to 1 will tell Libevent
     not to use the Windows IOCP networking API.  (Default: 1)
 
+**UserspaceIOCPBuffers** **0**|**1**::
+    If IOCP is enabled (see DisableIOCP above), setting this option to 1
+    will tell Tor to disable kernel-space TCP buffers, in order to avoid
+    needless copy operations and try not to run out of non-paged RAM.
+    This feature is experimental; don't use it yet unless you're eager to
+    help tracking down bugs. (Default: 0)
+
+**_UseFilteringSSLBufferevents** **0**|**1**::
+    Tells Tor to do its SSL communication using a chain of
+    bufferevents: one for SSL and one for networking.  This option has no
+    effect if bufferevents are disabled (in which case it can't turn on), or
+    if IOCP bufferevents are enabled (in which case it can't turn off).  This
+    option is useful for debugging only; most users shouldn't touch it.
+    (Default: 0)
+
 **CountPrivateBandwidth** **0**|**1**::
     If this option is set, then Tor's rate-limiting applies not only to
     remote connections, but also to connections to private addresses like
@@ -644,16 +670,6 @@ The following options are useful only for clients (that is, if
     **FascistFirewall** is set. This option is deprecated; use ReachableAddresses
     instead. (Default: 80, 443)
 
-**HidServAuth** __onion-address__ __auth-cookie__ [__service-name__]::
-    Client authorization for a hidden service. Valid onion addresses contain 16
-    characters in a-z2-7 plus ".onion", and valid auth cookies contain 22
-    characters in A-Za-z0-9+/. The service name is only used for internal
-    purposes, e.g., for Tor controllers. This option may be used multiple times
-    for different hidden services. If a hidden service uses authorization and
-    this option is not set, the hidden service is not accessible. Hidden
-    services can be configured to require authorization using the 
-    **HiddenServiceAuthorizeClient** option.
-
 **ReachableAddresses** __ADDR__[/__MASK__][:__PORT__]...::
     A comma-separated list of IP addresses and ports that your firewall allows
     you to connect to. The format is as for the addresses in ExitPolicy, except
@@ -682,6 +698,34 @@ The following options are useful only for clients (that is, if
     TLS connections (which Tor uses to connect to Onion Routers) to port 443,
     and some limit HTTP GET requests (which Tor uses for fetching directory
     information) to port 80.
+
+**HidServAuth** __onion-address__ __auth-cookie__ [__service-name__]::
+    Client authorization for a hidden service. Valid onion addresses contain 16
+    characters in a-z2-7 plus ".onion", and valid auth cookies contain 22
+    characters in A-Za-z0-9+/. The service name is only used for internal
+    purposes, e.g., for Tor controllers. This option may be used multiple times
+    for different hidden services. If a hidden service uses authorization and
+    this option is not set, the hidden service is not accessible. Hidden
+    services can be configured to require authorization using the 
+    **HiddenServiceAuthorizeClient** option.
+
+**CloseHSClientCircuitsImmediatelyOnTimeout** **0**|**1**::
+    If 1, Tor will close unfinished hidden service client circuits
+    which have not moved closer to connecting to their destination
+    hidden service when their internal state has not changed for the
+    duration of the current circuit-build timeout.  Otherwise, such
+    circuits will be left open, in the hope that they will finish
+    connecting to their destination hidden services.  In either case,
+    another set of introduction and rendezvous circuits for the same
+    destination hidden service will be launched. (Default: 0)
+
+**CloseHSServiceRendCircuitsImmediatelyOnTimeout** **0**|**1**::
+    If 1, Tor will close unfinished hidden-service-side rendezvous
+    circuits after the current circuit-build timeout.  Otherwise, such
+    circuits will be left open, in the hope that they will finish
+    connecting to their destinations.  In either case, another
+    rendezvous circuit for the same destination client will be
+    launched. (Default: 0)
 
 **LongLivedPorts** __PORTS__::
     A list of ports for services that tend to have long-running connections
@@ -738,6 +782,11 @@ The following options are useful only for clients (that is, if
     Feel free to reuse a circuit that was first used at most NUM seconds ago,
     but never attach a new stream to a circuit that is too old. (Default: 10
     minutes)
+
+**MaxClientCircuitsPending** __NUM__::
+    Do not allow more than NUM circuits to be pending at a time for handling
+    client streams. A circuit is pending if we have begun constructing it,
+    but it has not yet been completely constructed.  (Default: 32)
 
 **NodeFamily** __node__,__node__,__...__::
     The Tor servers, defined by their identity fingerprints or nicknames,
@@ -1023,6 +1072,15 @@ The following options are useful only for clients (that is, if
     running a tor2web Hidden Service web proxy.
     To enable this option the compile time flag --enable-tor2webmode must be
     specified. (Default: 0)
+
+**UseMicrodescriptors** **0**|**1**|**auto**::
+    Microdescriptors are a smaller version of the information that Tor needs
+    in order to build its circuits.  Using microdescriptors makes Tor clients
+    download less directory information, thus saving bandwidth.  Directory
+    caches need to fetch regular descriptors and microdescriptors, so this
+    option doesn't save any bandwidth for them.  If this option is set to
+    "auto" (recommended) then it is on for all clients that do not set
+    FetchUselessDescriptors. (Default: auto)
 
 SERVER OPTIONS
 --------------
@@ -1444,6 +1502,18 @@ DIRECTORY AUTHORITY SERVER OPTIONS
     authority publishes, or accepted as an OR address in any descriptor
     submitted for publication by this authority.
 
+**AuthDirBadDirCCs** __CC__,... +
+
+**AuthDirBadExitCCs** __CC__,... +
+
+**AuthDirInvalidCCs** __CC__,... +
+
+**AuthDirRejectCCs** __CC__,...::
+    Authoritative directories only. These options contain a comma-separated
+    list of country codes such that any server in one of those country codes
+    will be marked as a bad directory/bad exit/invalid for use, or rejected
+    entirely.
+
 **AuthDirListBadDirs** **0**|**1**::
     Authoritative directories only. If set to 1, this directory has some
     opinion about which nodes are unsuitable as directory caches. (Do not set
@@ -1534,6 +1604,10 @@ DIRECTORY AUTHORITY SERVER OPTIONS
     When this option is set in addition to **AuthoritativeDirectory**, Tor
     votes on whether to accept relays as hidden service directories.
     (Default: 1)
+
+GiveGuardFlagTo_CVE_2011_2768_VulnerableRelays **0**|**1**::
+    When this option is set to 0, do not vote to give the Guard flag to any
+    version of Tor vulnerable to CVE-2011-2769. (Default: 0)
 
 HIDDEN SERVICE OPTIONS
 ----------------------
