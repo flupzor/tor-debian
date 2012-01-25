@@ -1,3 +1,11 @@
+tor (0.2.3.11-alpha-2) experimental; urgency=low
+
+  * init script:  use the new defaults torrc file also for when we
+    try to check our configuration (tor --verify-config) prior to starting
+    tor.  (Might close TorBug#4954.)
+
+ -- Peter Palfrader <weasel@debian.org>  Wed, 25 Jan 2012 22:52:03 +0100
+
 tor (0.2.3.11-alpha-1) experimental; urgency=low
 
   * New upstream version.

@@ -25,6 +25,7 @@ TORPID=$TORPIDDIR/tor.pid
 DEFAULTSFILE=/etc/default/$NAME
 WAITFORDAEMON=60
 DEFAULT_ARGS="--defaults-torrc /usr/share/tor/tor-service-defaults-torrc"
+VERIFY_ARGS="--verify-config $DEFAULT_ARGS"
 ARGS=""
 # Let's try to figure our some sane defaults:
 if [ -r /proc/sys/fs/file-max ]; then
@@ -101,7 +102,7 @@ check_torpiddir () {
 }
 
 check_config () {
-	if ! $DAEMON --verify-config > /dev/null; then
+	if ! $DAEMON $VERIFY_ARGS > /dev/null; then
 		echo "ABORTED: Tor configuration invalid:" >&2
 		$DAEMON --verify-config >&2
 		exit 1
