@@ -21,7 +21,7 @@
 #endif
 
 #include <assert.h>
-#ifdef MS_WINDOWS /*wrkard for dtls1.h >= 0.9.8m of "#include <winsock.h>"*/
+#ifdef _WIN32 /*wrkard for dtls1.h >= 0.9.8m of "#include <winsock.h>"*/
  #ifndef WIN32_WINNT
  #define WIN32_WINNT 0x400
  #endif
@@ -83,7 +83,7 @@
      (OPENSSL_VERSION_NUMBER >= OPENSSL_V_SERIES(0,9,9) &&      \
       OPENSSL_VERSION_NUMBER <  OPENSSL_V(1,0,0,'f')))
 /* This is a version of OpenSSL before 0.9.8s/1.0.0f. It does not have
- * the CVE-2011-4657 fix, and as such it can't use RELEASE_BUFFERS and
+ * the CVE-2011-4576 fix, and as such it can't use RELEASE_BUFFERS and
  * SSL3 safely at the same time.
  */
 #define DISABLE_SSL3_HANDSHAKE
@@ -333,7 +333,7 @@ tls_log_errors(tor_tls_t *tls, int severity, int domain, const char *doing)
 static int
 tor_errno_to_tls_error(int e)
 {
-#if defined(MS_WINDOWS)
+#if defined(_WIN32)
   switch (e) {
     case WSAECONNRESET: // most common
       return TOR_TLS_ERROR_CONNRESET;
@@ -1182,9 +1182,9 @@ tor_tls_context_new(crypto_pk_t *identity, unsigned int key_lifetime,
       SSLeay()  <  OPENSSL_V(0,9,8,'s') ||
       (SSLeay() >= OPENSSL_V_SERIES(0,9,9) &&
        SSLeay() <  OPENSSL_V(1,0,0,'f'))) {
-    /* And not SSL3 if it's subject to CVE-2011-4657. */
+    /* And not SSL3 if it's subject to CVE-2011-4576. */
     log_info(LD_NET, "Disabling SSLv3 because this OpenSSL version "
-             "might otherwise be vulnerable to CVE-2011-4657 "
+             "might otherwise be vulnerable to CVE-2011-4576 "
              "(compile-time version %08lx (%s); "
              "runtime version %08lx (%s))",
              (unsigned long)OPENSSL_VERSION_NUMBER, OPENSSL_VERSION_TEXT,

@@ -837,7 +837,7 @@ check_location_for_unix_socket(const or_options_t *options, const char *path)
 static void
 make_socket_reuseable(tor_socket_t sock)
 {
-#ifdef MS_WINDOWS
+#ifdef _WIN32
   (void) sock;
 #else
   int one=1;
@@ -1317,7 +1317,7 @@ connection_connect(connection_t *conn, const char *address,
      * Warn if we do, and refuse to make the connection. */
     static ratelim_t disablenet_violated = RATELIM_INIT(30*60);
     char *m;
-#ifdef MS_WINDOWS
+#ifdef _WIN32
     *socket_error = WSAENETUNREACH;
 #else
     *socket_error = ENETUNREACH;
@@ -1337,6 +1337,8 @@ connection_connect(connection_t *conn, const char *address,
              tor_socket_strerror(*socket_error));
     return -1;
   }
+
+  make_socket_reuseable(s);
 
   if (options->OutboundBindAddress && !tor_addr_is_loopback(addr)) {
     struct sockaddr_in ext_addr;
@@ -1371,8 +1373,6 @@ connection_connect(connection_t *conn, const char *address,
 
   log_debug(LD_NET, "Connecting to %s:%u.",
             escaped_safe_str_client(address), port);
-
-  make_socket_reuseable(s);
 
   if (connect(s, dest_addr, (socklen_t)dest_addr_len) < 0) {
     int e = tor_socket_errno(s);
