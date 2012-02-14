@@ -25,7 +25,7 @@ else
 		--disabled-password \
 		--home /var/lib/tor \
 		--no-create-home \
-		--shell /bin/bash \
+		--shell /bin/false \
 		--group \
 		debian-tor
 fi
